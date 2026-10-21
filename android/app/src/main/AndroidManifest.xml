@@ -5,6 +5,13 @@
     <!-- To find the Wi-Fi network that hosts the relay when mobile data is the default. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Lets the engine benchmark (androidTest) bind other installed TTS engines for comparison. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <!-- The relay runs on the LAN over plain HTTP. -->
     <application
         android:allowBackup="false"
