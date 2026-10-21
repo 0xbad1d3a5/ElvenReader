@@ -1,0 +1,27 @@
+[project]
+name = "voicestudio-tts-relay"
+version = "0.1.0"
+description = "Relay that lets an Android system TTS engine use VoiceStudio running on a PC"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "aiohttp>=3.10",
+    "qrcode>=7.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-aiohttp>=1.0"]
+
+[project.scripts]
+vs-relay = "vs_relay.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vs_relay"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
