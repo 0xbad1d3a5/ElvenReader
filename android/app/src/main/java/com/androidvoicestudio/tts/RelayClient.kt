@@ -10,7 +10,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-data class RelayVoice(val id: String, val name: String, val language: String?)
+data class RelayVoice(val id: String, val name: String, val language: String?, val stable: Boolean = true)
 
 data class SynthesisParams(
     val text: String,
@@ -53,6 +53,7 @@ class RelayClient(baseUrl: String, private val token: String) {
                 id = v.optString("id"),
                 name = v.optString("name", v.optString("id")),
                 language = v.optString("language").takeIf { it.isNotBlank() && it != "null" },
+                stable = v.optBoolean("stable", true),
             )
         }
     }

@@ -146,7 +146,7 @@ ReadEra's own speed control still works: it's multiplied by the app's **Speed** 
 
 | Setting | Meaning |
 |---------|---------|
-| Voice | *Engine default voice* or any voice profile saved in VoiceStudio, including clones. Tap **Save & test connection** to refresh the list. |
+| Voice | Any voice profile saved in VoiceStudio. Profiles with reference audio (clones, or designed voices you **locked** to a clip) are listed first and sound the same every sentence. The app picks the first one automatically, and the relay does the same if no voice is set (override with `"default_voice"` in `server\data\config.json`). *Random voice* sends no reference, so OmniVoice invents a new speaker on every sentence. Tap **Save & test connection** to refresh the list. |
 | Style instruction | Optional OmniVoice instruction, e.g. `calm, low pitch, british accent`. |
 | Language | *Follow the reading app's language* sends the book's language (e.g. "English") to VoiceStudio. *Let VoiceStudio detect it* sends none. *Always use* sends a fixed name. |
 | Speed | 0.5×–2.0×, multiplied by the reading app's rate. |
@@ -174,7 +174,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 |-------|-------------|
 | `GET /api/ping` | Liveness check; no auth needed. |
 | `GET /api/health` | Relay status, plus VoiceStudio's reachability, version, engine and model status. |
-| `GET /api/voices` | `{"voices": [{"id", "name", "type", "language"}]}`. The id `""` means the engine default. |
+| `GET /api/voices` | `{"voices": [{"id", "name", "type", "language", "stable"}]}`. Consistent profiles come first; the id `random` means no reference voice. |
 | `POST /api/tts` | Body `{"text", "voice"?, "language"?, "speed"?, "instruct"?}`. Returns `200` with a chunked raw **PCM16LE mono** body; the `X-Sample-Rate` header (24000) gives the rate. Errors before any audio come back as JSON `{"error": ...}` with status 400, 401, 413, 502, 503 or 504. A failure mid-stream aborts the connection. Closing the connection cancels synthesis. |
 | `GET /pair` | Pairing landing page; the token stays in the URL fragment. |
 | `GET /` | QR codes. Only served to loopback clients. |

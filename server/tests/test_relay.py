@@ -29,7 +29,17 @@ class FakeVoiceStudio:
         app.router.add_get("/health", self.health)
         app.router.add_get("/engines/tts", self.engines)
         app.router.add_get("/v1/audio/voices", self.voices)
+        app.router.add_get("/profiles", self.profiles)
         return app
+
+    async def profiles(self, request):
+        return web.json_response(
+            [
+                {"id": "designed1", "name": "Designed", "ref_audio_path": "", "is_locked": 0, "locked_audio_path": ""},
+                {"id": "demo0001", "name": "Demo", "ref_audio_path": "demo0001.wav", "language": "English"},
+                {"id": "locked1", "name": "Locked", "ref_audio_path": "", "is_locked": 1, "locked_audio_path": "l.wav"},
+            ]
+        )
 
     async def status(self, request):
         return web.json_response(self.model_status)
@@ -170,9 +180,30 @@ async def test_health_reports_voicestudio(relay):
     assert data["voicestudio"]["model_status"] == "ready"
 
 
-async def test_voices_collapses_aliases(relay):
+async def test_voices_lists_consistent_profiles_first_and_random_last(relay):
     data = await (await relay.get("/api/voices", headers=AUTH)).json()
-    assert [v["id"] for v in data["voices"]] == ["", "demo0001"]
+    assert [v["id"] for v in data["voices"]] == ["demo0001", "locked1", "designed1", "random"]
+    assert [v["stable"] for v in data["voices"]] == [True, True, False, False]
+
+
+async def test_tts_without_voice_uses_first_consistent_profile(relay, fake_vs):
+    resp = await relay.post("/api/tts", json={"text": "Hello."}, headers=AUTH)
+    assert resp.status == 200
+    await resp.read()
+    assert fake_vs.requests[-1]["voice"] == "demo0001"
+
+
+async def test_tts_random_voice_sends_no_reference(relay, fake_vs):
+    resp = await relay.post("/api/tts", json={"text": "Hello.", "voice": "random"}, headers=AUTH)
+    await resp.read()
+    assert "voice" not in fake_vs.requests[-1]
+
+
+async def test_tts_configured_default_voice_wins(aiohttp_client, fake_vs):
+    cfg = RelayConfig(token=TOKEN, voicestudio_url=fake_vs.url, default_voice="locked1")
+    client = await aiohttp_client(make_app(cfg))
+    await (await client.post("/api/tts", json={"text": "Hello."}, headers=AUTH)).read()
+    assert fake_vs.requests[-1]["voice"] == "locked1"
 
 
 async def test_tts_streams_pcm(relay, fake_vs):

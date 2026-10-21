@@ -165,6 +165,16 @@ private fun SettingsScreen(settings: TtsSettings, pairing: MutableState<Pair<Str
             result.onSuccess { (health, list) ->
                 connection = describeHealth(health)
                 voices = list
+                // Never leave the engine without a reference voice: OmniVoice would
+                // then invent a different speaker for every sentence.
+                if (list.none { it.id == voiceId }) {
+                    list.firstOrNull { it.stable }?.let { v ->
+                        voiceId = v.id
+                        voiceName = v.name
+                        settings.voiceId = v.id
+                        settings.voiceName = v.name
+                    }
+                }
             }.onFailure { e ->
                 connection = when ((e as? RelayHttpException)?.code) {
                     401 -> "The relay rejected the token. Re-pair or check the token."
@@ -262,7 +272,7 @@ private fun SettingsScreen(settings: TtsSettings, pairing: MutableState<Pair<Str
 
         Section("Voice") {
             val options = voices.ifEmpty {
-                listOf(RelayVoice(voiceId, voiceName.ifBlank { "Engine default voice" }, null))
+                listOf(RelayVoice(voiceId, voiceName.ifBlank { "Relay default voice" }, null))
             }
             options.forEach { v ->
                 ChoiceRow(
@@ -276,6 +286,13 @@ private fun SettingsScreen(settings: TtsSettings, pairing: MutableState<Pair<Str
                 }
             }
             if (voices.isEmpty()) Text("Connect to load the voice profiles saved in VoiceStudio.")
+            if (voices.isNotEmpty() && voices.none { it.stable }) {
+                Text(
+                    "No saved voice has reference audio, so the speaker will change every sentence. " +
+                        "Clone a voice (or lock a designed one) in VoiceStudio, then reconnect.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             OutlinedTextField(
                 value = instruct,
                 onValueChange = { instruct = it; settings.instruct = it },

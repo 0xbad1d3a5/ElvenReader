@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -12,6 +13,8 @@ import aiohttp
 logger = logging.getLogger("vs_relay.voicestudio")
 
 DEFAULT_SAMPLE_RATE = 24000
+# Voice id meaning "no reference voice": OmniVoice picks a new speaker each time.
+RANDOM_VOICE = "random"
 
 
 class VoiceStudioError(Exception):
@@ -49,6 +52,7 @@ class VoiceStudioClient:
         self.connect_timeout_s = connect_timeout_s
         self.first_audio_timeout_s = first_audio_timeout_s
         self.chunk_timeout_s = chunk_timeout_s
+        self._default_voice_cache: tuple[float, str | None] | None = None
 
     async def _get_json(self, path: str, timeout_s: float = 10.0):
         try:
@@ -91,24 +95,52 @@ class VoiceStudioClient:
         return out
 
     async def voices(self) -> list[dict]:
-        """Saved VoiceStudio voice profiles.
+        """Saved VoiceStudio voice profiles, consistent ones first.
 
-        The OpenAI alias voices (alloy, nova, ...) all map to the engine's default
-        voice, so they are collapsed into one "default" entry.
+        A profile with reference audio (a clone, or a designed voice that was
+        locked to a clip) sounds the same every time. Without a reference,
+        OmniVoice invents a new speaker for every request, so that option is
+        offered last and labelled as random.
         """
-        data = await self._get_json("/v1/audio/voices")
-        voices = [{"id": "", "name": "Engine default voice", "type": "default", "language": None}]
-        for v in data.get("voices", []):
-            if v.get("type") == "profile" and v.get("voice_id"):
-                voices.append(
-                    {
-                        "id": v["voice_id"],
-                        "name": v.get("name") or v["voice_id"],
-                        "type": "profile",
-                        "language": v.get("language"),
-                    }
-                )
+        profiles = await self._get_json("/profiles")
+        voices = []
+        for p in profiles if isinstance(profiles, list) else []:
+            if not p.get("id"):
+                continue
+            stable = bool(p.get("ref_audio_path") or (p.get("is_locked") and p.get("locked_audio_path")))
+            voices.append(
+                {
+                    "id": p["id"],
+                    "name": p.get("name") or p["id"],
+                    "type": "profile",
+                    "language": p.get("language") or None,
+                    "stable": stable,
+                }
+            )
+        voices.sort(key=lambda v: not v["stable"])
+        voices.append(
+            {
+                "id": RANDOM_VOICE,
+                "name": "Random voice (changes every sentence)",
+                "type": "random",
+                "language": None,
+                "stable": False,
+            }
+        )
         return voices
+
+    async def default_voice(self) -> str | None:
+        """First consistent profile, used when the phone has not chosen a voice."""
+        now = time.monotonic()
+        if self._default_voice_cache and now - self._default_voice_cache[0] < 60:
+            return self._default_voice_cache[1]
+        try:
+            voices = await self.voices()
+        except VoiceStudioError:
+            return None
+        voice = next((v["id"] for v in voices if v["stable"]), None)
+        self._default_voice_cache = (now, voice)
+        return voice
 
     async def ensure_ready(self) -> None:
         """Fail fast while VoiceStudio is still loading/downloading its model."""

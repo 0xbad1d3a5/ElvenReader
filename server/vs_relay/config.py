@@ -31,6 +31,9 @@ class RelayConfig:
     host: str = "0.0.0.0"
     port: int = DEFAULT_PORT
     voicestudio_url: str = DEFAULT_VOICESTUDIO_URL
+    # Voice profile used when the phone has not picked one. Empty = first saved
+    # profile with reference audio, so the speaker never changes between sentences.
+    default_voice: str = ""
     # Waiting for the first audio covers a cold model load in VoiceStudio.
     first_audio_timeout_s: float = 90.0
     # Gap allowed between audio chunks (one sentence of synthesis).

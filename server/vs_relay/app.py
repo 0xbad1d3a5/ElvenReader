@@ -17,7 +17,7 @@ from . import __version__
 from .config import RelayConfig
 from .netinfo import lan_addresses
 from .text import MAX_TEXT_CHARS, clamp_speed, clean_text, is_speakable
-from .voicestudio import AudioChunk, StreamStart, VoiceStudioClient, VoiceStudioError
+from .voicestudio import RANDOM_VOICE, AudioChunk, StreamStart, VoiceStudioClient, VoiceStudioError
 
 logger = logging.getLogger("vs_relay")
 
@@ -99,12 +99,20 @@ async def tts(request: web.Request) -> web.StreamResponse:
         return web.Response(body=b"", headers=_audio_headers(24000))
 
     payload: dict = {"text": text, "speed": clamp_speed(body.get("speed"))}
-    for key in ("voice", "language", "instruct"):
+    for key in ("language", "instruct"):
         value = body.get(key)
         if isinstance(value, str) and value.strip():
             payload[key] = value.strip()
 
     vs = request.app[VS_KEY]
+    voice = body.get("voice")
+    voice = voice.strip() if isinstance(voice, str) else ""
+    if not voice:
+        # Without a reference voice OmniVoice changes speaker on every sentence.
+        voice = request.app[CONFIG_KEY].default_voice or (await vs.default_voice()) or ""
+    if voice and voice != RANDOM_VOICE:
+        payload["voice"] = voice
+
     try:
         await vs.ensure_ready()
     except VoiceStudioError as exc:
@@ -146,8 +154,9 @@ async def tts(request: web.Request) -> web.StreamResponse:
         return web.Response(body=b"", headers=_audio_headers(24000))
     await resp.write_eof()
     logger.info(
-        "tts %d chars -> %.1fs audio, first audio %s, total %.2fs",
+        "tts %d chars, voice %s -> %.1fs audio, first audio %s, total %.2fs",
         len(text),
+        payload.get("voice", "random"),
         total / 2 / 24000,
         f"{first_audio * 1000:.0f}ms" if first_audio is not None else "n/a",
         time.perf_counter() - t0,
