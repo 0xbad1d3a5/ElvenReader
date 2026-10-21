@@ -160,9 +160,12 @@ ReadEra's own speed control still works: it's multiplied by the app's **Speed** 
   rule, that the network is *Private*, and that the phone is on the same Wi-Fi. From the
   phone's browser, `http://<pc-ip>:3950/api/ping` should return JSON.
 * **The relay rejected the token:** you rotated the token. Pair again.
-* **Gaps between sentences:** each sentence is synthesized on demand. If ReadEra queues
-  sentences ahead, Android synthesizes the next one while the current one plays. Otherwise the
-  gap is roughly VoiceStudio's synthesis time for that sentence.
+* **Gaps between sentences:** ReadEra requests each sentence only after the previous one has
+  finished playing, so every gap includes VoiceStudio's synthesis time for the next sentence
+  (about 0.6 s on an RTX 5080). The relay removes VoiceStudio's ~0.2 s of padding at each end
+  of a clip, which cuts about 0.3 s from every gap. Set `"trim_silence": false` in
+  `server\data\config.json` to turn that off. Lowering OmniVoice's step count barely helps:
+  4 steps saves only ~0.13 s, because most of the time is fixed overhead.
 * **PC unreachable mid-chapter:** the engine fails the utterance within a few seconds
   (`ERROR_NETWORK`) instead of hanging, and ReadEra stops reading.
 

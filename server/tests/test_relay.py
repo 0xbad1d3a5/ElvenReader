@@ -100,7 +100,9 @@ async def fake_vs(aiohttp_server):
 
 @pytest.fixture
 async def relay(aiohttp_client, fake_vs):
-    cfg = RelayConfig(token=TOKEN, voicestudio_url=fake_vs.url, first_audio_timeout_s=5, chunk_timeout_s=5)
+    cfg = RelayConfig(
+        token=TOKEN, voicestudio_url=fake_vs.url, first_audio_timeout_s=5, chunk_timeout_s=5, trim_silence=False
+    )
     return await aiohttp_client(make_app(cfg))
 
 
@@ -237,6 +239,15 @@ async def test_tts_unspeakable_text_returns_silence_without_calling_voicestudio(
 async def test_tts_rejects_bad_body(relay):
     resp = await relay.post("/api/tts", data=b"not json", headers=AUTH)
     assert resp.status == 400
+
+
+async def test_tts_trims_padding_when_enabled(aiohttp_client, fake_vs):
+    # The fake's PCM is all below the silence threshold, so a trimmed stream is empty.
+    cfg = RelayConfig(token=TOKEN, voicestudio_url=fake_vs.url, trim_silence=True)
+    client = await aiohttp_client(make_app(cfg))
+    resp = await client.post("/api/tts", json={"text": "Hello."}, headers=AUTH)
+    assert resp.status == 200
+    assert await resp.read() == b""
 
 
 async def test_tts_error_before_audio_is_json(relay):

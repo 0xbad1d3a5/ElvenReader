@@ -14,6 +14,7 @@ import aiohttp
 from aiohttp import web
 
 from . import __version__
+from .audio import SilenceTrimmer
 from .config import RelayConfig
 from .netinfo import lan_addresses
 from .text import MAX_TEXT_CHARS, clamp_speed, clean_text, is_speakable
@@ -121,6 +122,7 @@ async def tts(request: web.Request) -> web.StreamResponse:
     t0 = time.perf_counter()
     first_audio: float | None = None
     total = 0
+    trimmer: SilenceTrimmer | None = None
     resp: web.StreamResponse | None = None
     stream = vs.stream_tts(payload)
     try:
@@ -130,11 +132,21 @@ async def tts(request: web.Request) -> web.StreamResponse:
                     resp = web.StreamResponse(headers=_audio_headers(event.sample_rate))
                     resp.enable_chunked_encoding()
                     await resp.prepare(request)
+                    if request.app[CONFIG_KEY].trim_silence:
+                        trimmer = SilenceTrimmer(event.sample_rate)
                 elif isinstance(event, AudioChunk) and resp is not None:
+                    pcm = trimmer.feed(event.pcm) if trimmer else event.pcm
+                    if not pcm:
+                        continue
                     if first_audio is None:
                         first_audio = time.perf_counter() - t0
-                    total += len(event.pcm)
-                    await resp.write(event.pcm)
+                    total += len(pcm)
+                    await resp.write(pcm)
+            if trimmer is not None and resp is not None:
+                tail = trimmer.flush()
+                if tail:
+                    total += len(tail)
+                    await resp.write(tail)
     except VoiceStudioError as exc:
         if resp is None:
             logger.warning("tts failed: %s", exc.detail)

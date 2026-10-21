@@ -34,6 +34,9 @@ class RelayConfig:
     # Voice profile used when the phone has not picked one. Empty = first saved
     # profile with reference audio, so the speaker never changes between sentences.
     default_voice: str = ""
+    # Cut VoiceStudio's ~150 ms start/end padding: readers wait for each sentence
+    # to finish before requesting the next, so padding lengthens every gap.
+    trim_silence: bool = True
     # Waiting for the first audio covers a cold model load in VoiceStudio.
     first_audio_timeout_s: float = 90.0
     # Gap allowed between audio chunks (one sentence of synthesis).
