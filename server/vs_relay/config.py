@@ -51,7 +51,8 @@ def load_config(data_dir: Path | None = None) -> RelayConfig:
     path = data_dir / "config.json"
     raw: dict = {}
     if path.exists():
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        # utf-8-sig: tolerate the BOM that Notepad / Windows PowerShell add when editing by hand.
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
     if not raw.get("token"):
         raw["token"] = generate_token()
     known = RelayConfig.__dataclass_fields__.keys()
@@ -74,7 +75,7 @@ def load_config(data_dir: Path | None = None) -> RelayConfig:
 def rotate_token(data_dir: Path | None = None) -> RelayConfig:
     data_dir = data_dir or default_data_dir()
     path = data_dir / "config.json"
-    raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    raw = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     raw["token"] = generate_token()
     data_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(raw, indent=2), encoding="utf-8")

@@ -144,6 +144,13 @@ def test_config_creates_and_persists_token(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "config.json").read_text())["token"] == first.token
 
 
+def test_config_tolerates_bom(tmp_path, monkeypatch):
+    monkeypatch.delenv("VS_RELAY_TOKEN", raising=False)
+    (tmp_path / "config.json").write_bytes(b'\xef\xbb\xbf{"token": "abc", "default_voice": "v1"}')
+    cfg = load_config(tmp_path)
+    assert (cfg.token, cfg.default_voice) == ("abc", "v1")
+
+
 # ---------------------------------------------------------------- auth
 
 
