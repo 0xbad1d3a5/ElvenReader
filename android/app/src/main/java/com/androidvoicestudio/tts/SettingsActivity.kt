@@ -45,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -138,6 +139,7 @@ private fun SettingsScreen(settings: TtsSettings, pairing: MutableState<Pair<Str
     var languageMode by remember { mutableStateOf(settings.languageMode) }
     var fixedLanguage by remember { mutableStateOf(settings.fixedLanguage) }
     var speed by remember { mutableFloatStateOf(settings.speed) }
+    var sentencePause by remember { mutableIntStateOf(settings.sentencePauseMs) }
     var instruct by remember { mutableStateOf(settings.instruct) }
     var sample by remember { mutableStateOf(context.getString(R.string.sample_text)) }
     var testStatus by remember { mutableStateOf<String?>(null) }
@@ -322,13 +324,20 @@ private fun SettingsScreen(settings: TtsSettings, pairing: MutableState<Pair<Str
             }
         }
 
-        Section("Speed") {
+        Section("Speed and pacing") {
             Text(String.format(Locale.ROOT, "%.2f× (multiplied by the reading app's speed)", speed))
             Slider(
                 value = speed,
                 onValueChange = { speed = (it * 20).toInt() / 20f },
                 onValueChangeFinished = { settings.speed = speed },
                 valueRange = 0.5f..2.0f,
+            )
+            Text("Pause after sentences: $sentencePause ms (a third of it after commas)")
+            Slider(
+                value = sentencePause.toFloat(),
+                onValueChange = { sentencePause = (it / 50).toInt() * 50 },
+                onValueChangeFinished = { settings.sentencePauseMs = sentencePause },
+                valueRange = 0f..1000f,
             )
         }
 

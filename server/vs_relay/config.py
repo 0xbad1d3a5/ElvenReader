@@ -37,6 +37,9 @@ class RelayConfig:
     # Cut VoiceStudio's ~150 ms start/end padding: readers wait for each sentence
     # to finish before requesting the next, so padding lengthens every gap.
     trim_silence: bool = True
+    # Silence added after an utterance ending a sentence (a third of it after a
+    # clause). The phone can override it per request.
+    sentence_pause_ms: int = 300
     # Waiting for the first audio covers a cold model load in VoiceStudio.
     first_audio_timeout_s: float = 90.0
     # Gap allowed between audio chunks (one sentence of synthesis).

@@ -21,6 +21,7 @@ data class SynthesisParams(
     val language: String?,
     val speed: Float,
     val instruct: String?,
+    val sentencePauseMs: Int = TtsSettings.DEFAULT_SENTENCE_PAUSE_MS,
 )
 
 /** HTTP error from the relay, carrying its status code and `{"error": ...}` detail. */
@@ -41,6 +42,7 @@ class RelayClient(baseUrl: String, private val token: String, network: Network? 
         val json = JSONObject()
             .put("text", params.text)
             .put("speed", params.speed.toDouble())
+            .put("sentence_pause_ms", params.sentencePauseMs)
         params.voice?.takeIf { it.isNotBlank() }?.let { json.put("voice", it) }
         params.language?.takeIf { it.isNotBlank() }?.let { json.put("language", it) }
         params.instruct?.takeIf { it.isNotBlank() }?.let { json.put("instruct", it) }

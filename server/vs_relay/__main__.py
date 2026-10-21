@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import sys
 
 from aiohttp import web
@@ -53,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     data_dir = default_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    file_log = logging.handlers.RotatingFileHandler(
+        data_dir / "relay.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+    )
+    file_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(file_log)
     cfg = rotate_token(data_dir) if args.rotate_token else load_config(data_dir)
     if args.host:
         cfg.host = args.host

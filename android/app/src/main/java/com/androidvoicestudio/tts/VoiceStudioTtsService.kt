@@ -80,6 +80,7 @@ class VoiceStudioTtsService : TextToSpeechService() {
             language = settings.languageHint(request.language),
             speed = (settings.speed * rate / 100f).coerceIn(0.5f, 2.5f),
             instruct = settings.instruct,
+            sentencePauseMs = settings.sentencePauseMs,
         )
         val call = RelayClient.create(this, settings.serverUrl, settings.token).ttsCall(params)
         currentCall = call

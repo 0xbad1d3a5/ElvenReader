@@ -101,7 +101,12 @@ async def fake_vs(aiohttp_server):
 @pytest.fixture
 async def relay(aiohttp_client, fake_vs):
     cfg = RelayConfig(
-        token=TOKEN, voicestudio_url=fake_vs.url, first_audio_timeout_s=5, chunk_timeout_s=5, trim_silence=False
+        token=TOKEN,
+        voicestudio_url=fake_vs.url,
+        first_audio_timeout_s=5,
+        chunk_timeout_s=5,
+        trim_silence=False,
+        sentence_pause_ms=0,
     )
     return await aiohttp_client(make_app(cfg))
 
@@ -248,6 +253,27 @@ async def test_tts_trims_padding_when_enabled(aiohttp_client, fake_vs):
     resp = await client.post("/api/tts", json={"text": "Hello."}, headers=AUTH)
     assert resp.status == 200
     assert await resp.read() == b""
+
+
+@pytest.mark.parametrize(
+    "text,body_pause,expected_ms",
+    [
+        ("A full sentence.", None, 300),  # config default
+        ("He said \u201cstop!\u201d", None, 300),
+        ("A clause,", None, 100),
+        ("no punctuation", None, 0),
+        ("A full sentence.", 600, 600),  # phone override
+        ("A full sentence.", 0, 0),
+    ],
+)
+async def test_tts_appends_pause_after_sentences(aiohttp_client, fake_vs, text, body_pause, expected_ms):
+    cfg = RelayConfig(token=TOKEN, voicestudio_url=fake_vs.url, trim_silence=False, sentence_pause_ms=300)
+    client = await aiohttp_client(make_app(cfg))
+    body = {"text": text, **({"sentence_pause_ms": body_pause} if body_pause is not None else {})}
+    data = await (await client.post("/api/tts", json=body, headers=AUTH)).read()
+    audio = b"".join(PCM)
+    assert data[: len(audio)] == audio
+    assert data[len(audio):] == bytes(24 * expected_ms * 2)
 
 
 async def test_tts_error_before_audio_is_json(relay):

@@ -42,6 +42,11 @@ class TtsSettings(context: Context) {
         get() = prefs.getString(KEY_INSTRUCT, "").orEmpty()
         set(value) = prefs.edit { putString(KEY_INSTRUCT, value) }
 
+    /** Silence added after a sentence (a third of it after a clause). */
+    var sentencePauseMs: Int
+        get() = prefs.getInt(KEY_SENTENCE_PAUSE, DEFAULT_SENTENCE_PAUSE_MS)
+        set(value) = prefs.edit { putInt(KEY_SENTENCE_PAUSE, value) }
+
     val lastError: String
         get() = prefs.getString(KEY_LAST_ERROR, "").orEmpty()
 
@@ -61,6 +66,9 @@ class TtsSettings(context: Context) {
         const val LANGUAGE_FROM_READER = "reader"
         const val LANGUAGE_AUTO = "auto"
         const val LANGUAGE_FIXED = "fixed"
+        const val DEFAULT_SENTENCE_PAUSE_MS = 300
+
+        private const val KEY_SENTENCE_PAUSE = "sentence_pause_ms"
 
         private const val KEY_URL = "server_url"
         private const val KEY_TOKEN = "token"

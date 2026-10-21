@@ -17,7 +17,7 @@ from . import __version__
 from .audio import SilenceTrimmer
 from .config import RelayConfig
 from .netinfo import lan_addresses
-from .text import MAX_TEXT_CHARS, clamp_speed, clean_text, is_speakable
+from .text import MAX_TEXT_CHARS, clamp_pause_ms, clamp_speed, clean_text, is_speakable, trailing_pause_ms
 from .voicestudio import RANDOM_VOICE, AudioChunk, StreamStart, VoiceStudioClient, VoiceStudioError
 
 logger = logging.getLogger("vs_relay")
@@ -122,6 +122,8 @@ async def tts(request: web.Request) -> web.StreamResponse:
     t0 = time.perf_counter()
     first_audio: float | None = None
     total = 0
+    sample_rate = 24000
+    sentence_pause_ms = clamp_pause_ms(body.get("sentence_pause_ms"), request.app[CONFIG_KEY].sentence_pause_ms)
     trimmer: SilenceTrimmer | None = None
     resp: web.StreamResponse | None = None
     stream = vs.stream_tts(payload)
@@ -129,6 +131,7 @@ async def tts(request: web.Request) -> web.StreamResponse:
         async with contextlib.aclosing(stream):
             async for event in stream:
                 if isinstance(event, StreamStart):
+                    sample_rate = event.sample_rate
                     resp = web.StreamResponse(headers=_audio_headers(event.sample_rate))
                     resp.enable_chunked_encoding()
                     await resp.prepare(request)
@@ -147,6 +150,12 @@ async def tts(request: web.Request) -> web.StreamResponse:
                 if tail:
                     total += len(tail)
                     await resp.write(tail)
+            if resp is not None and total:
+                pause_ms = trailing_pause_ms(text, sentence_pause_ms)
+                if pause_ms:
+                    silence = bytes(int(sample_rate * pause_ms / 1000) * 2)
+                    total += len(silence)
+                    await resp.write(silence)
     except VoiceStudioError as exc:
         if resp is None:
             logger.warning("tts failed: %s", exc.detail)

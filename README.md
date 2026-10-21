@@ -55,7 +55,8 @@ stored in `server\data\config.json` (git-ignored). Useful options:
 ```
 
 Environment overrides: `VS_RELAY_PORT`, `VS_RELAY_HOST`, `VS_RELAY_TOKEN`, `VOICESTUDIO_URL`
-and `VS_RELAY_DATA`.
+and `VS_RELAY_DATA`. The relay logs every request, with its voice, audio length and time to first
+audio, to `server\data\relay.log`.
 
 > **First use after installing VoiceStudio:** VoiceStudio downloads and loads its model
 > (about 2.5 GB) the first time it synthesizes. Until that finishes, the relay answers with
@@ -150,6 +151,7 @@ ReadEra's own speed control still works: it's multiplied by the app's **Speed** 
 | Style instruction | Optional OmniVoice instruction, e.g. `calm, low pitch, british accent`. |
 | Language | *Follow the reading app's language* sends the book's language (e.g. "English") to VoiceStudio. *Let VoiceStudio detect it* sends none. *Always use* sends a fixed name. |
 | Speed | 0.5×–2.0×, multiplied by the reading app's rate. |
+| Pause after sentences | 0–1000 ms of silence added after an utterance that ends a sentence (`.` `!` `?` `…`, even with a closing quote); a third of it after `,` `;` `:` or a dash. Default 300 ms. |
 | Test voice | Speaks the sample text through the engine, exactly as ReadEra would. |
 
 ## Troubleshooting
