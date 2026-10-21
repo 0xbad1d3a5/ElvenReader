@@ -82,12 +82,13 @@ class VoiceStudioTtsService : TextToSpeechService() {
             instruct = settings.instruct,
             sentencePauseMs = settings.sentencePauseMs,
         )
-        val call = RelayClient.create(this, settings.serverUrl, settings.token).ttsCall(params)
-        currentCall = call
-        if (stopRequested) call.cancel()
+        val client = RelayClient.create(this, settings.serverUrl, settings.token)
 
         try {
-            call.execute().use { resp ->
+            client.executeTts(params) { call ->
+                currentCall = call
+                if (stopRequested) call.cancel()
+            }.use { resp ->
                 RelayClient.ensureSuccess(resp)
                 val sampleRate = resp.header("X-Sample-Rate")?.toIntOrNull() ?: DEFAULT_SAMPLE_RATE
                 if (callback.start(sampleRate, AudioFormat.ENCODING_PCM_16BIT, 1) != TextToSpeech.SUCCESS) {
@@ -107,7 +108,7 @@ class VoiceStudioTtsService : TextToSpeechService() {
                 if (settings.lastError.isNotEmpty()) settings.recordError(null)
             }
         } catch (e: IOException) {
-            if (stopRequested || call.isCanceled()) return
+            if (stopRequested || currentCall?.isCanceled() == true) return
             val code = when (e) {
                 is RelayHttpException -> when (e.code) {
                     400, 413 -> TextToSpeech.ERROR_INVALID_REQUEST

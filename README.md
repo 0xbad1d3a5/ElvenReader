@@ -164,7 +164,9 @@ ReadEra's own speed control still works: it's multiplied by the app's **Speed** 
 * **Phone on Wi-Fi but routing over mobile data:** Samsung's *Switch to mobile data* (Adaptive
   Wi-Fi) and Android's weak-Wi-Fi fallback can keep Wi-Fi connected while sending all traffic
   over mobile data, which can't reach a LAN address. The engine handles this: when the server
-  URL is a local IP, it binds its connections to the network that owns that subnet.
+  URL is a local IP, it binds its connections to the network that owns that subnet. If a VPN
+  (WireGuard, a work-profile VPN, …) is the app's default network, the engine leaves routing to
+  the VPN, and it falls back to unbound connections if Android refuses the binding (EPERM).
 * **The relay rejected the token:** you rotated the token. Pair again.
 * **Gaps between sentences:** ReadEra requests each sentence only after the previous one has
   finished playing, so every gap includes VoiceStudio's synthesis time for the next sentence

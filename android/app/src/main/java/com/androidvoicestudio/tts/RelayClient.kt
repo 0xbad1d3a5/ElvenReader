@@ -28,7 +28,7 @@ data class SynthesisParams(
 class RelayHttpException(val code: Int, message: String) : IOException(message)
 
 /** Talks to the PC relay (server/vs_relay). All calls are blocking; use a background thread. */
-class RelayClient(baseUrl: String, private val token: String, network: Network? = null) {
+class RelayClient(baseUrl: String, private val token: String, private val network: Network? = null) {
     private val base = normalizeServerUrl(baseUrl)
     private val ttsHttp = clientFor(http, network)
     private val settingsHttp = clientFor(baseSettingsHttp, network)
@@ -37,8 +37,27 @@ class RelayClient(baseUrl: String, private val token: String, network: Network? 
         .url(base + path)
         .header("Authorization", "Bearer $token")
 
-    /** A call for `POST /api/tts`; the response body is raw PCM16LE mono. */
-    fun ttsCall(params: SynthesisParams): Call {
+    /**
+     * Runs [block] on the network-bound client; if Android refuses the binding
+     * (EPERM, e.g. an always-on VPN that forbids bypass), retries unbound once and
+     * stops binding for the rest of the process.
+     */
+    private fun <T> withFallback(block: (bound: Boolean) -> T): T {
+        if (network == null) return block(false)
+        return try {
+            block(true)
+        } catch (e: IOException) {
+            if (!isBindRefusal(e)) throw e
+            LocalNetworks.bindingRefused = true
+            block(false)
+        }
+    }
+
+    /**
+     * Executes `POST /api/tts`; the response body is raw PCM16LE mono. [register]
+     * receives each [Call] before it runs so the caller can cancel it.
+     */
+    fun executeTts(params: SynthesisParams, register: (Call) -> Unit): Response {
         val json = JSONObject()
             .put("text", params.text)
             .put("speed", params.speed.toDouble())
@@ -46,8 +65,13 @@ class RelayClient(baseUrl: String, private val token: String, network: Network? 
         params.voice?.takeIf { it.isNotBlank() }?.let { json.put("voice", it) }
         params.language?.takeIf { it.isNotBlank() }?.let { json.put("language", it) }
         params.instruct?.takeIf { it.isNotBlank() }?.let { json.put("instruct", it) }
-        val body = json.toString().toRequestBody(JSON)
-        return ttsHttp.newCall(request("/api/tts").post(body).build())
+        val body = json.toString()
+        return withFallback { bound ->
+            val call = (if (bound) ttsHttp else http)
+                .newCall(request("/api/tts").post(body.toRequestBody(JSON)).build())
+            register(call)
+            call.execute()
+        }
     }
 
     fun health(): JSONObject = getJson("/api/health")
@@ -65,10 +89,10 @@ class RelayClient(baseUrl: String, private val token: String, network: Network? 
         }
     }
 
-    private fun getJson(path: String): JSONObject {
-        settingsHttp.newCall(request(path).get().build()).execute().use { resp ->
+    private fun getJson(path: String): JSONObject = withFallback { bound ->
+        (if (bound) settingsHttp else baseSettingsHttp).newCall(request(path).get().build()).execute().use { resp ->
             ensureSuccess(resp)
-            return JSONObject(resp.body?.string().orEmpty())
+            JSONObject(resp.body?.string().orEmpty())
         }
     }
 

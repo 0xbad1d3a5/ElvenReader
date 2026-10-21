@@ -94,6 +94,14 @@ class TextTest {
     }
 
     @Test
+    fun detectsBindRefusal() {
+        val refused = java.net.SocketException("Binding socket to network 112 failed: EPERM (Operation not permitted)")
+        assertTrue(isBindRefusal(refused))
+        assertTrue(isBindRefusal(java.io.IOException("wrapped", refused)))
+        assertFalse(isBindRefusal(java.net.ConnectException("failed to connect: ECONNREFUSED")))
+    }
+
+    @Test
     fun parsesIpLiteralsWithoutDns() {
         assertArrayEquals(byteArrayOf(192.toByte(), 168.toByte(), 86, 10), parseIpLiteral("192.168.86.10"))
         assertEquals(16, parseIpLiteral("fd00::1")?.size)

@@ -66,6 +66,7 @@ class EngineInstrumentedTest {
         if (::saved.isInitialized) {
             settings.serverUrl = saved.first
             settings.token = saved.second
+            settings.recordError(null) // don't leave test failures in the user's "Last error"
         }
     }
 

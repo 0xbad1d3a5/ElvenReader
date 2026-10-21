@@ -17,9 +17,16 @@ import java.net.URI
  * that owns that subnet instead of trusting the system default.
  */
 object LocalNetworks {
+    /** Set once binding was refused (e.g. a VPN that forbids bypass); stop trying afterwards. */
+    @Volatile var bindingRefused = false
+
     fun networkFor(context: Context, serverUrl: String): Network? {
+        if (bindingRefused) return null
         val target = hostOf(serverUrl)?.let(::parseIpLiteral) ?: return null
         val cm = context.getSystemService(ConnectivityManager::class.java) ?: return null
+        // Behind a VPN, routing is the VPN's decision and binding around it is usually refused.
+        val active = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        if (active?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) return null
         @Suppress("DEPRECATION") // allNetworks is the simplest synchronous snapshot
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
@@ -65,4 +72,14 @@ fun prefixContains(network: ByteArray, prefixLength: Int, address: ByteArray): B
     if (remBits == 0) return true
     val mask = (0xFF shl (8 - remBits)) and 0xFF
     return (network[fullBytes].toInt() and mask) == (address[fullBytes].toInt() and mask)
+}
+
+/** True when Android refused to bind a socket to a network (e.g. "bind ... failed: EPERM"). */
+fun isBindRefusal(e: Throwable): Boolean {
+    var t: Throwable? = e
+    while (t != null) {
+        if (t.message?.contains("EPERM") == true) return true
+        t = t.cause
+    }
+    return false
 }
