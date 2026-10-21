@@ -156,7 +156,7 @@ private fun SettingsScreen(settings: TtsSettings, pairing: MutableState<Pair<Str
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val client = RelayClient(settings.serverUrl, settings.token)
+                    val client = RelayClient.create(context, settings.serverUrl, settings.token)
                     val health = client.health()
                     val list = runCatching { client.voices() }.getOrDefault(emptyList())
                     health to list

@@ -92,4 +92,25 @@ class TextTest {
         assertEquals("http://[fd00::1]:3950", normalizeServerUrl("[fd00::1]"))
         assertEquals("", normalizeServerUrl("  "))
     }
+
+    @Test
+    fun parsesIpLiteralsWithoutDns() {
+        assertArrayEquals(byteArrayOf(192.toByte(), 168.toByte(), 86, 10), parseIpLiteral("192.168.86.10"))
+        assertEquals(16, parseIpLiteral("fd00::1")?.size)
+        assertEquals(null, parseIpLiteral("my-pc.lan"))
+        assertEquals(null, parseIpLiteral("300.1.1.1"))
+        assertEquals(null, parseIpLiteral("1.2.3"))
+    }
+
+    @Test
+    fun prefixMatching() {
+        val lan = parseIpLiteral("192.168.86.21")!!
+        assertTrue(prefixContains(lan, 24, parseIpLiteral("192.168.86.10")!!))
+        assertFalse(prefixContains(lan, 24, parseIpLiteral("192.168.87.10")!!))
+        assertTrue(prefixContains(parseIpLiteral("10.77.77.2")!!, 20, parseIpLiteral("10.77.64.1")!!))
+        assertFalse(prefixContains(parseIpLiteral("10.77.77.2")!!, 20, parseIpLiteral("10.77.96.1")!!))
+        assertFalse(prefixContains(lan, 24, parseIpLiteral("fd00::1")!!))
+        assertEquals("192.168.86.10", LocalNetworks.hostOf("192.168.86.10"))
+        assertEquals("fd00::1", LocalNetworks.hostOf("[fd00::1]:3950"))
+    }
 }

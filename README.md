@@ -159,6 +159,10 @@ ReadEra's own speed control still works: it's multiplied by the app's **Speed** 
 * **Could not reach the relay:** check that the relay is running, that you added the firewall
   rule, that the network is *Private*, and that the phone is on the same Wi-Fi. From the
   phone's browser, `http://<pc-ip>:3950/api/ping` should return JSON.
+* **Phone on Wi-Fi but routing over mobile data:** Samsung's *Switch to mobile data* (Adaptive
+  Wi-Fi) and Android's weak-Wi-Fi fallback can keep Wi-Fi connected while sending all traffic
+  over mobile data, which can't reach a LAN address. The engine handles this: when the server
+  URL is a local IP, it binds its connections to the network that owns that subnet.
 * **The relay rejected the token:** you rotated the token. Pair again.
 * **Gaps between sentences:** ReadEra requests each sentence only after the previous one has
   finished playing, so every gap includes VoiceStudio's synthesis time for the next sentence

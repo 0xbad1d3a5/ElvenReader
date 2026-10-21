@@ -1,5 +1,7 @@
 package com.androidvoicestudio.tts
 
+import android.content.Context
+import android.net.Network
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -8,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 data class RelayVoice(val id: String, val name: String, val language: String?, val stable: Boolean = true)
@@ -24,8 +27,10 @@ data class SynthesisParams(
 class RelayHttpException(val code: Int, message: String) : IOException(message)
 
 /** Talks to the PC relay (server/vs_relay). All calls are blocking; use a background thread. */
-class RelayClient(baseUrl: String, private val token: String) {
+class RelayClient(baseUrl: String, private val token: String, network: Network? = null) {
     private val base = normalizeServerUrl(baseUrl)
+    private val ttsHttp = clientFor(http, network)
+    private val settingsHttp = clientFor(baseSettingsHttp, network)
 
     private fun request(path: String) = Request.Builder()
         .url(base + path)
@@ -40,7 +45,7 @@ class RelayClient(baseUrl: String, private val token: String) {
         params.language?.takeIf { it.isNotBlank() }?.let { json.put("language", it) }
         params.instruct?.takeIf { it.isNotBlank() }?.let { json.put("instruct", it) }
         val body = json.toString().toRequestBody(JSON)
-        return http.newCall(request("/api/tts").post(body).build())
+        return ttsHttp.newCall(request("/api/tts").post(body).build())
     }
 
     fun health(): JSONObject = getJson("/api/health")
@@ -68,6 +73,18 @@ class RelayClient(baseUrl: String, private val token: String) {
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
 
+        /** Client bound to the local network that hosts the relay, when there is one. */
+        fun create(context: Context, baseUrl: String, token: String): RelayClient =
+            RelayClient(baseUrl, token, LocalNetworks.networkFor(context, baseUrl))
+
+        private val boundClients = ConcurrentHashMap<Pair<Network, OkHttpClient>, OkHttpClient>()
+
+        private fun clientFor(base: OkHttpClient, network: Network?): OkHttpClient =
+            if (network == null) base
+            else boundClients.getOrPut(network to base) {
+                base.newBuilder().socketFactory(network.socketFactory).build()
+            }
+
         /**
          * Short connect timeout so an unreachable PC fails quickly; long read timeout
          * because the first sentence may wait for VoiceStudio to warm up (the relay
@@ -79,7 +96,7 @@ class RelayClient(baseUrl: String, private val token: String) {
             .readTimeout(75, TimeUnit.SECONDS)
             .build()
 
-        private val settingsHttp: OkHttpClient = http.newBuilder()
+        private val baseSettingsHttp: OkHttpClient = http.newBuilder()
             .readTimeout(15, TimeUnit.SECONDS)
             .build()
 

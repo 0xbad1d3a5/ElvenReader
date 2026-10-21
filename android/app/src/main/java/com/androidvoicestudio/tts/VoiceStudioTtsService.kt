@@ -81,7 +81,7 @@ class VoiceStudioTtsService : TextToSpeechService() {
             speed = (settings.speed * rate / 100f).coerceIn(0.5f, 2.5f),
             instruct = settings.instruct,
         )
-        val call = RelayClient(settings.serverUrl, settings.token).ttsCall(params)
+        val call = RelayClient.create(this, settings.serverUrl, settings.token).ttsCall(params)
         currentCall = call
         if (stopRequested) call.cancel()
 
