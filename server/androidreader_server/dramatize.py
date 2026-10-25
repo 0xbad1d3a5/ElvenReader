@@ -73,6 +73,7 @@ class Chunk:
     chapter: int
     paragraphs: list[int]
     quotes: list[tuple[str, int, int, int]]  # (quote id, paragraph, start, end)
+    tense: str | None = None  # narration tense, for books that switch narrators by tense
 
 
 _POV_RE = re.compile(r"\bPOV\b|point of view|['\u2019]s side\b|\bside\s*[:\u2014-]", re.IGNORECASE)
@@ -83,7 +84,10 @@ def is_pov_marker(text: str) -> bool:
     return len(text) <= 60 and bool(_POV_RE.search(text))
 
 
-def make_chunks(book: dict, max_words: int = 600) -> list[Chunk]:
+def make_chunks(book: dict, max_words: int = 600, runs: list[tuple[int, int, str]] | None = None) -> list[Chunk]:
+    """Chunks of about `max_words` with quotations; `runs` (from mixed_tense_runs) adds tense breaks."""
+    switches = {(c, p): t for c, p, t in runs or []}
+    tense = None
     chunks: list[Chunk] = []
     for ci, ch in enumerate(book.get("chapters", [])):
         paras: list[str] = ch.get("paragraphs", [])
@@ -92,20 +96,25 @@ def make_chunks(book: dict, max_words: int = 600) -> list[Chunk]:
             qid, p, s, e = q
             by_para.setdefault(int(p), []).append((str(qid), int(p), int(s), int(e)))
         current: list[int] = []
+        current_tense = tense
         words = 0
         k = 0
 
         def flush():
             nonlocal current, words, k
             if any(p in by_para for p in current):
-                chunks.append(Chunk(f"c{ci}k{k}", ci, current, [q for p in current for q in by_para.get(p, [])]))
+                chunks.append(Chunk(f"c{ci}k{k}", ci, current, [q for p in current for q in by_para.get(p, [])],
+                                    current_tense))
                 k += 1
             current, words = [], 0
 
         for pi, text in enumerate(paras):
             # A point-of-view change starts a new chunk, so each chunk has one narrator.
-            if current and is_pov_marker(text):
+            if current and (is_pov_marker(text) or (ci, pi) in switches):
                 flush()
+            tense = switches.get((ci, pi), tense)
+            if not current:
+                current_tense = tense
             current.append(pi)
             words += len(text.split())
             if words >= max_words:
@@ -115,13 +124,13 @@ def make_chunks(book: dict, max_words: int = 600) -> list[Chunk]:
     return chunks
 
 
-def pov_change(book: dict, chunk: Chunk) -> str | None:
+def pov_change(book: dict, chunk: Chunk, use_title: bool = True) -> str | None:
     """The point-of-view heading this chunk starts with (or its chapter title), if any."""
     chapter = book["chapters"][chunk.chapter]
     first = chapter["paragraphs"][chunk.paragraphs[0]]
     if is_pov_marker(first):
         return first.strip()
-    if chunk.paragraphs[0] == 0 and is_pov_marker(chapter.get("title", "")):
+    if use_title and chunk.paragraphs[0] == 0 and is_pov_marker(chapter.get("title", "")):
         return chapter["title"].strip()
     return None
 
@@ -375,9 +384,13 @@ def compute_narration(book: dict, script: dict) -> list[list]:
     are attributed to. Sections are split at chapters and point-of-view headings;
     a section without evidence keeps the book's main narrator, unless it starts
     with a point-of-view change (then it is left to the book's narrator voice).
-    Third-person books (little or no evidence) get an empty list.
+    Third-person books (little or no evidence) get an empty list. Books with two
+    first-person narrators in different tenses are split by narration tense.
     """
     lines = ScriptStore.public(script)["lines"]
+    narrator = narrators_by_tense(book, lines)
+    if narrator is not None:
+        return tense_narration(book, narrator)
     sections: list[tuple[int, int, dict[str, int], bool]] = []
     for ci, ch in enumerate(book.get("chapters", [])):
         paras = ch.get("paragraphs", [])
@@ -408,6 +421,167 @@ def compute_narration(book: dict, script: dict) -> list[list]:
         if not out or out[-1][2] != who:
             out.append([ci, start, who])
     return out
+
+
+_PRESENT_SAY = {"say", "ask", "reply", "answer", "add", "mutter", "whisper", "shout", "call", "respond", "continue",
+                "explain", "offer", "admit", "insist", "murmur", "yell", "cry", "mumble", "remark", "tell"}
+
+
+def first_person_tags(book: dict) -> list[tuple[str, str]]:
+    """(quote id, "past" or "present") for quotations tagged '…,' I said / I say."""
+    out = []
+    for ch in book.get("chapters", []):
+        paras = ch.get("paragraphs", [])
+        for qid, p, s, e in ch.get("quotes", []):
+            text = paras[int(p)]
+            m = _I_SAID_AFTER.match(text[int(e):int(e) + 60]) or _I_SAID_BEFORE.search(text[max(0, int(s) - 60):int(s)])
+            if m:
+                verb = re.search(r"\bI\s+(?:\w+ly\s+)?(\w+)", m.group(0)).group(1)
+                out.append((qid, "present" if verb in _PRESENT_SAY else "past"))
+    return out
+
+
+def narrators_by_tense(book: dict, lines: dict) -> dict[str, str] | None:
+    """{"past": cid, "present": cid} when two first-person narrators use different tenses.
+
+    Some books alternate two first-person narrators who narrate in different
+    tenses (the hero in the past, a point-of-view character in the present).
+    Requires the '…,' I said tags to split cleanly: the main tense's top speaker
+    differs from the other tense's, who holds most of that tense's tags.
+    """
+    by_tense: dict[str, dict[str, int]] = {"past": {}, "present": {}}
+    for qid, tense in first_person_tags(book):
+        who = (lines.get(qid) or {}).get("speaker")
+        if who:
+            by_tense[tense][who] = by_tense[tense].get(who, 0) + 1
+    main_tense = max(by_tense, key=lambda t: sum(by_tense[t].values()))
+    other = "present" if main_tense == "past" else "past"
+    if sum(by_tense[other].values()) < 3 or not by_tense[main_tense]:
+        return None
+    narrator = {t: max(v, key=v.get) for t, v in by_tense.items()}
+    if narrator[main_tense] == narrator[other] or by_tense[other][narrator[other]] < 0.6 * sum(by_tense[other].values()):
+        return None
+    return narrator
+
+
+def reconcile_narrators(book: dict, script: dict) -> int:
+    """Fix '…,' I said lines given to the wrong first-person narrator, using tense.
+
+    The LLM tends to keep the previous narrator after a point-of-view section
+    ends. In books whose two narrators use different tenses, each tagged line
+    goes to the narrator of its tense. Other books are left alone.
+    """
+    narrator = narrators_by_tense(book, script["lines"])
+    if narrator is None:
+        return 0
+    pair, changed = set(narrator.values()), 0
+    where: dict[str, tuple[int, int]] = {}
+    same_paragraph: dict[tuple[int, int], list[str]] = {}
+    for ci, ch in enumerate(book.get("chapters", [])):
+        for qid, p, *_ in ch.get("quotes", []):
+            where[qid] = (ci, int(p))
+            same_paragraph.setdefault((ci, int(p)), []).append(qid)
+    for qid, tense in first_person_tags(book):
+        line = script["lines"].get(qid)
+        if line and line.get("speaker") in pair and line["speaker"] != narrator[tense]:
+            wrong = line["speaker"]
+            # the rest of an interrupted quotation ("…," I said. "…") is the same speaker
+            for other in same_paragraph[where[qid]]:
+                o = script["lines"].get(other)
+                if o and o.get("speaker") == wrong:
+                    o["speaker"] = narrator[tense]
+                    changed += 1
+    return changed
+
+
+_PAST_WORDS = re.compile(r"\b(?:was|were|had|did|wasn't|weren't|hadn't|didn't|said|asked|thought|felt|seemed|looked|"
+                         r"went|came|knew|saw|got|began|took|made|told|replied|answered|turned|nodded)\b", re.I)
+_PRESENT_WORDS = re.compile(r"\b(?:is|are|am|has|does|isn't|aren't|doesn't|hasn't|I'm|we're|they're|it's|that's|"
+                            r"there's|she's|he's|says|asks|seems|looks|thinks|knows|comes|goes|gets|takes|makes|"
+                            r"nods|turns|replies)\b", re.I)
+
+
+def tense_runs(book: dict, window: int = 4, min_run: int = 12) -> list[tuple[int, int, str]]:
+    """Where the narration switches between past and present tense: [(chapter, paragraph, tense)].
+
+    Scores each paragraph by present- minus past-tense markers (dialogue removed),
+    smooths the score over neighbouring paragraphs, absorbs runs shorter than
+    `min_run` paragraphs (inner thoughts, system messages) and snaps switches to
+    nearby point-of-view headings.
+    """
+    labels: list[tuple[int, int, str | None]] = []
+    markers: set[tuple[int, int]] = set()
+    current = None
+    for ci, ch in enumerate(book.get("chapters", [])):
+        paras = ch.get("paragraphs", [])
+        scores = []
+        for pi, text in enumerate(paras):
+            if is_pov_marker(text):
+                markers.add((ci, pi))
+            t = text
+            for s, e in sorted(quote_regions(text), reverse=True):
+                t = t[:s] + " " + t[e:]
+            t = t.replace("\u2019", "'")
+            scores.append(len(_PRESENT_WORDS.findall(t)) - len(_PAST_WORDS.findall(t)))
+        for pi in range(len(paras)):
+            v = sum(scores[max(0, pi - window): pi + window + 1])
+            current = "present" if v > 0 else "past" if v < 0 else current
+            labels.append((ci, pi, current))
+    runs: list[list] = []  # [index into labels, tense]
+    for i, (_, _, tense) in enumerate(labels):
+        if tense and (not runs or runs[-1][1] != tense):
+            runs.append([i, tense])
+    changed = True
+    while changed and len(runs) > 1:
+        changed = False
+        for k in range(1, len(runs)):
+            end = runs[k + 1][0] if k + 1 < len(runs) else len(labels)
+            if end - runs[k][0] < min_run:
+                del runs[k]
+                changed = True
+                break
+        merged = [runs[0]]
+        for r in runs[1:]:
+            if r[1] != merged[-1][1]:
+                merged.append(r)
+        runs = merged
+    position = {(c, p): i for i, (c, p, _) in enumerate(labels)}
+    for r in runs[1:]:
+        c, p, _ = labels[r[0]]
+        near = [position[m] for m in markers if m[0] == c and abs(m[1] - p) <= 8]
+        if near:
+            r[0] = min(near, key=lambda i: abs(i - r[0]))
+    first_story = next((ci for ci, ch in enumerate(book.get("chapters", [])) if ch.get("quotes")), 0)
+    if len(runs) > 1 and labels[runs[1][0]][0] <= first_story and labels[runs[1][0]][1] == 0:
+        del runs[0]  # front matter (copyright pages etc.) goes with the first story narrator
+    out = []
+    for i, tense in runs:
+        c, p, _ = labels[i]
+        out.append((c, p, tense) if out else (0, 0, tense))
+    return out
+
+
+def tense_narration(book: dict, narrator: dict[str, str]) -> list[list]:
+    return [[c, p, narrator[t]] for c, p, t in tense_runs(book)]
+
+
+def mixed_tense_runs(book: dict, share: float = 0.05) -> list[tuple[int, int, str]] | None:
+    """The tense runs, if the narration alternates between the past and the present tense.
+
+    Needs both tenses to recur (at least two runs each) and cover `share` of the
+    paragraphs, so present-tense back matter doesn't count.
+    """
+    runs = tense_runs(book)
+    if min(sum(1 for r in runs if r[2] == t) for t in ("past", "present")) < 2:
+        return None
+    sizes = {"past": 0, "present": 0}
+    chapters = book.get("chapters", [])
+    flat = [(ci, pi) for ci, ch in enumerate(chapters) for pi in range(len(ch.get("paragraphs", [])))]
+    index = {k: i for i, k in enumerate(flat)}
+    for k, (c, p, t) in enumerate(runs):
+        end = index[runs[k + 1][:2]] if k + 1 < len(runs) else len(flat)
+        sizes[t] += end - index[(c, p)]
+    return runs if min(sizes.values()) >= share * max(1, len(flat)) else None
 
 
 def refresh_narration(store: "ScriptStore", book_id: str, script: dict) -> None:
@@ -666,7 +840,18 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     text, local = render_chunk(book, chunk)
     chapter = book["chapters"][chunk.chapter]
     narrator = script.get("narrator") or "unknown (work it out from the passage)"
-    pov = pov_change(book, chunk)
+    if chunk.tense:
+        known = (script.get("narrator_by_tense") or {}).get(chunk.tense)
+        previous = script.get("last_tense")
+        if known:
+            narrator = known
+            if previous and previous != chunk.tense:
+                narrator = (f"{known}. The narration switches to the {chunk.tense} tense here; earlier "
+                            f"{chunk.tense}-tense passages were narrated by {known}, so \"I\" is {known} again.")
+        elif previous and previous != chunk.tense:
+            narrator = (f"{narrator}. But the narration switches from the {previous} to the {chunk.tense} tense "
+                        f"here, which usually means a different first-person narrator: work out who \"I\" is.")
+    pov = pov_change(book, chunk, use_title=chunk.tense is None)
     if pov:
         narrator = (f"{narrator}. But this passage starts with a point-of-view change, \"{pov}\": from here "
                     f"\"I\" is that character, not the previous narrator. Lines \"I\" says belong to them.")
@@ -693,7 +878,8 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
 
 async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_chars: int = 12) -> None:
     public = ScriptStore.public(script)
-    main = [c for c in public["characters"] if c["lines"] >= 2][:max_chars]
+    # Characters that already have a voice (re-analysis) keep their description.
+    main = [c for c in public["characters"] if c["lines"] >= 2 and not c.get("voice")][:max_chars]
     if not main:
         return
     samples = {}
@@ -800,7 +986,7 @@ class Analyzer:
         book = self.store.book(book_id)
         if book is None:
             raise LlmError("book text not uploaded")
-        chunks = make_chunks(book)
+        chunks = make_chunks(book, runs=mixed_tense_runs(book))
         t0 = time.perf_counter()
         for i, chunk in enumerate(chunks):
             s = self.store.script(book_id)
@@ -812,7 +998,19 @@ class Analyzer:
             result, local = await self._label(session, book, s, chunk)
             async with self.store.lock(book_id):
                 s = self.store.script(book_id)
+                by_tense = s.setdefault("narrator_by_tense", {})
+                if chunk.tense and by_tense.get(chunk.tense):
+                    # "I" in this passage is the narrator of its tense, whatever the model says.
+                    result["narrator"] = by_tense[chunk.tense]
                 apply_chunk_result(s, result, local)
+                if chunk.tense:
+                    s["last_tense"] = chunk.tense
+                    other = "past" if chunk.tense == "present" else "present"
+                    # The first narrator seen in each tense sticks, and the two tenses have different
+                    # narrators: one confused passage must not re-label every later one.
+                    if (chunk.tense not in by_tense and find_character(s, s.get("narrator") or "")
+                            and find_character(s, s["narrator"]) != find_character(s, by_tense.get(other) or "")):
+                        by_tense[chunk.tense] = s["narrator"]
                 s["chunks_done"].append(chunk.key)
                 s["model"] = self.llm.model_name
                 s.setdefault("stats", {}).setdefault("tokens", 0)
@@ -835,6 +1033,7 @@ class Analyzer:
             fresh.update(status="done", progress=1.0,
                          detail=f"{len(fresh['lines'])} lines in {time.perf_counter() - t0:.0f}s")
             fresh.setdefault("stats", {})["seconds"] = round(time.perf_counter() - t0, 1)
+            reconcile_narrators(book, fresh)
             fresh["narration"] = compute_narration(book, fresh)
             self.store.save_script(book_id, fresh)
         logger.info("analysed %s: %d lines", book_id, len(fresh["lines"]))
@@ -978,7 +1177,8 @@ async def upload_book(request: web.Request) -> web.Response:
             s = store.script(book_id)
             if s.get("status") not in ("queued", "running", "casting"):
                 # Start over; user corrections, names and voices are kept.
-                s.update(status="none", progress=0.0, lines={}, chunks_done=[], narrator="")
+                s.update(status="none", progress=0.0, lines={}, chunks_done=[], narrator="",
+                         narrator_by_tense={}, last_tense=None)
                 store.save_script(book_id, s)
     if body.get("analyze"):
         await request.app[ANALYZER_KEY].enqueue(book_id)
@@ -997,6 +1197,8 @@ async def get_script(request: web.Request) -> web.Response:
     if s.get("status") == "done" and "narration" not in s:  # analysed before narration existed
         async with store.lock(book_id):
             s = store.script(book_id)
+            book = store.book(book_id)
+            reconcile_narrators(book, s)
             refresh_narration(store, book_id, s)
             store.save_script(book_id, s)
     return web.json_response(ScriptStore.public(s))

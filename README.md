@@ -254,6 +254,24 @@ accuracy from 36% to 88%. The remaining misses are group banter in the neighbor'
 them in the viewer or the app. That excerpt is copyrighted, so it lives in the git-ignored
 `server\tests\gold\private\`.
 
+**Two narrators in different tenses.** Some books switch narrator without marking the way back.
+In *Sasaki and Peeps* the neighbor's sections start with *(The Neighbor's POV)*, are told in the
+present tense and end at an unmarked scene break. Sasaki narrates in the past tense, and the table
+of contents gives the heading as the title of chapters that actually open with Sasaki. When the
+narration alternates between tenses, the server:
+
+* finds the switches from the narration itself (dialogue removed);
+* splits passages there and ignores POV chapter titles;
+* tells the model who narrated earlier passages in the same tense;
+* afterwards moves any "…," I said line to the narrator of its tense.
+
+The same switches decide whose voice reads the narration. Single-narrator and third-person books
+are unaffected.
+
+On the full *Sasaki and Peeps* vol. 10, the hand-labelled excerpt spans one of the neighbor's
+sections. There, wrong speakers fell from 15 to 7 (93.5%). The other 12 misses are Nick's lines
+before he gives his name, which are labelled "a prisoner".
+
 ## 8. Process a book on the PC
 
 Dramatize a book without touching the phone, then optionally put it on the phone:
@@ -353,5 +371,7 @@ cd android; .\gradlew.bat testDebugUnitTest
 adb install -r -t app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
 adb shell am instrument -w -e class com.androidreader.ReaderPlaybackTest com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
 # slow: analyses the whole of Alice, casts voices, then plays the Mad Tea-Party dramatized
-adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
+adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest#analysesCastsAndReadsWithCharacterVoices com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
+# a book processed with process_book.py --phone: narrator voices per section, character voices in a scene
+adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest#readsAProcessedBook -e bookId 2f145f7d38c07f00 -e mainAt 3:1 -e povAt 12:170 -e dialogueAt 10:12 com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
 ```

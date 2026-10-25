@@ -311,3 +311,75 @@ def test_narration_follows_first_person_evidence_and_pov_changes():
     chapters[0]["paragraphs"].append(f"{Q}Fine,{E} I replied.")
     chapters[0]["quotes"].append(["extra", 3, 0, 7])
     assert dz.compute_narration(book, script) == [[0, 0, "sasaki"], [1, 1, "neighbor"], [2, 0, "sasaki"]]
+
+
+def test_reconcile_narrators_by_tense():
+    Q, E = "\u201c", "\u201d"
+    paras = [f"{Q}A{i},{E} I said." for i in range(6)] + [f"{Q}B{i},{E} I say." for i in range(4)]
+    ch = {"title": "One", "paragraphs": paras, "quotes": []}
+    for pi, t in enumerate(paras):
+        ch["quotes"] += [[f"q{pi}", pi, s, e] for s, e in dz.quote_regions(t)]
+    book = {"chapters": [ch]}
+    # the LLM kept the point-of-view narrator for two of the hero's past-tense lines
+    who = ["hero"] * 4 + ["pov"] * 2 + ["pov"] * 3 + ["hero"]
+    script = {"lines": {f"q{i}": {"speaker": w, "delivery": None} for i, w in enumerate(who)}}
+    assert dz.reconcile_narrators(book, script) == 3
+    assert [script["lines"][f"q{i}"]["speaker"] for i in range(10)] == ["hero"] * 6 + ["pov"] * 4
+    # a single narrator who sometimes slips into the present tense is left alone
+    single = {"lines": {f"q{i}": {"speaker": "hero", "delivery": None} for i in range(10)}}
+    assert dz.reconcile_narrators(book, single) == 0
+    # the rest of an interrupted quotation follows its tagged part
+    paras.append(f"{Q}Wait,{E} I said. {Q}Come back.{E}")
+    ch["quotes"] += [[f"r{k}", 10, s, e] for k, (s, e) in enumerate(dz.quote_regions(paras[10]))]
+    script["lines"].update({"r0": {"speaker": "pov"}, "r1": {"speaker": "pov"}})
+    assert dz.reconcile_narrators(book, script) == 2
+    assert script["lines"]["r1"]["speaker"] == "hero"
+
+
+def test_two_narrators_are_split_by_narration_tense():
+    Q, E = "\u201c", "\u201d"
+    past = [f"{Q}Line {i},{E} I said. The room was quiet and we were tired." for i in range(20)]
+    marker = ["(The Neighbor\u2019s POV)"]
+    present = [f"{Q}Line {i},{E} I say. The room is quiet, we are tired, and it is late." for i in range(15)]
+    paras = past + marker + present + past[:15]
+    ch = {"title": "One", "paragraphs": paras, "quotes": []}
+    for pi, t in enumerate(paras):
+        ch["quotes"] += [[f"q{pi}", pi, s, e] for s, e in dz.quote_regions(t)]
+    front = {"title": "Copyright", "paragraphs": ["This book is a work of fiction."] * 3, "quotes": []}
+    book = {"chapters": [front, ch]}
+    who = {f"q{pi}": ("pov" if 20 < pi <= 35 else "hero") for pi in range(len(paras)) if pi != 20}
+    script = {"lines": {q: {"speaker": w, "delivery": None} for q, w in who.items()}, "corrections": {}}
+    assert dz.compute_narration(book, script) == [[0, 0, "hero"], [1, 20, "pov"], [1, 36, "hero"]]
+
+
+def test_mixed_tense_books_are_chunked_by_tense_and_hint_the_narrator():
+    Q, E = "\u201c", "\u201d"
+    past = [f"{Q}Line {i},{E} I said. The room was quiet, we were tired, and it was late." for i in range(15)]
+    present = [f"{Q}Line {i},{E} I say. The room is quiet, we are tired, it is late, and he is here." for i in range(15)]
+    paras = past + present + past + present
+    ch = {"title": "(The Neighbor\u2019s POV)", "paragraphs": paras, "quotes": []}
+    for pi, t in enumerate(paras):
+        ch["quotes"] += [[f"q{pi}", pi, s, e] for s, e in dz.quote_regions(t)]
+    book = {"chapters": [ch]}
+    runs = dz.mixed_tense_runs(book)
+    assert runs == [(0, 0, "past"), (0, 15, "present"), (0, 30, "past"), (0, 45, "present")]
+    chunks = dz.make_chunks(book, runs=runs)
+    assert [(c.paragraphs[0], c.tense) for c in chunks] == [(0, "past"), (15, "present"), (30, "past"), (45, "present")]
+    # one present-tense stretch (back matter) is not a narrator switch
+    assert dz.mixed_tense_runs({"chapters": [{**ch, "paragraphs": past + present}]}) is None
+
+    seen = []
+
+    class FakeLlm:
+        async def complete(self, session, system, user, schema, max_tokens=0):
+            seen.append(user)
+            return {"narrator": "", "speakers": [], "quotes": []}
+
+    script = {"characters": {}, "lines": {}, "narrator": "Hero", "narrator_by_tense": {"past": "Hero", "present": "Neighbor"},
+              "last_tense": "past"}
+    asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunks[1]))
+    assert "earlier present-tense passages were narrated by Neighbor" in seen[-1]
+    assert "point-of-view change" not in seen[-1]  # the chapter title is not trusted when tense is known
+    script["narrator_by_tense"] = {"past": "Hero"}
+    asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunks[1]))
+    assert "switches from the past to the present tense" in seen[-1]

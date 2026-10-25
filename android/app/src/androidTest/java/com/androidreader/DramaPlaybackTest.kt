@@ -93,4 +93,57 @@ class DramaPlaybackTest {
             instrumentation.runOnMainSync { PlaybackHub.pause(); controller.release() }
         }
     }
+
+    /**
+     * Reads a book that is already in the library and dramatized on the PC (for example
+     * one processed with server/scripts/process_book.py --phone):
+     *
+     *   adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest#readsAProcessedBook \
+     *     -e bookId 2f145f7d38c07f00 -e mainAt 3:1 -e povAt 12:170 -e dialogueAt 10:12 \
+     *     com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
+     *
+     * mainAt and povAt are chapter:paragraph positions in two different narrators' sections;
+     * dialogueAt is a conversation with several characters.
+     */
+    @Test
+    fun readsAProcessedBook() {
+        val args = InstrumentationRegistry.getArguments()
+        val bookId = args.getString("bookId")
+        assumeTrue("pass -e bookId <id> to check a processed book", bookId != null)
+        val library = Library.get(context)
+        val meta = library.get(bookId!!) ?: throw AssertionError("book $bookId is not in the library")
+        library.update(meta.copy(dramatized = true))
+        Dramatization.init(context)
+        val script = Dramatization.refresh(bookId)!!
+        assertEquals("done", script.status)
+        val content = library.content(bookId)
+        fun at(spec: String) = spec.split(":").map { it.toInt() }.let { BookPosition(it[0], it[1], 0) }
+
+        val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
+        var future: com.google.common.util.concurrent.ListenableFuture<MediaController>? = null
+        instrumentation.runOnMainSync { future = MediaController.Builder(context, token).buildAsync() }
+        val controller = future!!.get(20, TimeUnit.SECONDS)
+        try {
+            waitFor(20, "player") { PlaybackHub.player != null }
+            val narrators = listOfNotNull(args.getString("mainAt"), args.getString("povAt")).map { spec ->
+                val pos = at(spec)
+                instrumentation.runOnMainSync { PlaybackHub.open(bookId, pos, play = false) }
+                val i = content.utterances(pos.chapter, true).indexOfFirst { it.paragraph >= pos.paragraph && it.quote == null }
+                spec to PlaybackHub.requestFor(pos.chapter, i)!!.voice
+            }
+            if (narrators.size == 2) assertTrue("one narrator voice: $narrators", narrators[0].second != narrators[1].second)
+
+            val dialogue = at(args.getString("dialogueAt") ?: "0:0")
+            instrumentation.runOnMainSync { PlaybackHub.open(bookId, dialogue, play = true) }
+            val start = PlaybackHub.state.value.index
+            val voices = (start until start + 40).mapNotNull { PlaybackHub.requestFor(dialogue.chapter, it)?.voice }.distinct()
+            assertTrue("voices in the scene: $voices", voices.size >= 3)
+            waitFor(900, "playback") { PlaybackHub.state.value.index >= start + 6 }
+            assertNull(PlaybackHub.state.value.error)
+            println("DramaPlaybackTest: narrators $narrators; ${voices.size} voices in the scene: $voices; " +
+                "${script.characters.size} characters, ${script.lines.size} lines")
+        } finally {
+            instrumentation.runOnMainSync { PlaybackHub.pause(); controller.release() }
+        }
+    }
 }
