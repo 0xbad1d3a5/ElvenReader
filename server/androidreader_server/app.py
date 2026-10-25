@@ -21,7 +21,7 @@ from .cache import AudioCache, cache_key
 from .config import ServerConfig
 from .engines.manager import AudioChunk, Done, EngineError, EngineManager, StreamStart
 from .engines.registry import ENGINES, EngineSpec
-from .netinfo import lan_addresses, tailscale_names
+from .netinfo import lan_addresses
 from .pronunciation import PHONEME_FORMATS, Entry, PronunciationStore, apply, entries_version
 from .text import (
     MAX_TEXT_CHARS,
@@ -324,7 +324,7 @@ class SynthesisPlan:
         self.pron_version = entries_version(entries)
         self.text = apply(text, entries, PHONEME_FORMATS.get(self.spec.phonemes))
         self.language = _str(body, "language") or None
-        self.delivery = _str(body, "delivery") or _str(body, "instruct") or None
+        self.delivery = _str(body, "delivery") or None
         if not self.spec.delivery:
             self.delivery = None
         seed = body.get("seed")
@@ -463,14 +463,13 @@ async def tts(request: web.Request) -> web.StreamResponse:
 # ---------------------------------------------------------------- pairing
 
 
-def server_urls(port: int) -> list[str]:
-    """URLs the phone can try, LAN first, then Tailscale (IP and MagicDNS name)."""
-    urls = []
+def server_urls(port: int, extra: list[str] | None = None) -> list[str]:
+    """URLs the phone can try: this PC's addresses (private ones first), then any
+    configured extra URLs, e.g. the PC's address or name on your own VPN."""
     addrs = lan_addresses()
-    for kind in ("lan", "tailscale", "other"):
-        urls += [f"http://{a['ip']}:{port}" for a in addrs if a["kind"] == kind]
-        if kind == "tailscale":
-            urls += [f"http://{name}:{port}" for name in tailscale_names()]
+    urls = [f"http://{a['ip']}:{port}" for a in addrs if a["kind"] == "lan"]
+    urls += [f"http://{a['ip']}:{port}" for a in addrs if a["kind"] != "lan"]
+    urls += [u.rstrip("/") for u in extra or [] if u.strip()]
     seen = set()
     return [u for u in urls if not (u in seen or seen.add(u))]
 
@@ -526,15 +525,15 @@ def pair_url(base: str, urls: list[str], token: str) -> str:
 async def index(request: web.Request) -> web.Response:
     """Loopback-only page showing pairing QR codes (it contains the token)."""
     cfg = request.app[CONFIG_KEY]
-    urls = server_urls(cfg.port)
+    urls = server_urls(cfg.port, cfg.extra_urls)
     parts = [
         "<!doctype html><html><head><title>AndroidReader server</title>"
         "<style>body{font-family:sans-serif;margin:2em}.card{display:inline-block;margin:1em;"
         "padding:1em;border:1px solid #ccc;border-radius:.5em;vertical-align:top}</style></head><body>",
         "<h2>AndroidReader server</h2>",
         "<p>Scan a code with the phone's camera, open the link, then tap <b>Open AndroidReader</b>. "
-        "Every code carries all the addresses below, so the app can switch between home Wi-Fi and "
-        "Tailscale by itself.</p>",
+        "Every code carries all the addresses below, so the app switches between them by itself "
+        "(e.g. home Wi-Fi and your VPN). Add more with <code>extra_urls</code> in config.json.</p>",
     ]
     if not urls:
         parts.append("<p><b>No network address found.</b> Is this PC connected to a network?</p>")

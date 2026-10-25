@@ -2,8 +2,7 @@
 
 Entries are global or belong to one book; a book entry wins over a global
 entry for the same term. They are applied on the server before synthesis, so
-the reader and the system TTS engine (which has no book context and therefore
-uses only global entries) both benefit.
+they work with every engine and are part of the audio cache key.
 
 A respelling works with every engine. An entry may also carry ARPAbet
 phonemes (the CMU dictionary notation, e.g. ``HH ER0 M AY1 AH0 N IY0``);

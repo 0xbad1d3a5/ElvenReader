@@ -2,30 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
-import json
-import shutil
 import socket
-import subprocess
-import sys
-
-
-def tailscale_names() -> list[str]:
-    """This PC's Tailscale MagicDNS name, when the Tailscale CLI is installed and logged in."""
-    exe = shutil.which("tailscale") or (
-        r"C:\Program Files\Tailscale\tailscale.exe" if sys.platform == "win32" else None
-    )
-    if not exe:
-        return []
-    try:
-        out = subprocess.run(
-            [exe, "status", "--self", "--peers=false", "--json"],
-            capture_output=True, timeout=3, creationflags=0x08000000 if sys.platform == "win32" else 0,
-        )
-        info = json.loads(out.stdout or b"{}")
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return []
-    name = ((info.get("Self") or {}).get("DNSName") or "").rstrip(".")
-    return [name] if name else []
 
 
 def _primary_ipv4() -> str | None:
@@ -39,9 +16,9 @@ def _primary_ipv4() -> str | None:
 
 
 def lan_addresses() -> list[dict]:
-    """IPv4 addresses of this machine, primary LAN address first.
+    """IPv4 addresses of this machine (including any VPN adapters), primary address first.
 
-    Each entry is ``{"ip": ..., "kind": "lan" | "tailscale" | "other"}``.
+    Each entry is ``{"ip": ..., "kind": "lan" | "other"}``; "lan" means a private address.
     """
     found: list[str] = []
     primary = _primary_ipv4()
@@ -60,11 +37,5 @@ def lan_addresses() -> list[dict]:
         addr = ipaddress.ip_address(ip)
         if addr.is_loopback or addr.is_link_local:
             continue
-        if addr in ipaddress.ip_network("100.64.0.0/10"):
-            kind = "tailscale"
-        elif addr.is_private:
-            kind = "lan"
-        else:
-            kind = "other"
-        out.append({"ip": ip, "kind": kind})
+        out.append({"ip": ip, "kind": "lan" if addr.is_private else "other"})
     return out

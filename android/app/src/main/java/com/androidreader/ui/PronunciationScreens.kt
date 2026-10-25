@@ -150,7 +150,7 @@ fun PronunciationDialog(
                 }
                 if (bookId != null) {
                     ChoiceRow(forBook, "Only in this book") { forBook = true }
-                    ChoiceRow(!forBook, "In all books and the system voice") { forBook = false }
+                    ChoiceRow(!forBook, "In all books") { forBook = false }
                 }
                 OutlinedButton(onClick = { preview() }, enabled = !busy && term.isNotBlank()) { Text("Preview") }
                 status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
@@ -203,8 +203,8 @@ fun PronunciationsScreen(bookId: String?, onBack: () -> Unit) {
             error?.let { item { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) } }
             item {
                 Text(
-                    "Corrections are applied on the PC before synthesis, so they work in the reader and in " +
-                        "ReadEra. Long-press a word while reading to add one.",
+                    "Corrections are applied on the PC before synthesis, with every voice model. " +
+                        "Long-press a word while reading to add one.",
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(16.dp),
                 )

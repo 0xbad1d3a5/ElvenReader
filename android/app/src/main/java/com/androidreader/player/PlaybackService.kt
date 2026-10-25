@@ -28,7 +28,7 @@ class PlaybackService : MediaSessionService() {
         val player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(
                 DefaultMediaSourceFactory(UtteranceDataSource.Factory())
-                    // Network hiccups while switching between Wi-Fi and the tunnel: keep retrying.
+                    // Network hiccups while switching between Wi-Fi and the VPN: keep retrying.
                     .setLoadErrorHandlingPolicy(DefaultLoadErrorHandlingPolicy(8)),
             )
             .setLoadControl(

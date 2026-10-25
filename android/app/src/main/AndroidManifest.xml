@@ -3,7 +3,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- To find the Wi-Fi network that hosts the server when mobile data is the default,
-         and to switch between the home network and the tunnel. -->
+         and to switch between the home network and your VPN. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Background reading with lock-screen and Bluetooth controls. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -11,14 +11,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Lets the engine benchmark (androidTest) bind other installed TTS engines for comparison. -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.TTS_SERVICE" />
-        </intent>
-    </queries>
-
-    <!-- The server is reached over the LAN or a private Tailscale tunnel with plain HTTP and a token. -->
+    <!-- The server is reached over the home network or your own VPN, with plain HTTP and a token. -->
     <application
         android:name=".AndroidReaderApp"
         android:allowBackup="false"
@@ -48,11 +41,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".ui.EngineSettingsActivity"
-            android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay" />
-
         <service
             android:name=".player.PlaybackService"
             android:exported="true"
@@ -61,38 +49,5 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
-
-        <service
-            android:name=".tts.AndroidReaderTtsService"
-            android:exported="true"
-            android:label="@string/engine_name">
-            <intent-filter>
-                <action android:name="android.intent.action.TTS_SERVICE" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-            <meta-data
-                android:name="android.speech.tts"
-                android:resource="@xml/tts_engine" />
-        </service>
-
-        <activity
-            android:name=".tts.CheckVoiceDataActivity"
-            android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay">
-            <intent-filter>
-                <action android:name="android.speech.tts.engine.CHECK_TTS_DATA" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
-
-        <activity
-            android:name=".tts.GetSampleTextActivity"
-            android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay">
-            <intent-filter>
-                <action android:name="android.speech.tts.engine.GET_SAMPLE_TEXT" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
     </application>
 </manifest>

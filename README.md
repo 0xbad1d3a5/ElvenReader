@@ -1,23 +1,22 @@
 # AndroidReader
 
 Listen to your EPUBs read by high-quality voice models running on **your own PC**, at home or away.
+A standalone Android app plus this PC as the server; no cloud service and no other reading app.
 
 * **The PC server** (`server/`) loads open-weight text-to-speech models on the GPU itself (no
   VoiceStudio or cloud service), clones voices from a short reference clip, applies your
   pronunciation fixes, caches every sentence, and streams audio to the phone.
 * **The Android app** (`android/`) is an EPUB reader that reads aloud with highlighting, background
-  playback and lock-screen/Bluetooth controls. It is also a **system text-to-speech engine**, so
-  ReadEra and other apps can use the same voices.
+  playback and lock-screen/Bluetooth controls.
 * **Dramatized reading (optional):** a local LLM works out who says each line and how
   (*"Stop!" she shouted* → the character's voice, shouting), and each character gets a voice.
 
 ```mermaid
 flowchart LR
     subgraph Phone
-      R[AndroidReader<br/>EPUB reader] --> C
-      E[ReadEra] -- TextToSpeech API --> T[AndroidReader<br/>system TTS engine] --> C[ServerClient<br/>LAN first, then Tailscale]
+      R[AndroidReader<br/>EPUB reader] --> C[ServerClient<br/>tries each server URL]
     end
-    C -- "HTTP + token<br/>home Wi-Fi or Tailscale" --> S
+    C -- "HTTP + token<br/>home Wi-Fi or your VPN" --> S
     subgraph PC
       S[androidreader_server<br/>port 3950] --> W[engine worker<br/>one model on the GPU]
       S --> V[(voices, pronunciations,<br/>audio cache)]
@@ -28,7 +27,7 @@ flowchart LR
 | Folder | What it is |
 |--------|------------|
 | `server/` | `androidreader_server`: aiohttp API, engine manager and workers, voice store, pronunciation dictionary, audio cache, dramatization. |
-| `android/` | Kotlin/Compose app: library, reader, Media3 playback service, system TTS engine, settings. |
+| `android/` | Kotlin/Compose app: library, reader, Media3 playback service, settings. |
 
 ## Voice models
 
@@ -88,6 +87,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 |---|---|---|
 | `models_dir` | `data\models` | Engine venvs, model weights, compile caches, LLM files. |
 | `default_engine` / `default_voice` | `omnivoice` / first voice | Used when the phone doesn't choose. |
+| `extra_urls` | `[]` | More URLs for the pairing codes, e.g. `["http://10.8.0.2:3950"]` for the PC on your VPN. |
 | `preload` | `true` | Load the default engine at start-up. |
 | `engine_options` | `{}` | Per engine, e.g. `{"omnivoice": {"num_step": 16}, "indextts": {"compile": true}}`. |
 | `sentence_pause_ms`, `trim_silence` | `300`, `true` | Pacing between sentences. |
@@ -111,11 +111,12 @@ one from a description (`POST /api/voices/design`).
 
 ```powershell
 cd D:\Dev\AndroidReader\server
-.\allow-firewall.ps1        # TCP 3950 on Private networks, plus the Tailscale adapter
+.\allow-firewall.ps1        # TCP 3950 on Domain and Private networks
 ```
 
-Your home Wi-Fi must be a **Private** network. Without this rule the phone can't connect (the
-app reports *Could not reach the PC … failed to connect*).
+Your home Wi-Fi must be a **Private** network (and so must your VPN's adapter, if the phone
+reaches the PC through it). Without this rule the phone can't connect (the app reports *Could
+not reach the PC … failed to connect*).
 
 ### Start automatically (optional)
 
@@ -124,22 +125,16 @@ $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -Wi
 Register-ScheduledTask -TaskName "AndroidReader server" -Action $a -Trigger (New-ScheduledTaskTrigger -AtLogOn)
 ```
 
-## 2. Away from home: Tailscale
+## 2. Away from home: your own VPN
 
-Tailscale gives the phone a private, encrypted route to the PC from anywhere, with no port
-opened to the internet. (Don't port-forward 3950 on your router: the server speaks plain HTTP.)
-
-1. **PC:** Tailscale is installed (`winget install Tailscale.Tailscale`). Open it from the tray
-   and **sign in**. Then run `.\allow-firewall.ps1` again (elevated) so the Tailscale adapter
-   gets its rule.
-2. **Phone:** install *Tailscale* from the Play Store and sign in with the same account.
-3. Restart the server: it now lists the PC's Tailscale address (`100.x.y.z`) and MagicDNS name,
-   and the pairing QR codes include them.
-4. Pair (below) or add the Tailscale URL as a second line in *Settings → Connection*.
+Use your own VPN to reach the PC from outside, and add the PC's address on that VPN as an extra
+server URL: either in the app (*Settings → Connection*, one URL per line, after the home address)
+or in `extra_urls` in `server\data\config.json`, so the pairing QR codes include it. Don't
+port-forward 3950 on your router: the server speaks plain HTTP, protected only by its token.
 
 The app tries the URL that worked last; if it can't connect, it tries the others, and it starts
-again from the LAN address whenever the phone's network changes. At home you get the LAN; on
-mobile data you get the tunnel, without touching anything.
+again from the first (home) address whenever the phone's network changes. At home you get the
+LAN; on mobile data you get the VPN address, without touching anything.
 
 ## 3. Build and install the app
 
@@ -153,17 +148,17 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
 
-The app id is `com.androidreader`; it installs next to the old *VoiceStudio TTS* app
-(`com.androidvoicestudio.tts`), which you can uninstall once you've switched ReadEra over.
+The app id is `com.androidreader`.
 
 ## 4. Pair the phone
 
 1. On the PC, open **http://127.0.0.1:3950/** (served only to the PC itself; it contains the token).
 2. Scan any QR code with the phone camera, open the link, tap **Open AndroidReader**. Each code
-   carries *all* the PC's addresses (LAN and Tailscale) and the token.
+   carries *all* the PC's addresses (plus `extra_urls`) and the token.
 
 Or enter them by hand in *Settings → Connection to your PC*: one URL per line (home address
-first, e.g. `192.168.86.10`, then the Tailscale one) and the token, then **Save & test connection**.
+first, e.g. `192.168.86.10`, then the PC's address on your VPN) and the token, then **Save &
+test connection**. *Settings* also holds the default model, voice and sentence pause for books.
 
 ## 5. Reading
 
@@ -189,8 +184,7 @@ Long-press a word while reading → **Fix pronunciation**:
 * **Phonemes (optional):** CMU/ARPAbet such as `HH ER0 M AY1 AH0 N IY0`. Used by OmniVoice and
   IndexTTS; other models use the respelling.
 * **Preview** synthesizes the sentence with the current voice and the unsaved fix.
-* **Only in this book** or **in all books and the system voice.** Book entries win over global
-  ones. ReadEra has no book context, so the system engine uses the global entries.
+* **Only in this book** or **in all books.** Book entries win over global ones.
 * Matching is whole-word, case-insensitive unless *Match case exactly* is ticked, and covers
   possessives and plurals (*Hermione's*, *Hermiones*) and multi-word names (*Sirius Black*).
 
@@ -249,22 +243,11 @@ echo each quote's first words. Without them labels drifted by one after an inter
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
 `"gpu"` and `"cpu"` force one or the other.
 
-**System engine (ReadEra):** there is no book context, so only per-sentence hints are used (an
-exclamation inside quotes, or *whispered/shouted* next to a quote), and only with models that take
-a delivery. Turn it off with *Settings → System voice → Expressive quotes*.
-
-## 8. Use it as the system voice in ReadEra
-
-1. *Settings → System voice → Open text-to-speech settings* (Samsung: *General management →
-   Text-to-speech*). Set **Preferred engine** to **AndroidReader**.
-2. In the same settings screen choose the model and voice for the system engine.
-3. In ReadEra start **Read aloud**; ReadEra's speed control is multiplied by the app's speed.
-
 ## Troubleshooting
 
 * **Could not reach the PC:** server running? Firewall rule added (`allow-firewall.ps1`, elevated)?
-  Network *Private*? Away from home: Tailscale connected on both devices? From the phone's browser,
-  `http://<pc>:3950/api/ping` should return JSON.
+  Network *Private*? Away from home: is your VPN connected, and is the PC's VPN address in the
+  app's server URLs? From the phone's browser, `http://<pc>:3950/api/ping` should return JSON.
 * **Phone on Wi-Fi but routing over mobile data:** for LAN addresses the app binds to the Wi-Fi
   network that owns the subnet (Samsung *Switch to mobile data*); behind a VPN it leaves routing
   to the VPN and falls back to unbound sockets if Android refuses the binding.
@@ -300,7 +283,7 @@ cd server; .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe scripts\bench_engines.py omnivoice fish_s2 indextts qwen3tts
 .\.venv\Scripts\python.exe scripts\eval_attribution.py tests\gold\pride-ch1.json tests\gold\alice-ch7.json
 
-# Android unit tests (EPUB parsing, sentence/quote segmentation, URLs, delivery hints, PCM chunking)
+# Android unit tests (EPUB parsing, sentence/quote segmentation, URLs, language names)
 cd android; .\gradlew.bat testDebugUnitTest
 
 # On-device tests (phone paired, server running). Installed manually so the app isn't
@@ -309,7 +292,6 @@ cd android; .\gradlew.bat testDebugUnitTest
 .\gradlew.bat assembleDebugAndroidTest
 adb install -r -t app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
 adb shell am instrument -w -e class com.androidreader.ReaderPlaybackTest com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
-adb shell am instrument -w -e class com.androidreader.EngineInstrumentedTest -e serverUrl http://127.0.0.1:3950 -e serverToken <token> com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
 # slow: analyses the whole of Alice, casts voices, then plays the Mad Tea-Party dramatized
 adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
 ```

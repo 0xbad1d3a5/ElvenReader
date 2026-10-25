@@ -59,11 +59,22 @@ async def test_pair_page_public_without_token_and_index_on_loopback(client):
 
 
 def test_pairing_links_carry_all_urls():
-    urls = ["http://192.168.1.5:3950", "http://100.64.1.2:3950"]
+    urls = ["http://192.168.1.5:3950", "http://10.8.0.2:3950"]
     assert pairing_link(urls, "a b") == (
-        "areader://pair?url=http%3A%2F%2F192.168.1.5%3A3950&url=http%3A%2F%2F100.64.1.2%3A3950&token=a%20b"
+        "areader://pair?url=http%3A%2F%2F192.168.1.5%3A3950&url=http%3A%2F%2F10.8.0.2%3A3950&token=a%20b"
     )
-    assert pair_url(urls[0], urls, "tok") == "http://192.168.1.5:3950/pair#t=tok&u=http://100.64.1.2:3950"
+    assert pair_url(urls[0], urls, "tok") == "http://192.168.1.5:3950/pair#t=tok&u=http://10.8.0.2:3950"
+
+
+def test_server_urls_put_private_addresses_first_and_add_extras(monkeypatch):
+    from androidreader_server import app as app_module
+
+    monkeypatch.setattr(app_module, "lan_addresses", lambda: [
+        {"ip": "203.0.113.5", "kind": "other"}, {"ip": "192.168.1.5", "kind": "lan"},
+    ])
+    assert app_module.server_urls(3950, ["http://my-pc.vpn.example:3950/", "http://192.168.1.5:3950"]) == [
+        "http://192.168.1.5:3950", "http://203.0.113.5:3950", "http://my-pc.vpn.example:3950",
+    ]
 
 
 async def test_health_and_engines(client):

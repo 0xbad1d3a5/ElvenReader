@@ -37,6 +37,9 @@ class ServerConfig:
     default_engine: str = DEFAULT_ENGINE
     # Voice used when the phone has not picked one. Empty = first voice in the store.
     default_voice: str = ""
+    # Extra URLs to put in pairing codes, e.g. this PC's address on your own VPN
+    # ("http://10.8.0.2:3950"). The app tries them when the home address fails.
+    extra_urls: list = field(default_factory=list)
     # Load the default engine at start-up so the first sentence is not slow.
     preload: bool = True
     # Cut the models' start/end padding: readers wait for each sentence to

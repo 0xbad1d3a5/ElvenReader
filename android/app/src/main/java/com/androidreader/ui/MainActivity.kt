@@ -115,12 +115,3 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_SCREEN = "screen"
     }
 }
-
-/** Target of the gear icon in the system TTS settings. */
-class EngineSettingsActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        startActivity(Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_SCREEN, "settings"))
-        finish()
-    }
-}

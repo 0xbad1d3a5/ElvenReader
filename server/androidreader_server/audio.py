@@ -1,8 +1,7 @@
 """PCM16 helpers: silence trimming, time-stretching and float conversion.
 
-TTS models pad clips with silence at each end. A reader such as ReadEra
-requests one sentence at a time and only after the previous one has finished
-playing, so that padding adds directly to every gap between sentences. Pauses
+TTS models pad clips with silence at each end. The reader plays one sentence
+after another, so that padding would add to every gap between sentences. Pauses
 *inside* the audio are kept untouched.
 """
 from __future__ import annotations

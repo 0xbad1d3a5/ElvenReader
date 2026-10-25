@@ -10,7 +10,6 @@ import com.androidreader.library.BookMeta
 import com.androidreader.library.BookPosition
 import com.androidreader.net.parseServerUrls
 import com.androidreader.net.urlKind
-import com.androidreader.tts.DeliveryHints
 import com.androidreader.ui.wordAt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -107,18 +106,6 @@ class QuoteTest {
     }
 }
 
-class DeliveryHintsTest {
-    @Test
-    fun guessesFromQuotesAndSpeechVerbs() {
-        assertEquals("shouting, urgent", DeliveryHints.guess("\u201cStop!\u201d she said."))
-        assertEquals("whispering", DeliveryHints.guess("\u201cCome here,\u201d he whispered."))
-        assertEquals("shouting", DeliveryHints.guess("\u201cGET OUT\u201d"))
-        assertEquals("excited, emphatic", DeliveryHints.guess("\u201cWe actually won the whole thing!\u201d"))
-        assertNull(DeliveryHints.guess("She shouted across the yard."))
-        assertNull(DeliveryHints.guess("\u201cGood morning,\u201d she said."))
-    }
-}
-
 class ReaderLogicTest {
     @Test
     fun wordAtFindsWholeWordsAndDropsPossessives() {
@@ -132,13 +119,13 @@ class ReaderLogicTest {
     @Test
     fun serverUrlsAreParsedAndClassified() {
         assertEquals(
-            listOf("http://192.168.86.10:3950", "http://100.101.102.103:3950", "http://my-pc.tail1234.ts.net:3950"),
-            parseServerUrls("192.168.86.10\n100.101.102.103, my-pc.tail1234.ts.net\n192.168.86.10"),
+            listOf("http://192.168.86.10:3950", "http://10.8.0.2:3950", "http://my-pc.vpn.example:3950"),
+            parseServerUrls("192.168.86.10\n10.8.0.2, my-pc.vpn.example\n192.168.86.10"),
         )
         assertEquals("lan", urlKind("http://192.168.86.10:3950"))
-        assertEquals("tailscale", urlKind("http://100.101.102.103:3950"))
-        assertEquals("tailscale", urlKind("http://my-pc.tail1234.ts.net:3950"))
-        assertEquals("other", urlKind("http://8.8.8.8:3950"))
+        assertEquals("lan", urlKind("http://10.8.0.2:3950"))
+        assertEquals("remote", urlKind("http://my-pc.vpn.example:3950"))
+        assertEquals("remote", urlKind("http://100.101.102.103:3950"))
     }
 
     @Test

@@ -14,8 +14,8 @@ import java.net.URI
  * (Samsung "Switch to mobile data", Android's own fallback when Wi-Fi looks
  * weak). A LAN address such as 192.168.1.20 is unreachable over mobile data, so
  * when the server host is on a local subnet we bind our sockets to the network
- * that owns that subnet instead of trusting the system default. Tailscale and
- * other VPN addresses are left to normal routing.
+ * that owns that subnet instead of trusting the system default. Addresses
+ * reached through a VPN are left to normal routing.
  */
 object LocalNetworks {
     /** Set once binding was refused (e.g. a VPN that forbids bypass); stop trying afterwards. */
@@ -104,18 +104,15 @@ fun normalizeServerUrl(input: String, defaultPort: Int = 3950): String {
 fun parseServerUrls(input: String): List<String> =
     input.split('\n', ',', ' ').map { normalizeServerUrl(it) }.filter { it.isNotEmpty() }.distinct()
 
-/** "lan", "tailscale" or "other", for display and to order failover (LAN first). */
+/** "lan" for addresses on a private local network (failover tries these first), otherwise "remote". */
 fun urlKind(url: String): String {
-    val host = LocalNetworks.hostOf(url) ?: return "other"
-    if (host.endsWith(".ts.net")) return "tailscale"
-    val ip = parseIpLiteral(host) ?: return "other"
+    val ip = LocalNetworks.hostOf(url)?.let(::parseIpLiteral) ?: return "remote"
     if (ip.size == 4) {
         val a = ip[0].toInt() and 0xFF
         val b = ip[1].toInt() and 0xFF
-        if (a == 100 && b in 64..127) return "tailscale"
         if (a == 10 || (a == 172 && b in 16..31) || (a == 192 && b == 168)) return "lan"
     } else if ((ip[0].toInt() and 0xFE) == 0xFC) {
-        return if (ip[0].toInt() and 0xFF == 0xFD && ip[1].toInt() and 0xFF == 0x7A) "tailscale" else "lan"
+        return "lan"
     }
-    return "other"
+    return "remote"
 }

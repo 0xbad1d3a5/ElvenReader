@@ -21,7 +21,7 @@ VOICESTUDIO_VOICES = Path(os.path.expandvars(r"%APPDATA%\OmniVoice\voices"))
 
 
 def _print_pairing(cfg) -> None:
-    urls = server_urls(cfg.port)
+    urls = server_urls(cfg.port, cfg.extra_urls)
     print(f"\nAndroidReader server {__version__}")
     print(f"  Listening on   : {cfg.host}:{cfg.port}")
     print(f"  Models         : {cfg.models_path}")

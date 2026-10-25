@@ -80,7 +80,7 @@ def test_book_entries_override_global_for_same_term():
     assert for_b1 == {"hermione": "HER-mee-own", "gandalf": "GAN-dalf"}
     for_other = {e.term.casefold(): e.respelling for e in effective_entries(entries, "b2")}
     assert for_other["hermione"] == "her-MY-oh-nee"
-    assert len(effective_entries(entries, None)) == 2  # system engine: global only
+    assert len(effective_entries(entries, None)) == 2  # no book: global entries only
 
 
 def test_store_crud_and_listing(tmp_path):

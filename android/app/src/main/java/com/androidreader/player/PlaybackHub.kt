@@ -13,11 +13,11 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.androidreader.library.BookContent
 import com.androidreader.library.BookMeta
 import com.androidreader.library.BookPosition
+import com.androidreader.library.Languages
 import com.androidreader.library.Library
 import com.androidreader.library.Utterance
 import com.androidreader.net.ServerSettings
 import com.androidreader.net.TtsRequest
-import com.androidreader.tts.LanguageMapper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.IOException
@@ -339,7 +339,7 @@ object PlaybackHub {
             text = u.text,
             engine = meta.engine.ifBlank { settings.readerEngineId }.ifBlank { null },
             voice = v?.voice ?: meta.voice.ifBlank { settings.readerVoiceId }.ifBlank { null },
-            language = LanguageMapper.displayName(meta.language?.substringBefore('-')),
+            language = Languages.displayName(meta.language),
             delivery = v?.delivery,
             book = meta.id,
             sentencePauseMs = pauseAfter(book, u),

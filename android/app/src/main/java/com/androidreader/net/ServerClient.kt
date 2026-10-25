@@ -96,9 +96,9 @@ class ServerUnreachableException(message: String, cause: Throwable?) : IOExcepti
 /**
  * Talks to the PC server. Blocking; call from a background thread.
  *
- * Several URLs can be configured (home LAN, Tailscale...). Requests go to the
+ * Several URLs can be configured (home network, the PC's address on your VPN...). Requests go to the
  * URL that worked last; if it can't be *connected to*, the next one is tried,
- * so walking out of the house switches to the tunnel without user action.
+ * so walking out of the house switches to the VPN address without user action.
  * Errors after a connection was made (HTTP errors, slow synthesis) never fail
  * over, because another URL reaches the same PC.
  */
