@@ -47,6 +47,8 @@ data class BookScript(
     val model: String = "",
     /** (chapter, first paragraph, narrating character id or null), in reading order. */
     val narration: List<Triple<Int, Int, String?>> = emptyList(),
+    /** Fingerprint of each cast voice; changes when a voice is edited on the PC. */
+    val voiceVersions: Map<String, String> = emptyMap(),
 ) {
     fun character(id: String?) = characters.firstOrNull { it.id == id }
 
@@ -59,11 +61,13 @@ data class BookScript(
             val chars = j.optJSONArray("characters") ?: JSONArray()
             val lines = j.optJSONObject("lines") ?: JSONObject()
             val narration = j.optJSONArray("narration") ?: JSONArray()
+            val versions = j.optJSONObject("voice_versions") ?: JSONObject()
             return BookScript(
                 status = j.optString("status", "none"),
                 progress = j.optDouble("progress", 0.0).toFloat(),
                 detail = j.optString("detail"),
                 model = j.optString("model"),
+                voiceVersions = versions.keys().asSequence().associateWith { versions.optString(it) },
                 narration = (0 until narration.length()).mapNotNull { i ->
                     narration.optJSONArray(i)?.let { e ->
                         Triple(e.optInt(0), e.optInt(1), if (e.isNull(2)) null else e.optString(2))

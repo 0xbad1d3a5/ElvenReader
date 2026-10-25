@@ -12,6 +12,7 @@ import com.androidreader.net.parseServerUrls
 import com.androidreader.net.urlKind
 import com.androidreader.ui.wordAt
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -229,5 +230,15 @@ class BookScriptTest {
         assertEquals("neighbor", script.narratorAt(1, 90))
         assertNull(script.narratorAt(2, 3))
         assertNull(com.androidreader.drama.BookScript().narratorAt(0, 0))
+    }
+
+    @Test
+    fun editedVoicesMakeTheScriptDiffer() {
+        fun parse(version: String) = com.androidreader.drama.BookScript.fromJson(org.json.JSONObject(
+            """{"status":"done","characters":[],"lines":{},"voice_versions":{"v1":"$version"}}""",
+        ))
+        assertEquals(mapOf("v1" to "aaa"), parse("aaa").voiceVersions)
+        assertEquals(parse("aaa"), parse("aaa"))
+        assertNotEquals(parse("aaa"), parse("bbb"))  // the reader drops prepared audio when this changes
     }
 }

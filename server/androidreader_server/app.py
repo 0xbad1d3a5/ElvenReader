@@ -142,6 +142,11 @@ async def engine_unload(request: web.Request) -> web.Response:
 async def voices(request: web.Request) -> web.Response:
     store = request.app[VOICES_KEY]
     default = store.default(request.app[CONFIG_KEY].default_voice)
+    if request.query.get("details") == "1":  # the voice editor: every voice, with who uses it
+        from .voice_edit import listing_details
+
+        return web.json_response({"voices": listing_details(request.app, store),
+                                  "default": default.id if default else None})
     include_characters = request.query.get("all") == "1"
     items = [v.public() for v in store.list() if include_characters or v.source != "character"]
     return web.json_response({"voices": items, "default": default.id if default else None})
@@ -173,14 +178,6 @@ async def voice_create(request: web.Request) -> web.Response:
     except ValueError as exc:
         return _json_error(400, str(exc))
     return web.json_response(voice.public(), status=201)
-
-
-async def voice_update(request: web.Request) -> web.Response:
-    body = await _json_body(request)
-    voice = request.app[VOICES_KEY].update(request.match_info["voice"], **body)
-    if voice is None:
-        return _json_error(404, "No such voice")
-    return web.json_response(voice.public())
 
 
 async def voice_delete(request: web.Request) -> web.Response:
@@ -621,7 +618,6 @@ def make_app(
     r.add_get("/api/voices", voices)
     r.add_post("/api/voices", voice_create)
     r.add_post("/api/voices/design", voice_design)
-    r.add_patch("/api/voices/{voice}", voice_update)
     r.add_delete("/api/voices/{voice}", voice_delete)
     r.add_get("/api/voices/{voice}/audio", voice_audio)
     r.add_get("/api/pronunciations", pronunciations)
@@ -630,7 +626,8 @@ def make_app(
     r.add_delete("/api/pronunciations/{entry}", pronunciation_delete)
     r.add_post("/api/tts", tts)
 
-    from . import books
+    from . import books, voice_edit
 
+    voice_edit.setup(app)
     books.setup(app)
     return app

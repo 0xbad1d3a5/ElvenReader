@@ -282,3 +282,126 @@ async def test_gpu_lease_holds_tts_until_released(tmp_path):
         assert manager.idle_seconds() < 5  # "auto" LLM mode stays on the CPU right after speech
     finally:
         await manager.close()
+
+
+# ---------------------------------------------------------------- voice editor
+
+
+def _wav_seconds(data: bytes) -> float:
+    import io
+    import wave
+
+    with wave.open(io.BytesIO(data)) as w:
+        return w.getnframes() / w.getframerate()
+
+
+async def _put_audio(client, vid, wav, **fields):
+    import aiohttp
+
+    form = aiohttp.FormData()
+    for k, v in fields.items():
+        form.add_field(k, str(v))
+    form.add_field("audio", wav, filename="clip.wav", content_type="audio/wav")
+    return await client.put(f"/api/voices/{vid}/audio", data=form, headers=AUTH)
+
+
+async def test_cache_key_follows_the_voice_content_not_just_its_id(client):
+    await tts(client, text="alpha beta", voice="nar")
+    assert (await tts(client, text="alpha beta", voice="nar"))[0].headers["X-Cache"] == "hit"
+    r = await _put_audio(client, "nar", wav_bytes(b"\x20\x00" * 24000, 24000), ref_text="New words.")
+    assert r.status == 200
+    assert (await tts(client, text="alpha beta", voice="nar"))[0].headers["X-Cache"] == "miss"
+    # metadata that changes the sound (seed) also changes the key; the name does not
+    await client.patch("/api/voices/nar", json={"name": "Renamed"}, headers=AUTH)
+    assert (await tts(client, text="alpha beta", voice="nar"))[0].headers["X-Cache"] == "hit"
+    await client.patch("/api/voices/nar", json={"seed": 7}, headers=AUTH)
+    assert (await tts(client, text="alpha beta", voice="nar"))[0].headers["X-Cache"] == "miss"
+    # undoing back to the original reference finds the original clips again
+    for _ in range(3):
+        assert (await client.post("/api/voices/nar/revert", headers=AUTH)).status == 200
+    assert (await tts(client, text="alpha beta", voice="nar"))[0].headers["X-Cache"] == "hit"
+
+
+async def test_voice_patch_history_and_revert(client):
+    r = await client.patch("/api/voices/nar", json={"name": "Old Tom", "description": "male, elderly", "seed": "42",
+                                                    "language": "English"}, headers=AUTH)
+    v = await r.json()
+    assert (v["name"], v["description"], v["seed"], v["language"]) == ("Old Tom", "male, elderly", 42, "English")
+    assert len(v["history"]) == 1 and v["history"][0]["name"] == "Narrator"
+    assert (await client.patch("/api/voices/nar", json={"seed": "abc"}, headers=AUTH)).status == 400
+    unchanged = await (await client.patch("/api/voices/nar", json={"name": "Old Tom"}, headers=AUTH)).json()
+    assert len(unchanged["history"]) == 1  # no-op edits are not versions
+    back = await (await client.post("/api/voices/nar/revert", headers=AUTH)).json()
+    assert back["name"] == "Narrator" and back["seed"] is None and back["history"] == []
+    assert (await client.post("/api/voices/nar/revert", headers=AUTH)).status == 409
+    assert (await client.get("/api/voices/nope", headers=AUTH)).status == 404
+    assert (await client.get("/api/voices/nar")).status == 401
+
+
+async def test_replace_reference_trims_converts_and_transcribes(client):
+    from androidreader_server.voice_edit import TRANSCRIBE_KEY
+
+    heard = []
+
+    async def fake(wav, language):
+        heard.append((_wav_seconds(wav), language))
+        return "Transcribed words."
+
+    client.server.app[TRANSCRIBE_KEY].impl = fake
+    clip = wav_bytes(b"\x10\x00" * 16000 * 4, 16000)  # 4 s
+    r = await _put_audio(client, "nar", clip, start="0.5", end="3", language="English")
+    v = await r.json()
+    assert r.status == 200 and v["ref_text"] == "Transcribed words." and v["language"] == "English"
+    assert heard == [(2.5, "English")]
+    audio = await (await client.get("/api/voices/nar/audio", headers=AUTH)).read()
+    assert _wav_seconds(audio) == 2.5
+    # a typed transcript wins over Whisper
+    r = await _put_audio(client, "nar", clip, ref_text="My own words.")
+    assert (await r.json())["ref_text"] == "My own words." and len(heard) == 1
+    assert (await _put_audio(client, "nar", clip, start="3.9")).status == 400  # too short
+    assert (await _put_audio(client, "nar", b"not audio at all", ref_text="x")).status == 400
+    r = await client.post("/api/transcribe", data=clip, headers=AUTH)
+    assert (await r.json()) == {"text": "Transcribed words."}
+
+
+async def test_design_candidates_then_keep_one(client):
+    r = await client.post("/api/voices/nar/design", json={"description": "female, young, bright", "engine": "fake",
+                                                           "seeds": [11, 22], "count": 2}, headers=AUTH)
+    cands = (await r.json())["candidates"]
+    assert [c["seed"] for c in cands] == [11, 22]
+    audio = await client.get(f"/api/voice-candidates/{cands[1]['id']}/audio", headers=AUTH)
+    assert (await audio.read())[:4] == b"RIFF"
+    v = await (await client.post(f"/api/voices/nar/design/{cands[1]['id']}", headers=AUTH)).json()
+    assert (v["seed"], v["instruct"], v["description"]) == (22, "female, young, bright", "female, young, bright")
+    assert len(v["history"]) == 1
+    # the other candidates are gone once one is kept
+    assert (await client.get(f"/api/voice-candidates/{cands[0]['id']}/audio", headers=AUTH)).status == 404
+
+
+async def test_used_by_and_duplicate_for_one_character(client):
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    store = client.server.app[DRAMA_STORE_KEY]
+    store.save_book("book1", {"title": "A Book", "chapters": []})
+    s = store.script("book1")
+    s["characters"] = {"tom": {"name": "Tom", "voice": "nar"}, "ann": {"name": "Ann", "voice": "nar"}}
+    store.save_script("book1", s)
+    v = await (await client.get("/api/voices/nar", headers=AUTH)).json()
+    assert sorted(u["name"] for u in v["used_by"]) == ["Ann", "Tom"] and v["used_by"][0]["title"] == "A Book"
+    listing = await (await client.get("/api/voices?details=1", headers=AUTH)).json()
+    assert len(next(x for x in listing["voices"] if x["id"] == "nar")["used_by"]) == 2
+
+    r = await client.post("/api/voices/nar/duplicate", json={"book": "book1", "character": "tom"}, headers=AUTH)
+    copy = await r.json()
+    assert r.status == 201 and copy["id"] != "nar" and copy["name"] == "Tom (Narrator)"
+    assert [u["name"] for u in copy["used_by"]] == ["Tom"]
+    assert store.script("book1")["characters"]["ann"]["voice"] == "nar"
+    # the script tells clients which version of each cast voice they should hear
+    script = await (await client.get("/api/books/book1/script", headers=AUTH)).json()
+    assert set(script["voice_versions"]) == {"nar", copy["id"]}
+    before = script["voice_versions"][copy["id"]]
+    await client.patch(f"/api/voices/{copy['id']}", json={"seed": 5}, headers=AUTH)
+    script = await (await client.get("/api/books/book1/script", headers=AUTH)).json()
+    assert script["voice_versions"][copy["id"]] != before
+    assert (await client.post("/api/voices/nar/duplicate", json={"book": "book1", "character": "zed"},
+                              headers=AUTH)).status == 404

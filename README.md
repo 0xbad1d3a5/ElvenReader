@@ -320,6 +320,32 @@ The viewer has:
   Changes go through the same API as the app; the phone picks them up the next time you open
   the book (sentences it had already prepared are re-synthesized).
 
+## 10. Voice editor
+
+Edit any voice by hand in the viewer: 🎙 next to a character in a book's cast panel, or **Voices**
+(http://127.0.0.1:3950/books/voices, linked from every viewer page). The Voices page lists every
+voice, including imported VoiceStudio voices, pool voices and character voices, with who uses it.
+
+* **Details:** name, description, language, seed and the transcript of the reference clip.
+* **Redesign from a description:** describe the voice ("male, elderly, low pitch, british accent,
+  dry humour"), generate 3 candidates with different seeds (Qwen3-TTS or OmniVoice voice design;
+  about a minute), listen, and keep one. It becomes the voice's locked reference.
+* **Replace the reference clip:** upload a WAV, MP3 or other clip, or record one in the browser
+  (only on the PC itself or over HTTPS, browser rule). Trim the start and end, then **Transcribe**
+  with Whisper (large-v3-turbo, run in the IndexTTS venv; 5–20 s of one clear speaker works best)
+  and correct the transcript before saving. Left empty, the server transcribes on save.
+* **Preview:** any text, an optional delivery (*shouting*) and any installed engine.
+* **Shared voices:** pool voices are shared by many minor characters and possibly other books.
+  Editing one from a character asks first: *Edit for this character only* makes a copy and
+  assigns it to that character; *Edit everywhere* changes it for all.
+* **Undo:** every change keeps the previous version (the last 5); *Undo last change* goes back.
+
+The audio cache key includes a fingerprint of the voice's reference audio, transcript, language,
+seed and design description, not only its ID. Edited voices are therefore never served from old
+cached audio, and undoing an edit finds the old clips again. The book script sent to the phone
+carries the same fingerprints. When the reader opens a book whose voices changed, it drops the
+sentences it had prepared and fetches them again.
+
 ## Troubleshooting
 
 * **Could not reach the PC:** server running? Firewall rule added (`allow-firewall.ps1`, elevated)?
@@ -343,7 +369,9 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/ping` | Liveness; no auth. |
 | `GET /api/health` | Version, default engine, loaded engine/state, voice count, cache stats. |
 | `GET /api/engines` · `POST /api/engines/{id}/load` · `POST /api/engines/unload` | Engines with capabilities, licence and measured RTF; preload; free the GPU. |
-| `GET/POST /api/voices` · `PATCH/DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store. |
+| `GET/POST /api/voices` · `DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store (`?all=1` adds character voices, `?details=1` everything with who uses it). |
+| `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
+| `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?}` · listen · keep one · Whisper transcript of an uploaded clip. |
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |

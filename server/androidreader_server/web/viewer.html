@@ -48,11 +48,21 @@
   dialog select, dialog input { width:100%; }
   dialog .row { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
   mark { background:var(--hl); color:inherit; }
+  dialog.wide { max-width:820px; width:94vw; padding:18px 22px; }
+  dialog.wide textarea, dialog.wide input:not([type=file]):not([type=number]) { width:100%; }
+  textarea { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+  .sec { border-top:1px solid var(--line); margin-top:14px; padding-top:6px; }
+  .sec h4 { margin:6px 0; }
+  .line { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .line input[type=number] { width:6.5em; }
+  .banner { background:var(--hl); border-radius:8px; padding:8px 12px; margin:8px 0; }
+  table.vt { border-collapse:collapse; width:100%; } table.vt td, table.vt th { border-bottom:1px solid var(--line); padding:6px; text-align:left; vertical-align:top; }
 </style>
 </head>
 <body>
 <div id="app"></div>
 <dialog id="dlg"></dialog>
+<dialog id="vdlg" class="wide"></dialog>
 <script>
 "use strict";
 const EMBEDDED_TOKEN = __TOKEN__;  // only filled in for requests from the PC itself
@@ -141,13 +151,14 @@ function statusText(s) {
 const route = location.pathname.replace(/\/+$/, "");
 const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
 if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");
+else if (routeMatch && routeMatch[1] === "voices") voicesView();
 else if (routeMatch) bookView(routeMatch[1]); else libraryView();
 
 /* ------------------------------------------------------------------ library */
 
 async function libraryView() {
   $("#app").replaceChildren(
-    h("header", {}, h("h1", {}, "AndroidReader \u2014 processed books"), h("span", { class: "grow" }), EMBEDDED_TOKEN ? h("a", { href: "/" }, "Pairing") : null),
+    h("header", {}, h("h1", {}, "AndroidReader \u2014 processed books"), h("span", { class: "grow" }), h("a", { href: "/books/voices" }, "Voices"), EMBEDDED_TOKEN ? h("a", { href: "/" }, "Pairing") : null),
     h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
   const covers = {};
   async function refresh() {
@@ -173,6 +184,252 @@ async function libraryView() {
     if (books.some(b => BUSY.includes(b.status))) setTimeout(refresh, 8000);
   }
   refresh().catch(e => tokenScreen.shown || $("#grid").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
+/* ------------------------------------------------------------------ voices */
+
+const ENGINE_INFO = { list: null, def: "" };
+async function installedEngines() {
+  if (!ENGINE_INFO.list) {
+    const e = await get("/api/engines");
+    ENGINE_INFO.list = e.engines.filter(x => x.installed);
+    ENGINE_INFO.def = e.default || "";
+  }
+  return ENGINE_INFO.list;
+}
+const sharedPlayer = new Audio();
+function playUrl(url) { if (url) { sharedPlayer.pause(); sharedPlayer.src = url; sharedPlayer.play().catch(() => {}); } }
+async function playPath(path) { playUrl(await authBlobUrl(path)); }
+const usedByText = (v, limit = 8) => {
+  if (!v.used_by.length) return "nobody";
+  const names = v.used_by.map(u => u.default ? u.name : `${u.name} (${u.title || u.book})`);
+  return names.length > limit ? names.slice(0, limit).join(", ") + ` and ${names.length - limit} more` : names.join(", ");
+};
+
+async function voicesView() {
+  $("#app").replaceChildren(
+    h("header", {}, h("a", { href: "/books" }, "\u2190 Books"), h("h1", {}, "Voices"), h("span", { class: "grow" }),
+      h("input", { id: "vsearch", placeholder: "Filter by name, description or character\u2026", oninput: () => render() })),
+    h("div", { id: "vlist", style: { padding: "12px 18px", maxWidth: "1100px" } }, h("p", { class: "muted" }, "Loading\u2026")));
+  let voices = [];
+  async function load() { voices = (await get("/api/voices?details=1")).voices; render(); }
+  function render() {
+    const q = ($("#vsearch").value || "").toLowerCase();
+    const rows = voices.filter(v => !q || [v.name, v.description, v.instruct, usedByText(v)].join(" ").toLowerCase().includes(q));
+    $("#vlist").replaceChildren(h("p", { class: "small muted" },
+      `${voices.length} voices. Editing a voice changes it for everyone who uses it, unless you make a copy; the previous version is kept for undo.`),
+      h("table", { class: "vt" },
+        h("tr", {}, h("th", {}, ""), h("th", {}, "Voice"), h("th", {}, "Used by"), h("th", {}, "")),
+        ...rows.map(v => h("tr", {},
+          h("td", {}, h("button", { title: "Play the reference clip", onclick: () => playPath(`/api/voices/${v.id}/audio`) }, "\u25B6")),
+          h("td", {}, h("div", {}, h("b", {}, v.name), h("span", { class: "muted small" }, ` \u00b7 ${v.source}${v.language ? " \u00b7 " + v.language : ""}`)),
+            h("div", { class: "small muted" }, v.description || v.instruct || "")),
+          h("td", { class: "small" }, usedByText(v)),
+          h("td", {}, h("button", { onclick: () => openVoiceEditor(v.id, { onChange: load }) }, "Edit"))))));
+  }
+  load().catch(e => tokenScreen.shown || $("#vlist").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
+/* The voice editor. ctx: { book, character, characterName, onChange(voice) }. */
+async function openVoiceEditor(voiceId, ctx = {}) {
+  const d = $("#vdlg");
+  let v = await get(`/api/voices/${voiceId}`);
+  const engines = await installedEngines().catch(() => []);
+  let chosen = false;            // shared voice: "this character only" or "everywhere" picked
+  let candidates = [];
+  let clip = null;               // { blob, url, duration } for a new reference
+  let recorder = null;
+  const ui = {};                 // inputs that survive re-rendering
+
+  const changed = async (fresh) => { v = fresh; render(); if (ctx.onChange) await ctx.onChange(v); };
+  async function busy(btn, label, fn) {
+    const old = btn.textContent; btn.disabled = true; btn.textContent = label;
+    try { await fn(); } catch (e) { alert(e.message); } finally { btn.disabled = false; btn.textContent = old; }
+  }
+  function input(key, attrs, value) {
+    if (!ui[key]) {
+      ui[key] = h(attrs.rows ? "textarea" : "input", attrs);
+      ui[key].addEventListener("input", () => { ui[key].dataset.touched = "1"; });
+    }
+    if (value !== undefined && !ui[key].dataset.touched) ui[key].value = value ?? "";
+    return ui[key];
+  }
+  const engineSelect = (key, list, preferred) => {
+    if (!ui[key]) {
+      ui[key] = h("select", {}, ...list.map(e => h("option", { value: e.id }, e.label)));
+      if (list.some(e => e.id === preferred)) ui[key].value = preferred;
+    }
+    return ui[key];
+  };
+
+  async function setClip(blob) {
+    const buf = await blob.arrayBuffer();
+    let duration = 0;
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      duration = (await ac.decodeAudioData(buf.slice(0))).duration;
+      ac.close();
+    } catch (e) { alert("This browser can't play that file; the server may still read it."); }
+    clip = { blob, url: URL.createObjectURL(blob), duration };
+    ui.start = null; ui.end = null;
+    render();
+  }
+
+  function previewTrim() {
+    if (!clip) return;
+    const a = sharedPlayer, s = Number(ui.start.value) || 0, e = Number(ui.end.value) || clip.duration;
+    a.pause(); a.src = clip.url;
+    a.onloadedmetadata = () => { a.currentTime = s; a.play(); };
+    a.ontimeupdate = () => { if (a.currentTime >= e) { a.pause(); a.ontimeupdate = null; } };
+  }
+
+  function clipForm(extra) {
+    const f = new FormData();
+    f.append("audio", clip.blob, "clip");
+    if (Number(ui.start.value) > 0) f.append("start", ui.start.value);
+    if (ui.end.value && Number(ui.end.value) < clip.duration) f.append("end", ui.end.value);
+    for (const [k, val] of Object.entries(extra)) if (val) f.append(k, val);
+    return f;
+  }
+  async function send(method, path, form) {
+    const r = await fetch(path, { method, body: form, headers: { Authorization: "Bearer " + TOKEN } });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
+    return data;
+  }
+
+  async function toggleRecording(btn) {
+    if (recorder) { recorder.stop(); return; }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { alert("No microphone access: " + e.message); return; }
+    const chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => chunks.push(e.data);
+    recorder.onstop = () => { stream.getTracks().forEach(t => t.stop()); recorder = null; setClip(new Blob(chunks, { type: chunks[0]?.type || "audio/webm" })); };
+    recorder.start();
+    btn.textContent = "\u25A0 Stop recording";
+  }
+
+  function render() {
+    const others = v.used_by.filter(u => !(u.book === ctx.book && u.character === ctx.character));
+    const shared = ctx.character && others.length > 0;
+    const sections = [];
+    const head = h("div", { class: "line" }, h("h3", { style: { margin: 0, flex: 1 } }, "Voice: " + v.name),
+      h("button", { onclick: () => d.close() }, "Close"));
+    const info = h("p", { class: "small muted" }, `${v.source} \u00b7 used by ${usedByText(v)}`);
+
+    if (shared && !chosen) {
+      sections.push(h("div", { class: "banner" },
+        h("p", { style: { margin: "0 0 6px" } }, `This voice is also used by ${others.slice(0, 8).map(u => u.name).join(", ")}${others.length > 8 ? ` and ${others.length - 8} more` : ""}.`),
+        h("div", { class: "line" },
+          h("button", { class: "primary", onclick: (e) => busy(e.target, "Copying\u2026", async () => {
+            const copy = await api("POST", `/api/voices/${v.id}/duplicate`, { book: ctx.book, character: ctx.character }).then(r => r.data);
+            chosen = true; await changed(copy);
+          }) }, `Edit for ${ctx.characterName || "this character"} only (makes a copy)`),
+          h("button", { onclick: () => { chosen = true; render(); } }, "Edit everywhere"))));
+      d.replaceChildren(head, info, ...sections);
+      return;
+    }
+
+    // Reference and details
+    sections.push(h("div", { class: "sec" }, h("h4", {}, "Details"),
+      h("div", { class: "line" }, h("button", { onclick: () => playPath(`/api/voices/${v.id}/audio`) }, "\u25B6 Reference clip"),
+        h("span", { class: "small muted" }, v.seed != null ? `seed ${v.seed}` : "")),
+      h("label", {}, "Name"), input("name", {}, v.name),
+      h("label", {}, "Description (for you; use \u201cRedesign\u201d to change how it sounds)"), input("description", { rows: 2 }, v.description || v.instruct),
+      h("div", { class: "line" },
+        h("label", {}, "Language ", input("language", { list: "langs", style: { width: "11em" } }, v.language || "")),
+        h("label", {}, "Seed ", input("seed", { type: "number", step: 1 }, v.seed ?? ""))),
+      h("datalist", { id: "langs" }, ...Object.values(LANGS).map(l => h("option", { value: l }))),
+      h("label", {}, "Transcript of the reference clip (must match what is said)"), input("refText", { rows: 3 }, v.ref_text),
+      h("div", { class: "line" }, h("button", { class: "primary", onclick: (e) => busy(e.target, "Saving\u2026", async () => {
+        const body = { name: ui.name.value, description: ui.description.value, language: ui.language.value,
+          seed: ui.seed.value === "" ? null : ui.seed.value, ref_text: ui.refText.value };
+        for (const k of ["name", "description", "language", "seed", "refText"]) delete ui[k].dataset.touched;
+        await changed((await api("PATCH", `/api/voices/${v.id}`, body)).data);
+      }) }, "Save details"))));
+
+    // Redesign from a description
+    const designers = engines.filter(e => e.voice_design);
+    sections.push(h("div", { class: "sec" }, h("h4", {}, "Redesign from a description"),
+      designers.length ? null : h("p", { class: "small muted" }, "No installed engine can design voices."),
+      input("designText", { rows: 2, placeholder: "e.g. male, elderly, low pitch, british accent, dry humour" }, v.instruct || v.description),
+      h("div", { class: "line" }, h("span", { class: "small muted" }, "Engine"), engineSelect("designEngine", designers, "qwen3tts"),
+        h("button", { class: "primary", disabled: !designers.length, onclick: (e) => busy(e.target, "Generating 3 voices\u2026 (about a minute)", async () => {
+          candidates = (await api("POST", `/api/voices/${v.id}/design`, { description: ui.designText.value.trim(),
+            engine: ui.designEngine.value, count: 3, text: ui.designLine.value.trim() })).data.candidates;
+          render();
+        }) }, "Generate 3 candidates")),
+      h("label", {}, "Line the candidates speak (it becomes the new transcript)"),
+      input("designLine", { placeholder: "Leave empty to use the current transcript" }),
+      ...candidates.map((c, i) => h("div", { class: "line" },
+        h("button", { onclick: () => playPath(`/api/voice-candidates/${c.id}/audio`) }, `\u25B6 Candidate ${i + 1}`),
+        h("span", { class: "small muted" }, `seed ${c.seed}`),
+        h("button", { onclick: (e) => busy(e.target, "Keeping\u2026", async () => {
+          candidates = []; delete ui.designText.dataset.touched;
+          await changed((await api("POST", `/api/voices/${v.id}/design/${c.id}`)).data);
+        }) }, "Keep this one")))));
+
+    // New reference clip
+    const canRecord = !!(navigator.mediaDevices && window.MediaRecorder);
+    const file = h("input", { type: "file", accept: "audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm", onchange: (e) => e.target.files[0] && setClip(e.target.files[0]) });
+    const rec = h("button", { disabled: !canRecord, title: canRecord ? "" : "Recording needs this page on the PC (http://127.0.0.1) or HTTPS",
+      onclick: (e) => toggleRecording(e.target) }, recorder ? "\u25A0 Stop recording" : "\u25CF Record");
+    const clipBox = [];
+    if (clip) {
+      ui.start = ui.start || h("input", { type: "number", step: 0.1, min: 0, value: 0 });
+      ui.end = ui.end || h("input", { type: "number", step: 0.1, min: 0, value: clip.duration.toFixed(1) });
+      ui.newText = ui.newText || h("textarea", { rows: 3, placeholder: "Transcript (Transcribe fills it in; leave empty to let the server do it)" });
+      clipBox.push(
+        h("div", { class: "line" }, h("span", { class: "small" }, `Clip: ${clip.duration.toFixed(1)} s. Keep`),
+          h("span", { class: "small muted" }, "from"), ui.start, h("span", { class: "small muted" }, "to"), ui.end, h("span", { class: "small muted" }, "s"),
+          h("button", { onclick: previewTrim }, "\u25B6 Listen")),
+        ui.newText,
+        h("div", { class: "line" },
+          h("button", { onclick: (e) => busy(e.target, "Transcribing\u2026", async () => {
+            ui.newText.value = (await send("POST", "/api/transcribe", clipForm({ language: v.language }))).text;
+          }) }, "Transcribe (Whisper)"),
+          h("button", { class: "primary", onclick: (e) => busy(e.target, "Saving\u2026", async () => {
+            const fresh = await send("PUT", `/api/voices/${v.id}/audio`, clipForm({ ref_text: ui.newText.value.trim(), language: v.language }));
+            clip = null; ui.newText = null; delete ui.refText.dataset.touched;
+            await changed(fresh);
+          }) }, "Use as the reference")));
+    }
+    sections.push(h("div", { class: "sec" }, h("h4", {}, "Replace the reference clip"),
+      h("p", { class: "small muted", style: { margin: 0 } }, "5\u201320 s of clear speech by one person works best. WAV, MP3 and most other formats."),
+      h("div", { class: "line" }, file, rec), ...clipBox));
+
+    // Preview
+    const allEngines = engines;
+    sections.push(h("div", { class: "sec" }, h("h4", {}, "Preview"),
+      input("previewText", {}, "Stop! Don't you dare take another step, or I'll make you regret it."),
+      h("div", { class: "line" }, h("span", { class: "small muted" }, "Delivery"),
+        input("previewDelivery", { placeholder: "e.g. shouting", style: { width: "14em" } }),
+        h("span", { class: "small muted" }, "Engine"), engineSelect("previewEngine", allEngines, ENGINE_INFO.def),
+        h("button", { class: "primary", onclick: (e) => busy(e.target, "Synthesizing\u2026", async () => {
+          const body = { text: ui.previewText.value.trim(), voice: v.id, engine: ui.previewEngine.value };
+          if (ui.previewDelivery.value.trim()) body.delivery = ui.previewDelivery.value.trim();
+          if (v.language) body.language = v.language;
+          const r = await api("POST", "/api/tts", body);
+          playUrl(URL.createObjectURL(wav(r.data, Number(r.headers.get("X-Sample-Rate") || 24000))));
+        }) }, "\u25B6 Preview"))));
+
+    // Undo
+    sections.push(h("div", { class: "sec" }, h("div", { class: "line" },
+      h("button", { disabled: !v.history.length, onclick: (e) => busy(e.target, "Undoing\u2026", async () => {
+        for (const k in ui) if (ui[k] && ui[k].dataset) delete ui[k].dataset.touched;
+        await changed((await api("POST", `/api/voices/${v.id}/revert`)).data);
+      }) }, "\u21B6 Undo last change"),
+      h("span", { class: "small muted" }, v.history.length
+        ? `${v.history.length} earlier version${v.history.length > 1 ? "s" : ""} kept (last saved ${new Date(v.history[0].saved * 1000).toLocaleString()})`
+        : "No earlier versions."))));
+
+    d.replaceChildren(...nonNull([head, info, v.used_by.length > 1 ? h("p", { class: "small" }, `Changes apply to all ${v.used_by.length} users of this voice.`) : null, ...sections]));
+  }
+
+  render();
+  if (!d.open) d.showModal();
 }
 
 /* ------------------------------------------------------------------ book view */
@@ -214,6 +471,7 @@ async function bookView(id) {
     h("header", {},
       h("a", { href: "/books" }, "\u2190 Books"),
       h("h1", {}, st.book.title), h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
+      h("a", { href: "/books/voices" }, "Voices"),
       h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),
       h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); } })),
     h("div", { class: "layout" },
@@ -250,6 +508,10 @@ async function bookView(id) {
         onclick: () => { st.filterChar = st.filterChar === c.id ? "" : c.id; $("#charFilter").value = st.filterChar; renderText(); } },
         c.name, h("span", { class: "muted small" }, ` ${c.lines}`)),
       c.voice ? h("button", { title: "Voice sample: " + voiceName(c.voice), onclick: () => playSample(c.voice) }, "\u25B6") : h("span", { class: "muted small" }, "no voice"),
+      c.voice ? h("button", { title: "Edit voice", onclick: () => openVoiceEditor(c.voice, {
+        book: st.id, character: c.id, characterName: c.name,
+        onChange: async () => { flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); },
+      }) }, "\uD83C\uDF99") : null,
       h("button", { title: "Rename, merge or change voice", onclick: () => editCharacter(c) }, "\u270E"))));
   }
 

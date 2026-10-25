@@ -50,6 +50,18 @@ class Voice:
             "stable": True,
         }
 
+    def details(self) -> dict:
+        """Everything the voice editor shows and edits."""
+        return {
+            **self.public(),
+            "description": self.description,
+            "instruct": self.instruct,
+            "ref_text": self.ref_text,
+            "seed": self.seed,
+            "created": self.created,
+            "version": self.fingerprint,
+        }
+
     def worker_spec(self) -> dict:
         """What an engine worker needs to clone this voice."""
         return {
@@ -66,7 +78,7 @@ class Voice:
     def fingerprint(self) -> str:
         """Changes whenever anything that affects the voice's sound changes."""
         h = hashlib.sha256()
-        for part in (self.id, self.audio_sha, self.ref_text, self.language, str(self.seed)):
+        for part in (self.id, self.audio_sha, self.ref_text, self.language, str(self.seed), self.instruct):
             h.update(part.encode("utf-8"))
             h.update(b"\0")
         return h.hexdigest()[:16]
@@ -158,15 +170,103 @@ class VoiceStore:
         self._save(voice)
         return voice
 
+    # -- editing ---------------------------------------------------------------
+
+    HISTORY_KEEP = 5
+
+    def _history_dir(self, voice_id: str) -> Path:
+        return self.root / ".history" / voice_id
+
+    def _snapshot(self, voice: Voice) -> None:
+        """Keep the current version so an edit can be undone."""
+        d = self._history_dir(voice.id)
+        d.mkdir(parents=True, exist_ok=True)
+        stamp = f"{time.time_ns()}"
+        shutil.copyfile(voice.wav_path, d / f"{stamp}.wav")
+        (d / f"{stamp}.json").write_text(json.dumps(voice.to_json(), indent=2), encoding="utf-8")
+        for old in sorted(d.glob("*.json"))[:-self.HISTORY_KEEP]:
+            old.unlink(missing_ok=True)
+            old.with_suffix(".wav").unlink(missing_ok=True)
+
+    def history(self, voice_id: str) -> list[dict]:
+        """Earlier versions, newest first."""
+        out = []
+        for p in sorted(self._history_dir(voice_id).glob("*.json"), reverse=True):
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            out.append({"saved": int(p.stem) / 1e9, "name": raw.get("name", ""),
+                        "description": raw.get("description") or raw.get("instruct") or ""})
+        return out
+
+    def revert(self, voice_id: str) -> Voice | None:
+        """Go back to the previous version (the current one is dropped)."""
+        snaps = sorted(self._history_dir(voice_id).glob("*.json"))
+        if not snaps or self.get(voice_id) is None:
+            return None
+        snap = snaps[-1]
+        shutil.copyfile(snap.with_suffix(".wav"), self.root / f"{voice_id}.wav")
+        shutil.copyfile(snap, self.root / f"{voice_id}.json")
+        snap.unlink()
+        snap.with_suffix(".wav").unlink(missing_ok=True)
+        voice = self.get(voice_id)
+        voice.audio_sha = _sha_file(voice.wav_path)
+        self._save(voice)
+        return voice
+
     def update(self, voice_id: str, **changes) -> Voice | None:
         voice = self.get(voice_id)
         if voice is None:
             return None
+        new = Voice(**voice.to_json())
         for key in ("name", "ref_text", "language", "instruct", "description"):
             if key in changes and isinstance(changes[key], str):
-                setattr(voice, key, changes[key].strip())
+                setattr(new, key, changes[key].strip())
+        if "seed" in changes:
+            seed = changes["seed"]
+            if seed in (None, ""):
+                new.seed = None
+            elif isinstance(seed, (int, float, str)) and str(seed).strip().lstrip("-").isdigit():
+                new.seed = int(seed)
+            else:
+                raise ValueError("seed must be a whole number or empty")
+        if not new.name:
+            new.name = voice.name
+        if new.to_json() == voice.to_json():
+            return voice
+        self._snapshot(voice)
+        new.wav_path = voice.wav_path
+        self._save(new)
+        return new
+
+    def replace_audio(self, voice_id: str, wav: bytes, ref_text: str, **meta) -> Voice | None:
+        """New reference audio (and its transcript); `meta` may set instruct, description, seed, language."""
+        voice = self.get(voice_id)
+        if voice is None:
+            return None
+        if not wav.startswith(b"RIFF"):
+            raise ValueError("reference audio must be a WAV file")
+        self._snapshot(voice)
+        voice.wav_path.write_bytes(wav)
+        voice.audio_sha = _sha_file(voice.wav_path)
+        voice.ref_text = ref_text.strip()
+        for key in ("instruct", "description", "language"):
+            if isinstance(meta.get(key), str):
+                setattr(voice, key, meta[key].strip())
+        if "seed" in meta:
+            voice.seed = meta["seed"]
         self._save(voice)
         return voice
+
+    def duplicate(self, voice_id: str, name: str = "") -> Voice | None:
+        voice = self.get(voice_id)
+        if voice is None:
+            return None
+        return self.add(
+            name or f"{voice.name} (copy)", voice.wav_path, voice.ref_text, language=voice.language,
+            instruct=voice.instruct, seed=voice.seed, source=voice.source, description=voice.description,
+        )
 
     def delete(self, voice_id: str) -> bool:
         voice = self.get(voice_id)
@@ -174,6 +274,7 @@ class VoiceStore:
             return False
         for suffix in (".json", ".wav"):
             (self.root / f"{voice_id}{suffix}").unlink(missing_ok=True)
+        shutil.rmtree(self._history_dir(voice_id), ignore_errors=True)
         return True
 
     def import_omnivoice(self, db_path: Path, voices_dir: Path) -> list[Voice]:

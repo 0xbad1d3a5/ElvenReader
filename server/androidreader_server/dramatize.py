@@ -1201,7 +1201,20 @@ async def get_script(request: web.Request) -> web.Response:
             reconcile_narrators(book, s)
             refresh_narration(store, book_id, s)
             store.save_script(book_id, s)
-    return web.json_response(ScriptStore.public(s))
+    return web.json_response(with_voice_versions(request.app, ScriptStore.public(s)))
+
+
+def with_voice_versions(app: web.Application, public: dict) -> dict:
+    """Add each cast voice's fingerprint, so clients notice edited voices and drop prepared audio."""
+    from .app import VOICES_KEY
+
+    voices = app[VOICES_KEY]
+    versions = {}
+    for c in public.get("characters", []):
+        v = voices.get(c.get("voice"))
+        if v is not None:
+            versions[v.id] = v.fingerprint
+    return {**public, "voice_versions": versions}
 
 
 async def analyze(request: web.Request) -> web.Response:

@@ -70,6 +70,10 @@ class ServerConfig:
     llm_cpu_moe: int = 20
     # Engine used to create character voices from a description.
     voice_design_engine: str = "qwen3tts"
+    # Whisper fills in the transcript of new reference audio: the engine venv that has
+    # openai-whisper installed, and the model file under <models_dir>.
+    whisper_venv: str = "indextts"
+    whisper_model: str = "whisper/large-v3-turbo.pt"
 
     data_dir: str = field(default="", repr=False)
 
