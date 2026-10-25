@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VoiceStudioTTS"
+rootProject.name = "AndroidReader"
 include(":app")

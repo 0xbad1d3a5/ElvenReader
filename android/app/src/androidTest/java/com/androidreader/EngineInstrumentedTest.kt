@@ -1,10 +1,11 @@
-package com.androidvoicestudio.tts
+package com.androidreader
 
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.androidreader.net.ServerSettings
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -19,21 +20,22 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * End-to-end test of the engine on a device against a running relay + VoiceStudio.
+ * End-to-end test of the system TTS engine on a device against a running server.
  * Binds to this engine explicitly (the system default engine is left alone) and uses
  * synthesizeToFile so nothing is played aloud.
  *
  *   gradlew connectedDebugAndroidTest
- *     -Pandroid.testInstrumentationRunnerArguments.relayUrl=http://192.168.1.20:3950
- *     -Pandroid.testInstrumentationRunnerArguments.relayToken=<token>
+ *     -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://192.168.1.20:3950
+ *     -Pandroid.testInstrumentationRunnerArguments.serverToken=<token>
  */
 @RunWith(AndroidJUnit4::class)
 class EngineInstrumentedTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
-    private val settings = TtsSettings(context)
+    private val settings = ServerSettings(context)
     private lateinit var tts: TextToSpeech
-    private lateinit var saved: Pair<String, String>
+    private lateinit var saved: Pair<List<String>, String>
+    private lateinit var serverUrl: String
 
     private class Outcome {
         val latch = CountDownLatch(1)
@@ -44,11 +46,12 @@ class EngineInstrumentedTest {
     @Before
     fun setUp() {
         val args = InstrumentationRegistry.getArguments()
-        val url = args.getString("relayUrl")
-        val token = args.getString("relayToken")
-        assumeTrue("relayUrl/relayToken instrumentation arguments not given", url != null && token != null)
-        saved = settings.serverUrl to settings.token
-        settings.serverUrl = url!!
+        val url = args.getString("serverUrl")
+        val token = args.getString("serverToken")
+        assumeTrue("serverUrl/serverToken instrumentation arguments not given", url != null && token != null)
+        saved = settings.urls to settings.token
+        serverUrl = url!!
+        settings.urls = listOf(serverUrl)
         settings.token = token!!
 
         val ready = CountDownLatch(1)
@@ -64,7 +67,7 @@ class EngineInstrumentedTest {
     fun tearDown() {
         if (::tts.isInitialized) tts.shutdown()
         if (::saved.isInitialized) {
-            settings.serverUrl = saved.first
+            settings.urls = saved.first
             settings.token = saved.second
             settings.recordError(null) // don't leave test failures in the user's "Last error"
         }
@@ -100,14 +103,24 @@ class EngineInstrumentedTest {
     }
 
     @Test
-    fun synthesizesThroughRelay() {
+    fun synthesizesThroughServer() {
         tts.setLanguage(Locale.US)
         val file = File(context.cacheDir, "engine-test.wav").apply { delete() }
-        val outcome = synthesize("Hello from the VoiceStudio engine test on this phone.", file, "ok")
-        assertTrue("timed out", outcome.latch.await(90, TimeUnit.SECONDS))
+        val outcome = synthesize("Hello from the AndroidReader engine test on this phone.", file, "ok")
+        assertTrue("timed out", outcome.latch.await(180, TimeUnit.SECONDS))
         assertNull("error ${outcome.error}: ${settings.lastError}", outcome.error)
         // WAV header + at least one second of 24 kHz 16-bit mono audio.
         assertTrue("only ${file.length()} bytes", file.length() > 44 + 48000)
+    }
+
+    @Test
+    fun failsOverToTheNextUrl() {
+        settings.urls = listOf("http://192.0.2.1:3950", serverUrl) // TEST-NET-1 first: never routable
+        val file = File(context.cacheDir, "engine-failover.wav").apply { delete() }
+        val outcome = synthesize("Failing over to the second address.", file, "failover")
+        assertTrue("timed out", outcome.latch.await(180, TimeUnit.SECONDS))
+        assertNull("error ${outcome.error}: ${settings.lastError}", outcome.error)
+        assertTrue("only ${file.length()} bytes", file.length() > 44 + 24000)
     }
 
     @Test
@@ -134,7 +147,7 @@ class EngineInstrumentedTest {
 
     @Test
     fun unreachablePcFailsCleanly() {
-        settings.serverUrl = "http://192.0.2.1:3950" // TEST-NET-1: never routable
+        settings.urls = listOf("http://192.0.2.1:3950")
         val t0 = System.nanoTime()
         val outcome = synthesize("This should fail quickly.", File(context.cacheDir, "engine-fail.wav"), "fail")
         assertTrue("hung", outcome.latch.await(15, TimeUnit.SECONDS))

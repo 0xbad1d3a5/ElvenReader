@@ -1,9 +1,10 @@
-package com.androidvoicestudio.tts
+package com.androidreader.tts
 
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
+import com.androidreader.R
 import java.util.Locale
 
 /**
@@ -49,12 +50,12 @@ class GetSampleTextActivity : Activity() {
 
     private companion object {
         val SAMPLES = mapOf(
-            "de" to "Hallo! Dies ist VoiceStudio, das von deinem Computer aus über dein Telefon spricht.",
-            "es" to "¡Hola! Soy VoiceStudio, hablando desde tu ordenador a través de tu teléfono.",
-            "fr" to "Bonjour ! Ici VoiceStudio, qui parle depuis votre ordinateur via votre téléphone.",
-            "it" to "Ciao! Sono VoiceStudio e parlo dal tuo computer attraverso il tuo telefono.",
-            "nl" to "Hallo! Dit is VoiceStudio, dat vanaf je computer via je telefoon spreekt.",
-            "pt" to "Olá! Aqui é o VoiceStudio, falando do seu computador pelo seu telefone.",
+            "de" to "Hallo! Hier liest AndroidReader mit einer Stimme von deinem Computer vor.",
+            "es" to "\u00a1Hola! AndroidReader lee con una voz de tu ordenador.",
+            "fr" to "Bonjour ! AndroidReader lit avec une voix venue de votre ordinateur.",
+            "it" to "Ciao! AndroidReader legge con una voce dal tuo computer.",
+            "nl" to "Hallo! AndroidReader leest voor met een stem van je computer.",
+            "pt" to "Ol\u00e1! O AndroidReader l\u00ea com uma voz do seu computador.",
         )
     }
 }

@@ -1,4 +1,4 @@
-package com.androidvoicestudio.tts
+package com.androidreader.net
 
 import android.content.Context
 import android.net.ConnectivityManager
@@ -8,13 +8,14 @@ import java.net.InetAddress
 import java.net.URI
 
 /**
- * Picks the network that can actually reach the relay.
+ * Picks the network that can actually reach a LAN server URL.
  *
  * Phones often keep Wi-Fi connected while routing traffic over mobile data
  * (Samsung "Switch to mobile data", Android's own fallback when Wi-Fi looks
  * weak). A LAN address such as 192.168.1.20 is unreachable over mobile data, so
- * when the relay host is on a local subnet we bind our sockets to the network
- * that owns that subnet instead of trusting the system default.
+ * when the server host is on a local subnet we bind our sockets to the network
+ * that owns that subnet instead of trusting the system default. Tailscale and
+ * other VPN addresses are left to normal routing.
  */
 object LocalNetworks {
     /** Set once binding was refused (e.g. a VPN that forbids bypass); stop trying afterwards. */
@@ -30,7 +31,6 @@ object LocalNetworks {
         @Suppress("DEPRECATION") // allNetworks is the simplest synchronous snapshot
         for (network in cm.allNetworks) {
             val caps = cm.getNetworkCapabilities(network) ?: continue
-            // VPNs (e.g. Tailscale) are reached through normal routing.
             if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
             val lp = cm.getLinkProperties(network) ?: continue
             if (lp.linkAddresses.any { prefixContains(it.address.address, it.prefixLength, target) }) {
@@ -82,4 +82,40 @@ fun isBindRefusal(e: Throwable): Boolean {
         t = t.cause
     }
     return false
+}
+
+/**
+ * Accepts what a user types ("192.168.1.5", "pc:3950", "http://pc:3950/")
+ * and returns a base URL like "http://192.168.1.5:3950".
+ */
+fun normalizeServerUrl(input: String, defaultPort: Int = 3950): String {
+    var s = input.trim().trimEnd('/')
+    if (s.isEmpty()) return ""
+    if (!s.contains("://")) s = "http://$s"
+    val schemeEnd = s.indexOf("://") + 3
+    val hostPart = s.substring(schemeEnd).substringBefore('/')
+    val hasPort = if (hostPart.startsWith("[")) hostPart.contains("]:") else hostPart.contains(':')
+    val path = s.substring(schemeEnd + hostPart.length)
+    val host = if (hasPort) hostPart else "$hostPart:$defaultPort"
+    return s.substring(0, schemeEnd) + host + path
+}
+
+/** Splits user input (one URL per line, or comma-separated) into normalised, de-duplicated URLs. */
+fun parseServerUrls(input: String): List<String> =
+    input.split('\n', ',', ' ').map { normalizeServerUrl(it) }.filter { it.isNotEmpty() }.distinct()
+
+/** "lan", "tailscale" or "other", for display and to order failover (LAN first). */
+fun urlKind(url: String): String {
+    val host = LocalNetworks.hostOf(url) ?: return "other"
+    if (host.endsWith(".ts.net")) return "tailscale"
+    val ip = parseIpLiteral(host) ?: return "other"
+    if (ip.size == 4) {
+        val a = ip[0].toInt() and 0xFF
+        val b = ip[1].toInt() and 0xFF
+        if (a == 100 && b in 64..127) return "tailscale"
+        if (a == 10 || (a == 172 && b in 16..31) || (a == 192 && b == 168)) return "lan"
+    } else if ((ip[0].toInt() and 0xFE) == 0xFC) {
+        return if (ip[0].toInt() and 0xFF == 0xFD && ip[1].toInt() and 0xFF == 0x7A) "tailscale" else "lan"
+    }
+    return "other"
 }

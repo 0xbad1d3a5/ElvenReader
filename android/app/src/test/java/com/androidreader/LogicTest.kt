@@ -1,4 +1,13 @@
-package com.androidvoicestudio.tts
+package com.androidreader
+
+import com.androidreader.net.LocalNetworks
+import com.androidreader.net.isBindRefusal
+import com.androidreader.net.normalizeServerUrl
+import com.androidreader.net.parseIpLiteral
+import com.androidreader.net.prefixContains
+import com.androidreader.tts.LanguageMapper
+import com.androidreader.tts.PcmChunker
+import com.androidreader.tts.isSpeakable
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -57,7 +66,7 @@ class PcmChunkerTest {
 
 class TextTest {
     @Test
-    fun mapsIso3AndIso2CodesToVoiceStudioNames() {
+    fun mapsIso3AndIso2CodesToLanguageNames() {
         assertEquals("English", LanguageMapper.displayName("eng"))
         assertEquals("German", LanguageMapper.displayName("deu"))
         assertEquals("French", LanguageMapper.displayName("fr"))

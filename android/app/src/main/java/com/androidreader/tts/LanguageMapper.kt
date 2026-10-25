@@ -1,4 +1,4 @@
-package com.androidvoicestudio.tts
+package com.androidreader.tts
 
 import android.speech.tts.TextToSpeech
 import java.util.Locale
@@ -6,9 +6,9 @@ import java.util.MissingResourceException
 
 /**
  * Maps the ISO 639 / ISO 3166 codes the TTS framework hands us to the
- * language names VoiceStudio (OmniVoice) expects, e.g. "eng" -> "English".
+ * language names the TTS models expect, e.g. "eng" -> "English".
  *
- * OmniVoice is zero-shot across hundreds of languages, so every real
+ * The server's engines are zero-shot multilingual, so every real
  * language code is reported as available; unknown codes are rejected so
  * readers can still fall back to another engine for garbage input.
  */
@@ -52,26 +52,10 @@ object LanguageMapper {
         }
     }
 
-    /** English display name VoiceStudio understands, e.g. "English", "German". */
+    /** English display name the server understands, e.g. "English", "German". */
     fun displayName(language: String?): String? =
         toLocale(language)?.getDisplayLanguage(Locale.ENGLISH)?.takeIf { it.isNotBlank() }
 }
 
 /** True when there is anything worth synthesizing (at least one letter or digit). */
 fun isSpeakable(text: CharSequence): Boolean = text.any { it.isLetterOrDigit() }
-
-/**
- * Accepts what a user types ("192.168.1.5", "pc:3950", "http://pc:3950/")
- * and returns a base URL like "http://192.168.1.5:3950".
- */
-fun normalizeServerUrl(input: String, defaultPort: Int = 3950): String {
-    var s = input.trim().trimEnd('/')
-    if (s.isEmpty()) return ""
-    if (!s.contains("://")) s = "http://$s"
-    val schemeEnd = s.indexOf("://") + 3
-    val hostPart = s.substring(schemeEnd).substringBefore('/')
-    val hasPort = if (hostPart.startsWith("[")) hostPart.contains("]:") else hostPart.contains(':')
-    val path = s.substring(schemeEnd + hostPart.length)
-    val host = if (hasPort) hostPart else "$hostPart:$defaultPort"
-    return s.substring(0, schemeEnd) + host + path
-}

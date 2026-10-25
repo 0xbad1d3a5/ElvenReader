@@ -2,8 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- To find the Wi-Fi network that hosts the relay when mobile data is the default. -->
+    <!-- To find the Wi-Fi network that hosts the server when mobile data is the default,
+         and to switch between the home network and the tunnel. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Background reading with lock-screen and Bluetooth controls. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Lets the engine benchmark (androidTest) bind other installed TTS engines for comparison. -->
     <queries>
@@ -12,17 +18,52 @@
         </intent>
     </queries>
 
-    <!-- The relay runs on the LAN over plain HTTP. -->
+    <!-- The server is reached over the LAN or a private Tailscale tunnel with plain HTTP and a token. -->
     <application
+        android:name=".AndroidReaderApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.VoiceStudioTts"
+        android:theme="@style/Theme.AndroidReader"
         android:usesCleartextTraffic="true">
 
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Pairing link from the server's QR code page: areader://pair?url=...&url=...&token=... -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="pair"
+                    android:scheme="areader" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.EngineSettingsActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+
         <service
-            android:name=".VoiceStudioTtsService"
+            android:name=".player.PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".tts.AndroidReaderTtsService"
             android:exported="true"
             android:label="@string/engine_name">
             <intent-filter>
@@ -35,27 +76,7 @@
         </service>
 
         <activity
-            android:name=".SettingsActivity"
-            android:exported="true"
-            android:launchMode="singleTop"
-            android:windowSoftInputMode="adjustResize">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <!-- Pairing link from the relay's QR code page: vstts://pair?url=...&token=... -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data
-                    android:host="pair"
-                    android:scheme="vstts" />
-            </intent-filter>
-        </activity>
-
-        <activity
-            android:name=".CheckVoiceDataActivity"
+            android:name=".tts.CheckVoiceDataActivity"
             android:exported="true"
             android:theme="@android:style/Theme.NoDisplay">
             <intent-filter>
@@ -65,7 +86,7 @@
         </activity>
 
         <activity
-            android:name=".GetSampleTextActivity"
+            android:name=".tts.GetSampleTextActivity"
             android:exported="true"
             android:theme="@android:style/Theme.NoDisplay">
             <intent-filter>

@@ -1,4 +1,4 @@
-package com.androidvoicestudio.tts
+package com.androidreader
 
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
@@ -22,8 +22,8 @@ import java.util.concurrent.TimeUnit
  * instrumentation status output.
  *
  *   adb shell am instrument -w -r -e benchmarkEngine com.k2fsa.sherpa.onnx.tts.engine \
- *     -e class com.androidvoicestudio.tts.EngineBenchmark \
- *     com.androidvoicestudio.tts.test/androidx.test.runner.AndroidJUnitRunner
+ *     -e class com.androidreader.EngineBenchmark \
+ *     com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
  */
 @RunWith(AndroidJUnit4::class)
 class EngineBenchmark {

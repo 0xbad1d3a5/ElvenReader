@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">VoiceStudio TTS</string>
-    <string name="engine_name">VoiceStudio TTS</string>
-    <string name="sample_text">Hello! This is VoiceStudio, speaking from your computer through your phone.</string>
+    <string name="app_name">AndroidReader</string>
+    <string name="engine_name">AndroidReader</string>
+    <string name="sample_text">Hello! This is AndroidReader, reading with a voice from your computer.</string>
     <color name="ic_launcher_background">#2F4FC4</color>
 </resources>

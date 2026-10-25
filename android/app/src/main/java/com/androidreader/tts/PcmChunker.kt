@@ -1,4 +1,4 @@
-package com.androidvoicestudio.tts
+package com.androidreader.tts
 
 /**
  * Re-chunks a PCM16 byte stream for [android.speech.tts.SynthesisCallback.audioAvailable]:
