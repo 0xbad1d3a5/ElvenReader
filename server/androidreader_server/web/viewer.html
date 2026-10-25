@@ -55,7 +55,18 @@
 <dialog id="dlg"></dialog>
 <script>
 "use strict";
-const TOKEN = __TOKEN__;
+const EMBEDDED_TOKEN = __TOKEN__;  // only filled in for requests from the PC itself
+const TOKEN_KEY = "androidreader-token";
+const TOKEN = (() => {
+  const m = location.hash.match(/(?:^#|&)token=([^&]+)/);
+  if (m) {
+    const t = decodeURIComponent(m[1]);
+    localStorage.setItem(TOKEN_KEY, t);
+    history.replaceState(null, "", location.pathname + location.search);  // keep it out of the address bar
+    return t;
+  }
+  return EMBEDDED_TOKEN || localStorage.getItem(TOKEN_KEY) || "";
+})();
 const $ = (sel, el = document) => el.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
@@ -70,11 +81,32 @@ const h = (tag, attrs = {}, ...kids) => {
 };
 const nonNull = (xs) => xs.filter(x => x != null);
 
+function tokenScreen(message) {
+  if (tokenScreen.shown) return;
+  tokenScreen.shown = true;
+  const input = h("input", { type: "password", placeholder: "Token", autocomplete: "off", style: { width: "16em" } });
+  const save = (e) => {
+    e.preventDefault();
+    const t = input.value.trim();
+    if (!t) return;
+    localStorage.setItem(TOKEN_KEY, t);
+    location.reload();
+  };
+  $("#app").replaceChildren(h("form", { onsubmit: save, style: { maxWidth: "32em", margin: "3em auto" } },
+    h("h2", {}, "Enter the server token"),
+    h("p", {}, message),
+    h("div", { style: { display: "flex", gap: "8px" } }, input, h("button", { class: "primary" }, "Open")),
+    h("p", { class: "muted small" }, "The token is shown on the server's page on the PC (http://127.0.0.1:3950/). " +
+      "Easier: open the viewer link or scan its QR code from that page; this browser then remembers the token.")));
+  input.focus();
+}
+
 async function api(method, path, body) {
   const r = await fetch(path, {
     method, headers: { Authorization: "Bearer " + TOKEN, ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (r.status === 401) { tokenScreen("The token was not accepted. Enter the current one."); throw new Error("Wrong token"); }
   const ct = r.headers.get("Content-Type") || "";
   const data = ct.includes("json") ? await r.json() : await r.arrayBuffer();
   if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
@@ -84,6 +116,7 @@ const get = (p) => api("GET", p).then(r => r.data);
 
 async function authBlobUrl(path) {
   const r = await fetch(path, { headers: { Authorization: "Bearer " + TOKEN } });
+  if (r.status === 401) tokenScreen("The token was not accepted. Enter the current one.");
   if (!r.ok) return null;
   return URL.createObjectURL(await r.blob());
 }
@@ -107,13 +140,14 @@ function statusText(s) {
 
 const route = location.pathname.replace(/\/+$/, "");
 const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
-if (routeMatch) bookView(routeMatch[1]); else libraryView();
+if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");
+else if (routeMatch) bookView(routeMatch[1]); else libraryView();
 
 /* ------------------------------------------------------------------ library */
 
 async function libraryView() {
   $("#app").replaceChildren(
-    h("header", {}, h("h1", {}, "AndroidReader \u2014 processed books"), h("span", { class: "grow" }), h("a", { href: "/" }, "Pairing")),
+    h("header", {}, h("h1", {}, "AndroidReader \u2014 processed books"), h("span", { class: "grow" }), EMBEDDED_TOKEN ? h("a", { href: "/" }, "Pairing") : null),
     h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
   const covers = {};
   async function refresh() {
@@ -138,7 +172,7 @@ async function libraryView() {
     }
     if (books.some(b => BUSY.includes(b.status))) setTimeout(refresh, 8000);
   }
-  refresh().catch(e => $("#grid").replaceChildren(h("p", {}, "Error: " + e.message)));
+  refresh().catch(e => tokenScreen.shown || $("#grid").replaceChildren(h("p", {}, "Error: " + e.message)));
 }
 
 /* ------------------------------------------------------------------ book view */
@@ -154,6 +188,7 @@ async function bookView(id) {
   try {
     [st.book, st.script] = await Promise.all([get(`/api/books/${id}`), get(`/api/books/${id}/script`)]);
   } catch (e) {
+    if (tokenScreen.shown) return;
     app.replaceChildren(h("p", { style: { padding: "20px" } }, "Could not load this book: " + e.message, " ", h("a", { href: "/books" }, "Back")));
     return;
   }

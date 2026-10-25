@@ -186,23 +186,41 @@ async def test_book_list_text_cover_and_viewer(drama_client):
     assert (await c.get("/api/books/nope", headers=AUTH)).status == 404
     assert (await c.get("/api/books", headers={})).status == 401
 
-    # The viewer pages are served to this PC only and carry the token for their API calls.
+    # On this PC the viewer pages carry the token for their API calls.
     for path in ("/books", "/books/book1"):
         page = await (await c.get(path)).text()
         assert "AndroidReader books" in page and '"testtoken"' in page and "__TOKEN__" not in page
 
 
-async def test_viewer_is_loopback_only(drama_client):
+async def test_viewer_is_served_on_the_lan_without_the_token(drama_client):
     from unittest import mock
 
+    from aiohttp import web
     from aiohttp.test_utils import make_mocked_request
 
-    from androidreader_server.app import auth_middleware
-    from aiohttp import web
+    from androidreader_server.app import auth_middleware, viewer_page
 
-    req = make_mocked_request("GET", "/books/book1", transport=mock.Mock(get_extra_info=lambda *a, **k: ("192.168.1.9", 1234)))
+    app = drama_client.server.app
+    lan = mock.Mock(get_extra_info=lambda *a, **k: ("192.168.1.9", 1234))
+
+    def req(path, headers=None):
+        return make_mocked_request("GET", path, headers=headers or {}, app=app, transport=lan)
+
+    async def handler(r):
+        return web.Response(text="ok")
+
+    page = await auth_middleware(req("/books/book1"), viewer_page)
+    assert page.status == 200 and "const EMBEDDED_TOKEN = null;" in page.text and "testtoken" not in page.text
+    assert (await auth_middleware(req("/books"), viewer_page)).status == 200
+    # its API calls still need the token
+    assert (await auth_middleware(req("/api/books"), handler)).status == 401
+    assert (await auth_middleware(req("/api/books", {"Authorization": "Bearer wrong"}), handler)).status == 401
+    assert (await auth_middleware(req("/api/books", {"Authorization": "Bearer testtoken"}), handler)).status == 200
+    # the pairing page with the token stays on the PC
     with pytest.raises(web.HTTPNotFound):
-        await auth_middleware(req, lambda r: None)
+        await auth_middleware(req("/"), handler)
+    index = await (await drama_client.get("/")).text()
+    assert "/books#token=testtoken" in index
 
 
 async def test_reanalyze_keeps_corrections(drama_client):

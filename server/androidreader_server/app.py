@@ -59,9 +59,11 @@ def _json_error(status: int, detail: str) -> web.Response:
 @web.middleware
 async def auth_middleware(request: web.Request, handler):
     path = request.path
-    if path in _PUBLIC_PATHS:
+    if path in _PUBLIC_PATHS or path == "/books" or path.startswith("/books/"):
+        # The viewer page itself is public; it only embeds the token for loopback requests
+        # and otherwise asks for it, and every API call it makes needs the token.
         return await handler(request)
-    if path in _LOOPBACK_ONLY_PATHS or path == "/books" or path.startswith("/books/"):
+    if path in _LOOPBACK_ONLY_PATHS:
         if request.remote not in _LOOPBACK:
             raise web.HTTPNotFound()
         return await handler(request)
@@ -523,6 +525,10 @@ def pair_url(base: str, urls: list[str], token: str) -> str:
     return f"{base}/pair#t={quote(token, safe='')}" + (f"&u={quote(others, safe=':/,')}" if others else "")
 
 
+def viewer_url(base: str, token: str) -> str:
+    return f"{base}/books#token={quote(token, safe='')}"
+
+
 async def index(request: web.Request) -> web.Response:
     """Loopback-only page showing pairing QR codes (it contains the token)."""
     cfg = request.app[CONFIG_KEY]
@@ -535,7 +541,7 @@ async def index(request: web.Request) -> web.Response:
         "<p>Scan a code with the phone's camera, open the link, then tap <b>Open AndroidReader</b>. "
         "Every code carries all the addresses below, so the app switches between them by itself "
         "(e.g. home Wi-Fi and your VPN). Add more with <code>extra_urls</code> in config.json.</p>"
-        "<p><a href=\"/books\">Processed books (viewer)</a></p>",
+        "<p><a href=\"/books\">Processed books (viewer)</a> on this PC.</p>",
     ]
     if not urls:
         parts.append("<p><b>No network address found.</b> Is this PC connected to a network?</p>")
@@ -543,14 +549,23 @@ async def index(request: web.Request) -> web.Response:
         parts.append(
             f"<div class=card><h3>{html.escape(base)}</h3>{_qr_svg(pair_url(base, urls, cfg.token))}</div>"
         )
+    if urls:
+        parts.append("<h3>Open the viewer on another device</h3><p>Scan or open one of these links on a "
+                     "computer, tablet or phone on the same network (or your VPN). The token travels in "
+                     "the link's <code>#</code> part, which the browser keeps to itself and remembers.</p>")
+        for base in urls:
+            link = viewer_url(base, cfg.token)
+            parts.append(f"<div class=card><h3><a href=\"{html.escape(link)}\">{html.escape(base)}/books</a></h3>"
+                         f"{_qr_svg(link)}</div>")
     parts.append(f"<p>Token: <code>{html.escape(cfg.token)}</code></p></body></html>")
     return web.Response(text="".join(parts), content_type="text/html")
 
 
 async def viewer_page(request: web.Request) -> web.Response:
-    """Loopback-only book viewer (contains the token, so the page can call the API)."""
+    """Book viewer. Only loopback requests get the token embedded; other devices supply it."""
     page = (Path(__file__).parent / "web" / "viewer.html").read_text(encoding="utf-8")
-    page = page.replace("__TOKEN__", json.dumps(request.app[CONFIG_KEY].token))
+    token = request.app[CONFIG_KEY].token if request.remote in _LOOPBACK else None
+    page = page.replace("__TOKEN__", json.dumps(token))
     return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 

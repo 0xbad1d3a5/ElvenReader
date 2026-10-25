@@ -279,7 +279,14 @@ missing steps.
 
 ## 9. PC viewer
 
-Open **http://127.0.0.1:3950/books** on the PC (served to this PC only, like the pairing page):
+Open **http://127.0.0.1:3950/books** on the PC. On other devices on your network (or your VPN),
+open the viewer link or scan its QR code on the PC's server page (http://127.0.0.1:3950/). That
+link is `http://<PC address>:3950/books#token=…`. The browser keeps the `#` part to itself, stores
+the token and removes it from the address bar. Without the link, the viewer asks for the token,
+which is shown on the server page. The page is served to any address, but holds no token itself;
+every book, script and audio request needs the token, like the app's.
+
+The viewer has:
 
 * **Library:** every analysed book with its cover, word count, analysis progress and cast status.
 * **Book:** chapters in reading order; quotations coloured by speaker with the speaker's name and
@@ -324,7 +331,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |
 | `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`, `reanalyze`, optional base64 `cover`), dramatization status and lines. |
 | `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice, create character voices. |
-| `GET /pair` · `GET /` · `GET /books[/{id}]` | Pairing page (token in the URL fragment) · QR codes · book viewer (both PC only). |
+| `GET /pair` · `GET /` · `GET /books[/{id}]` | Pairing page (token in the URL fragment) · QR codes for pairing and the viewer (PC only) · book viewer (any address; asks for the token unless opened on the PC). |
 
 ## Development
 
