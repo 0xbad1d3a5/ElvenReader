@@ -217,3 +217,17 @@ class EpubParserTest {
         assertEquals("c.xhtml", EpubParser.resolve("content.opf", "c.xhtml"))
     }
 }
+
+class BookScriptTest {
+    @Test
+    fun narratorFollowsSectionsInReadingOrder() {
+        val script = com.androidreader.drama.BookScript.fromJson(org.json.JSONObject(
+            """{"status":"done","characters":[],"lines":{},"narration":[[0,0,"sasaki"],[1,90,"neighbor"],[2,0,null]]}""",
+        ))
+        assertEquals("sasaki", script.narratorAt(0, 5))
+        assertEquals("sasaki", script.narratorAt(1, 89))
+        assertEquals("neighbor", script.narratorAt(1, 90))
+        assertNull(script.narratorAt(2, 3))
+        assertNull(com.androidreader.drama.BookScript().narratorAt(0, 0))
+    }
+}

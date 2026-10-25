@@ -38,6 +38,13 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.all { test ->
+            // PC-side book export (server/scripts/process_book.py), see ExportBookTool.
+            listOf("exportEpub", "exportOut").forEach { key ->
+                project.findProperty(key)?.let { test.systemProperty(key, it.toString()) }
+            }
+            if (project.hasProperty("exportEpub")) test.outputs.upToDateWhen { false }
+        }
     }
 }
 

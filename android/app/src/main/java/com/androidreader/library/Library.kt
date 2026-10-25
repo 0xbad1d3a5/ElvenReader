@@ -157,7 +157,7 @@ class Library private constructor(context: Context) {
         try {
             resolver.openInputStream(uri)?.use { input -> tmp.outputStream().use { input.copyTo(it) } }
                 ?: throw IllegalArgumentException("Could not open the file")
-            val id = sha1(tmp).take(16)
+            val id = com.androidreader.drama.BookPayload.bookId(tmp)
             get(id)?.let { return@withContext it }
             val book = EpubParser.parse(tmp)
             val d = dir(id).apply { mkdirs() }
@@ -216,19 +216,6 @@ class Library private constructor(context: Context) {
                 JSONObject().put("title", title).put("author", author).put("language", language ?: JSONObject.NULL)
                     .put("chapters", arr).toString(),
             )
-        }
-
-        private fun sha1(file: File): String {
-            val md = MessageDigest.getInstance("SHA-1")
-            file.inputStream().use { input ->
-                val buf = ByteArray(1 shl 16)
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    md.update(buf, 0, n)
-                }
-            }
-            return md.digest().joinToString("") { "%02x".format(it) }
         }
 
         private fun saveCover(bytes: ByteArray, dest: File) {

@@ -39,6 +39,14 @@
                     android:host="pair"
                     android:scheme="areader" />
             </intent-filter>
+            <!-- "Open with AndroidReader" for EPUB files (and process_book.py over adb). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/epub+zip" />
+            </intent-filter>
         </activity>
 
         <service

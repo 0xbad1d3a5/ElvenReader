@@ -109,6 +109,12 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit, onPronunciations: () -> Uni
     LaunchedEffect(bookId) {
         content = withContext(Dispatchers.IO) { library.content(bookId) }
         if (PlaybackHub.state.value.bookId != bookId) PlaybackHub.open(bookId)
+        // Pick up speaker/voice changes made elsewhere (e.g. the PC viewer).
+        if (library.get(bookId)?.dramatized == true) {
+            val before = com.androidreader.drama.Dramatization.scripts.value[bookId]
+            val after = withContext(Dispatchers.IO) { runCatching { com.androidreader.drama.Dramatization.refresh(bookId) }.getOrNull() }
+            if (after != null && after != before && PlaybackHub.state.value.bookId == bookId) PlaybackHub.invalidateUpcoming()
+        }
     }
     val book = content ?: run {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }

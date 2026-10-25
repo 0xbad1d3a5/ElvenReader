@@ -45,18 +45,30 @@ data class BookScript(
     val characters: List<Character> = emptyList(),
     val lines: Map<String, Line> = emptyMap(),
     val model: String = "",
+    /** (chapter, first paragraph, narrating character id or null), in reading order. */
+    val narration: List<Triple<Int, Int, String?>> = emptyList(),
 ) {
     fun character(id: String?) = characters.firstOrNull { it.id == id }
+
+    /** Who narrates at a position (first-person books); null = the book's narrator voice. */
+    fun narratorAt(chapter: Int, paragraph: Int): String? =
+        narration.lastOrNull { (c, p, _) -> c < chapter || (c == chapter && p <= paragraph) }?.third
 
     companion object {
         fun fromJson(j: JSONObject): BookScript {
             val chars = j.optJSONArray("characters") ?: JSONArray()
             val lines = j.optJSONObject("lines") ?: JSONObject()
+            val narration = j.optJSONArray("narration") ?: JSONArray()
             return BookScript(
                 status = j.optString("status", "none"),
                 progress = j.optDouble("progress", 0.0).toFloat(),
                 detail = j.optString("detail"),
                 model = j.optString("model"),
+                narration = (0 until narration.length()).mapNotNull { i ->
+                    narration.optJSONArray(i)?.let { e ->
+                        Triple(e.optInt(0), e.optInt(1), if (e.isNull(2)) null else e.optString(2))
+                    }
+                },
                 characters = (0 until chars.length()).map { i ->
                     val c = chars.getJSONObject(i)
                     val aliases = c.optJSONArray("aliases") ?: JSONArray()
@@ -110,33 +122,27 @@ object Dramatization {
     }
 
     fun voicing(meta: BookMeta, u: Utterance): Voicing? {
-        val qid = u.quoteId ?: return null
         val script = script(meta.id) ?: return null
+        val qid = u.quoteId
+        if (qid == null) {
+            // First-person books: narration in the narrating character's own voice.
+            val narrator = script.character(script.narratorAt(u.chapter, u.paragraph)) ?: return null
+            return narrator.voice?.let { Voicing(voice = it, delivery = null, speaker = narrator.name) }
+        }
         val line = script.lines[qid] ?: return null
         val character = script.character(line.speaker)
         return Voicing(voice = character?.voice, delivery = line.delivery, speaker = character?.name)
     }
 
-    /** The book's text and quotation offsets, exactly as the phone segments them. */
+    /** The book's text and quotation offsets, exactly as the phone segments them (plus the cover). */
     fun bookPayload(bookId: String): JSONObject {
-        val content = Library.get(appContext).content(bookId)
-        val chapters = JSONArray()
-        content.chapters.forEachIndexed { ci, chapter ->
-            val paragraphs = JSONArray()
-            val quotes = JSONArray()
-            chapter.paragraphs.forEachIndexed { pi, p ->
-                paragraphs.put(p.text)
-                for (r in Quotes.regions(p.text)) {
-                    quotes.put(JSONArray().put("c${ci}p${pi}q${r.start}").put(pi).put(r.start).put(r.end))
-                }
-            }
-            chapters.put(JSONObject().put("title", chapter.title).put("paragraphs", paragraphs).put("quotes", quotes))
+        val library = Library.get(appContext)
+        val content = library.content(bookId)
+        val payload = BookPayload.build(content.meta.title, content.meta.author, content.meta.language, content.chapters)
+        library.coverFile(bookId).takeIf { it.exists() }?.let {
+            payload.put("cover", android.util.Base64.encodeToString(it.readBytes(), android.util.Base64.NO_WRAP))
         }
-        return JSONObject()
-            .put("title", content.meta.title)
-            .put("author", content.meta.author)
-            .put("language", content.meta.language ?: JSONObject.NULL)
-            .put("chapters", chapters)
+        return payload
     }
 
     /** Uploads the book if the server doesn't have it and starts (or resumes) the analysis. */
