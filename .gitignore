@@ -25,3 +25,6 @@ build.log
 Thumbs.db
 .vscode/
 .idea/
+
+# Gold excerpts from copyrighted books (used locally by eval_attribution.py)
+server/tests/gold/private/

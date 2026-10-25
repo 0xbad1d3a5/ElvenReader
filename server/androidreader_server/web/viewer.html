@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AndroidReader books</title>
+<style>
+  :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6b6b70; --line:#e2e2e6; --accent:#3557d6; --card:#fff; --hl:#fff3b0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141416; --fg:#e7e7ea; --muted:#9a9aa2; --line:#2c2c31; --accent:#7d9bff; --card:#1d1d21; --hl:#4a4320; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
+  a { color:var(--accent); text-decoration:none; }
+  button, select, input { font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  header { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:5; flex-wrap:wrap; }
+  header h1 { font-size:17px; margin:0; } header .grow { flex:1; }
+  .muted { color:var(--muted); } .small { font-size:12.5px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:18px; padding:18px; }
+  .book { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; color:inherit; }
+  .book .cover { aspect-ratio:2/3; background:#8883; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; font-weight:600; }
+  .book .cover img { width:100%; height:100%; object-fit:cover; }
+  .book .info { padding:10px; } .book .title { font-weight:600; }
+  .bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; margin:6px 0; } .bar > div { height:100%; background:var(--accent); }
+  .layout { display:grid; grid-template-columns:300px 1fr; height:calc(100vh - 55px); }
+  aside { border-right:1px solid var(--line); overflow:auto; padding:12px 12px 80px; background:var(--card); }
+  aside h3 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:16px 0 6px; }
+  .chap { display:block; width:100%; text-align:left; border:0; border-radius:4px; padding:3px 6px; background:none; }
+  .chap.on { background:var(--accent); color:#fff; } .chap .cnt { float:right; font-size:12px; opacity:.7; }
+  .char { display:flex; align-items:center; gap:6px; padding:4px 2px; border-bottom:1px solid var(--line); }
+  .char .sw { width:12px; height:12px; border-radius:3px; flex:none; }
+  .char .nm { flex:1; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .char button { padding:1px 6px; font-size:12px; }
+  main { overflow:auto; padding:20px 40px 120px; }
+  main .text { max-width:780px; margin:auto; font-size:17px; line-height:1.75; }
+  .text h2 { font-size:22px; } .text h4 { margin:26px 0 6px; color:var(--muted); font-size:13px; }
+  .text p { margin:0 0 .9em; } .text p.heading { font-weight:600; font-size:1.1em; }
+  .q { border-radius:4px; padding:1px 2px; cursor:pointer; }
+  .nar { cursor:pointer; border-radius:4px; }
+  .cur { outline:2px solid var(--accent); background:var(--hl); }
+  .tag { font-size:11.5px; border-radius:10px; padding:0 6px; margin:0 3px; white-space:nowrap; vertical-align:2px; cursor:pointer; border:1px solid currentColor; opacity:.85; }
+  .tag i { opacity:.8; } .tag.fix::after { content:" \270E"; }
+  .player { position:fixed; bottom:0; left:300px; right:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  dialog { border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); min-width:380px; max-width:560px; }
+  dialog label { display:block; margin:8px 0 2px; font-size:13px; color:var(--muted); }
+  dialog select, dialog input { width:100%; }
+  dialog .row { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+  mark { background:var(--hl); color:inherit; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<dialog id="dlg"></dialog>
+<script>
+"use strict";
+const TOKEN = __TOKEN__;
+const $ = (sel, el = document) => el.querySelector(sel);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
+  return el;
+};
+const nonNull = (xs) => xs.filter(x => x != null);
+
+async function api(method, path, body) {
+  const r = await fetch(path, {
+    method, headers: { Authorization: "Bearer " + TOKEN, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const ct = r.headers.get("Content-Type") || "";
+  const data = ct.includes("json") ? await r.json() : await r.arrayBuffer();
+  if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
+  return { data, headers: r.headers };
+}
+const get = (p) => api("GET", p).then(r => r.data);
+
+async function authBlobUrl(path) {
+  const r = await fetch(path, { headers: { Authorization: "Bearer " + TOKEN } });
+  if (!r.ok) return null;
+  return URL.createObjectURL(await r.blob());
+}
+
+function wav(pcm, rate) {
+  const b = new ArrayBuffer(44), v = new DataView(b), w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + pcm.byteLength, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, pcm.byteLength, true);
+  return new Blob([b, pcm], { type: "audio/wav" });
+}
+
+const PALETTE = ["#e6194b","#3cb44b","#4363d8","#f58231","#911eb4","#2bb5d8","#f032e6","#9a6324","#469990","#808000","#b07cd8","#000075","#a9a9a9","#7fb800","#d6608a","#d98c3a","#2e8b57","#8a5cf6","#800000","#c9a500"];
+const LANGS = { en:"English", de:"German", fr:"French", es:"Spanish", it:"Italian", pt:"Portuguese", ja:"Japanese", zh:"Chinese", ko:"Korean", ru:"Russian", nl:"Dutch", pl:"Polish" };
+const BUSY = ["queued", "running", "casting"];
+
+function statusText(s) {
+  return ({ none: "Not analysed", queued: "Waiting to be analysed", running: `Analysing ${Math.round(s.progress * 100)}%`,
+    casting: "Creating voices\u2026", done: "Analysed", error: "Error" })[s.status] + (s.detail ? " \u2014 " + s.detail : "");
+}
+
+const route = location.pathname.replace(/\/+$/, "");
+const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
+if (routeMatch) bookView(routeMatch[1]); else libraryView();
+
+/* ------------------------------------------------------------------ library */
+
+async function libraryView() {
+  $("#app").replaceChildren(
+    h("header", {}, h("h1", {}, "AndroidReader \u2014 processed books"), h("span", { class: "grow" }), h("a", { href: "/" }, "Pairing")),
+    h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
+  const covers = {};
+  async function refresh() {
+    const { books } = await get("/api/books");
+    const grid = $("#grid");
+    grid.replaceChildren(...(books.length ? [] : [h("p", { class: "muted" },
+      "No books yet. Process one with scripts\\process_book.py, or turn on dramatized reading for a book in the app.")]));
+    for (const b of books) {
+      const cover = h("div", { class: "cover" }, b.title);
+      if (b.cover) {
+        covers[b.id] = covers[b.id] || authBlobUrl(`/api/books/${b.id}/cover`);
+        covers[b.id].then(u => u && cover.replaceChildren(h("img", { src: u, alt: "" })));
+      }
+      grid.append(h("a", { class: "book", href: `/books/${b.id}` }, cover,
+        h("div", { class: "info" },
+          h("div", { class: "title" }, b.title),
+          h("div", { class: "muted small" }, b.author),
+          h("div", { class: "small" }, `${(b.words || 0).toLocaleString()} words \u00b7 ${b.quotes} quotations`),
+          BUSY.includes(b.status) ? h("div", { class: "bar" }, h("div", { style: { width: (b.status === "casting" ? 100 : b.progress * 100) + "%" } })) : null,
+          h("div", { class: "small" }, statusText(b)),
+          h("div", { class: "small muted" }, `${b.lines} lines \u00b7 ${b.characters} characters \u00b7 ${b.voiced} voiced`))));
+    }
+    if (books.some(b => BUSY.includes(b.status))) setTimeout(refresh, 8000);
+  }
+  refresh().catch(e => $("#grid").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
+/* ------------------------------------------------------------------ book view */
+
+async function bookView(id) {
+  const st = {
+    id, book: null, script: null, voices: [], engines: [], chapter: 0, filterChar: "", search: "",
+    narrator: localStorage.getItem("narrator:" + id) || "", engine: localStorage.getItem("engine:" + id) || "",
+    units: [], playing: -1, audio: new Audio(), fetches: new Map(), session: null,
+  };
+  const app = $("#app");
+  app.replaceChildren(h("p", { style: { padding: "20px" } }, "Loading\u2026"));
+  try {
+    [st.book, st.script] = await Promise.all([get(`/api/books/${id}`), get(`/api/books/${id}/script`)]);
+  } catch (e) {
+    app.replaceChildren(h("p", { style: { padding: "20px" } }, "Could not load this book: " + e.message, " ", h("a", { href: "/books" }, "Back")));
+    return;
+  }
+  const first = st.book.chapters.findIndex(c => c.quotes.length > 0);
+  const fromHash = new URLSearchParams(location.hash.slice(1)).get("c");
+  st.chapter = fromHash != null ? Number(fromHash) : Math.max(0, first);
+  st.language = LANGS[(st.book.language || "en").slice(0, 2).toLowerCase()] || null;
+
+  const charById = () => Object.fromEntries(st.script.characters.map(c => [c.id, c]));
+  const narratorAt = (ci, pi) => {
+    let who = null;
+    for (const [c, p, id] of st.script.narration || []) { if (c < ci || (c === ci && p <= pi)) who = id; else break; }
+    return who;
+  };
+  const color = (cid) => {
+    const idx = st.script.characters.findIndex(c => c.id === cid);
+    return idx < 0 ? "#888888" : PALETTE[idx % PALETTE.length];
+  };
+  const voiceName = (vid) => (st.voices.find(v => v.id === vid) || {}).name || vid || "default";
+  const filtering = () => !!(st.filterChar || st.search);
+
+  app.replaceChildren(
+    h("header", {},
+      h("a", { href: "/books" }, "\u2190 Books"),
+      h("h1", {}, st.book.title), h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
+      h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),
+      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); } })),
+    h("div", { class: "layout" },
+      h("aside", {},
+        h("h3", {}, "Chapters"), h("div", { id: "chapters" }),
+        h("h3", {}, "Cast"), h("p", { class: "small muted" }, "Click a name to see all their lines."), h("div", { id: "cast" }),
+        h("p", {}, h("button", { onclick: castVoices }, "Create missing voices"))),
+      h("main", {}, h("div", { class: "text", id: "text" }))),
+    h("div", { class: "player" },
+      h("button", { class: "primary", id: "playBtn", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6 Play"),
+      h("span", { class: "small muted" }, "Narrator voice"),
+      h("select", { id: "narrator", onchange: (e) => { st.narrator = e.target.value; localStorage.setItem("narrator:" + id, st.narrator); flushAudio(); } }),
+      h("span", { class: "small muted" }, "Model"),
+      h("select", { id: "engine", onchange: (e) => { st.engine = e.target.value; localStorage.setItem("engine:" + id, st.engine); flushAudio(); } }),
+      h("span", { class: "small", id: "playStatus" })));
+
+  function renderAll() { renderStatus(); renderCast(); renderSelectors(); renderText(); }
+
+  function renderStatus() { $("#status").textContent = statusText(st.script); }
+
+  function renderChapters() {
+    const lines = st.script.lines;
+    $("#chapters").replaceChildren(...st.book.chapters.map((c, i) => {
+      const done = c.quotes.filter(q => lines[q[0]]).length;
+      return h("button", { class: "chap" + (i === st.chapter && !filtering() ? " on" : ""), onclick: () => gotoChapter(i) },
+        c.title, h("span", { class: "cnt" }, c.quotes.length ? `${done}/${c.quotes.length}` : ""));
+    }));
+  }
+
+  function renderCast() {
+    $("#cast").replaceChildren(...st.script.characters.map(c => h("div", { class: "char" },
+      h("span", { class: "sw", style: { background: color(c.id) } }),
+      h("span", { class: "nm", title: [c.name, ...(c.aliases || [])].join(" / ") + (c.description ? "\n" + c.description : ""),
+        onclick: () => { st.filterChar = st.filterChar === c.id ? "" : c.id; $("#charFilter").value = st.filterChar; renderText(); } },
+        c.name, h("span", { class: "muted small" }, ` ${c.lines}`)),
+      c.voice ? h("button", { title: "Voice sample: " + voiceName(c.voice), onclick: () => playSample(c.voice) }, "\u25B6") : h("span", { class: "muted small" }, "no voice"),
+      h("button", { title: "Rename, merge or change voice", onclick: () => editCharacter(c) }, "\u270E"))));
+  }
+
+  function renderSelectors() {
+    const cf = $("#charFilter");
+    cf.replaceChildren(h("option", { value: "" }, "All speakers"), h("option", { value: "__narrator__" }, "Quotes given to the narrator"),
+      ...st.script.characters.map(c => h("option", { value: c.id }, `${c.name} (${c.lines})`)));
+    cf.value = st.filterChar;
+    const nv = $("#narrator");
+    nv.replaceChildren(h("option", { value: "" }, "Server default (" + voiceName(st.defaultVoice) + ")"),
+      ...st.voices.filter(v => v.source !== "character").map(v => h("option", { value: v.id }, v.name)));
+    nv.value = st.narrator;
+    const en = $("#engine");
+    en.replaceChildren(h("option", { value: "" }, "Server default (" + (st.defaultEngine || "") + ")"),
+      ...st.engines.map(e => h("option", { value: e.id }, e.label)));
+    en.value = st.engine;
+  }
+
+  function gotoChapter(i) {
+    st.chapter = i; st.filterChar = ""; st.search = "";
+    $("#charFilter").value = ""; $("#search").value = "";
+    history.replaceState(null, "", "#c=" + i);
+    renderText(); $("main").scrollTop = 0;
+  }
+
+  /* A paragraph as narration and quotation pieces. */
+  function pieces(ci, pi) {
+    const ch = st.book.chapters[ci], text = ch.paragraphs[pi];
+    const qs = ch.quotes.filter(q => q[1] === pi).sort((a, b) => a[2] - b[2]);
+    const out = []; let pos = 0;
+    for (const [qid, , s, e] of qs) {
+      if (s > pos) out.push({ kind: "n", text: text.slice(pos, s) });
+      out.push({ kind: "q", qid, text: text.slice(s, e) });
+      pos = e;
+    }
+    if (pos < text.length) out.push({ kind: "n", text: text.slice(pos) });
+    return out;
+  }
+
+  function highlight(t) {
+    if (!st.search) return [t];
+    const out = [], low = t.toLowerCase(), q = st.search.toLowerCase(); let i = 0, j;
+    while ((j = low.indexOf(q, i)) >= 0) { out.push(t.slice(i, j), h("mark", {}, t.slice(j, j + q.length))); i = j + q.length; }
+    out.push(t.slice(i)); return out;
+  }
+
+  function renderParagraph(ci, pi, units) {
+    const lines = st.script.lines, chars = charById();
+    const p = h("p", { class: pi === 0 && st.book.chapters[ci].paragraphs[0] === st.book.chapters[ci].title ? "heading" : null });
+    const ps = pieces(ci, pi);
+    ps.forEach((piece, k) => {
+      if (piece.kind === "n") {
+        const span = h("span", { class: "nar" }, ...highlight(piece.text));
+        if (/[\p{L}\p{N}]/u.test(piece.text)) {
+          const idx = units.length;
+          const narrator = chars[narratorAt(ci, pi)];
+          units.push({ text: piece.text.trim(), voice: narrator ? narrator.voice : null, delivery: null, el: span, ci, pi });
+          span.title = "Click to play from here";
+          span.addEventListener("click", () => playFrom(idx));
+        }
+        p.append(span);
+        return;
+      }
+      const line = lines[piece.qid];
+      const c = line && line.speaker ? chars[line.speaker] : null;
+      const col = line ? color(c ? c.id : null) : "transparent";
+      const span = h("span", { class: "q", title: "Click to play from here",
+        style: { background: line ? col + "22" : "transparent", boxShadow: `inset 0 -2px 0 ${col}` } }, ...highlight(piece.text));
+      const idx = units.length;
+      units.push({ text: piece.text, voice: c ? c.voice : null, delivery: line ? line.delivery : null, el: span, ci, pi, qid: piece.qid });
+      span.addEventListener("click", () => playFrom(idx));
+      p.append(span);
+      // One tag per speaker turn: skip it when the next piece continues the same quotation ("Yes," he said, "I will.").
+      const between = ps[k + 1], next = ps[k + 2];
+      const sameTurn = next && next.kind === "q" && between.text.length < 80 && /[,;:\u2014\u2013-]\s*$/.test(between.text) &&
+        JSON.stringify(lines[next.qid] || null) === JSON.stringify(line || null);
+      if (!sameTurn) {
+        p.append(h("span", { class: "tag" + (line && line.corrected ? " fix" : ""), style: { color: line ? col : "var(--muted)" },
+          title: line && line.corrected ? "Corrected by you. Click to change." : "Change speaker or delivery",
+          onclick: (e) => { e.stopPropagation(); editLine(piece.qid, piece.text); } },
+          line ? (c ? c.name : "narrator") : "not analysed yet", line && line.delivery ? h("i", {}, " \u00b7 " + line.delivery) : null));
+      }
+    });
+    return p;
+  }
+
+  function matches(ci, pi) {
+    const ch = st.book.chapters[ci];
+    if (st.search && !ch.paragraphs[pi].toLowerCase().includes(st.search.toLowerCase())) return false;
+    if (st.filterChar) {
+      const qs = ch.quotes.filter(q => q[1] === pi);
+      if (st.filterChar === "__narrator__") return qs.some(q => st.script.lines[q[0]] && !st.script.lines[q[0]].speaker);
+      return qs.some(q => (st.script.lines[q[0]] || {}).speaker === st.filterChar);
+    }
+    return true;
+  }
+
+  function renderText() {
+    stopPlayback();
+    const text = $("#text"), units = [];
+    if (filtering()) {
+      let n = 0;
+      const out = [h("h2", {}, "Matching paragraphs")];
+      st.book.chapters.forEach((ch, ci) => {
+        let header = false;
+        ch.paragraphs.forEach((_, pi) => {
+          if (n >= 600 || !matches(ci, pi)) return;
+          if (!header) { out.push(h("h4", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); gotoChapter(ci); } }, ch.title))); header = true; }
+          out.push(renderParagraph(ci, pi, units)); n++;
+        });
+      });
+      if (n === 0) out.push(h("p", { class: "muted" }, "Nothing matches."));
+      if (n >= 600) out.push(h("p", { class: "muted" }, "Showing the first 600 paragraphs."));
+      text.replaceChildren(...out);
+    } else {
+      const ch = st.book.chapters[st.chapter], chars = charById();
+      const marker = (pi) => {
+        const here = narratorAt(st.chapter, pi), before = pi === 0 ? Symbol() : narratorAt(st.chapter, pi - 1);
+        if (here === before || !(st.script.narration || []).length) return null;
+        const c = chars[here];
+        return h("p", { class: "small muted" }, c ? h("span", {}, "Narrated by ", h("b", { style: { color: color(c.id) } }, c.name),
+          c.voice ? ` (${voiceName(c.voice)})` : " (no voice yet)") : "Narrated in the book's narrator voice");
+      };
+      text.replaceChildren(...nonNull([h("h2", {}, ch.title), ...ch.paragraphs.flatMap((_, pi) => [marker(pi), renderParagraph(st.chapter, pi, units)]),
+        st.chapter + 1 < st.book.chapters.length
+          ? h("p", {}, h("button", { onclick: () => gotoChapter(st.chapter + 1) }, "Next: " + st.book.chapters[st.chapter + 1].title)) : null]));
+    }
+    st.units = units; st.playing = -1; flushAudio();
+    renderChapters();
+  }
+
+  /* -------------------------------------------------------------- playback */
+
+  function unitRequest(i) {
+    const u = st.units[i], next = st.units[i + 1];
+    const req = { text: u.text, book: st.id, sentence_pause_ms: next && next.pi === u.pi && next.ci === u.ci ? 120 : 450 };
+    if (st.engine) req.engine = st.engine;
+    if (st.language) req.language = st.language;
+    if (u.voice || st.narrator) req.voice = u.voice || st.narrator;
+    if (u.delivery) req.delivery = u.delivery;
+    return req;
+  }
+
+  function fetchUnit(i) {
+    if (!st.units[i]) return null;
+    if (!st.fetches.has(i)) {
+      st.fetches.set(i, api("POST", "/api/tts", unitRequest(i))
+        .then(r => URL.createObjectURL(wav(r.data, Number(r.headers.get("X-Sample-Rate") || 24000)))));
+    }
+    return st.fetches.get(i);
+  }
+
+  function flushAudio() { st.fetches.clear(); }
+
+  async function playFrom(i) {
+    stopPlayback();
+    const session = (st.session = Symbol("play"));
+    $("#playBtn").textContent = "\u25A0 Stop";
+    for (let k = i; k < st.units.length; k++) {
+      if (st.session !== session) return;
+      const u = st.units[k];
+      st.playing = k;
+      document.querySelectorAll(".cur").forEach(e => e.classList.remove("cur"));
+      u.el.classList.add("cur");
+      u.el.scrollIntoView({ block: "center", behavior: "smooth" });
+      $("#playStatus").textContent = "Synthesizing on the PC\u2026";
+      let url;
+      try {
+        url = await fetchUnit(k);
+        fetchUnit(k + 1); fetchUnit(k + 2);
+      } catch (e) {
+        $("#playStatus").textContent = "Error: " + e.message; st.session = null; $("#playBtn").textContent = "\u25B6 Play"; return;
+      }
+      if (st.session !== session) return;
+      $("#playStatus").textContent = u.qid ? "Playing a line" : "Playing narration";
+      st.audio.src = url;
+      await st.audio.play().catch(() => {});
+      await new Promise(res => { st.audio.onended = res; st.audio.onpause = res; });
+    }
+    if (st.session === session) stopPlayback();
+  }
+
+  function stopPlayback() {
+    st.session = null;
+    st.audio.pause();
+    const b = $("#playBtn"); if (b) b.textContent = "\u25B6 Play";
+    const s = $("#playStatus"); if (s) s.textContent = "";
+  }
+
+  async function playSample(voiceId) {
+    stopPlayback();
+    const url = await authBlobUrl(`/api/voices/${voiceId}/audio`);
+    if (url) { st.audio.src = url; st.audio.play(); }
+  }
+
+  /* -------------------------------------------------------------- editing */
+
+  async function reloadScript() {
+    st.script = await get(`/api/books/${st.id}/script`);
+    renderAll();
+  }
+
+  function dialog(title, body, onSave) {
+    const d = $("#dlg");
+    d.replaceChildren(h("form", { method: "dialog" }, h("h3", { style: { marginTop: 0 } }, title), ...nonNull(body),
+      h("div", { class: "row" }, h("button", { value: "cancel" }, "Cancel"), h("button", { class: "primary", value: "ok" }, "Save"))));
+    d.onclose = async () => { if (d.returnValue === "ok") { try { await onSave(); } catch (e) { alert(e.message); } } };
+    d.showModal();
+  }
+
+  function editLine(qid, text) {
+    const line = st.script.lines[qid] || {};
+    const sel = h("select", {}, h("option", { value: "" }, "Narrator (nobody speaks)"),
+      ...st.script.characters.map(c => h("option", { value: c.id }, c.name)), h("option", { value: "__new__" }, "Someone else\u2026"));
+    sel.value = line.speaker || "";
+    const other = h("input", { placeholder: "New character's name" });
+    const del = h("input", { value: line.delivery || "", placeholder: "e.g. shouting, urgent" });
+    dialog("Who says this?", [h("p", {}, text), h("label", {}, "Speaker"), sel, h("label", {}, "New character (for \u201csomeone else\u201d)"), other,
+      h("label", {}, "Delivery"), del], async () => {
+      const speaker = sel.value === "__new__" ? other.value.trim() || null : sel.value || null;
+      await api("PATCH", `/api/books/${st.id}/lines/${qid}`, { speaker, delivery: del.value.trim() });
+      await reloadScript();
+    });
+  }
+
+  function editCharacter(c) {
+    const name = h("input", { value: c.name });
+    const voice = h("select", {}, h("option", { value: "" }, "No voice (narrator's)"),
+      ...st.voices.map(v => h("option", { value: v.id }, v.name + (v.source === "character" ? " (character)" : ""))));
+    voice.value = c.voice || "";
+    const merge = h("select", {}, h("option", { value: "" }, "Nobody else"),
+      ...st.script.characters.filter(o => o.id !== c.id).map(o => h("option", { value: o.id }, o.name)));
+    dialog(c.name, [
+      c.aliases && c.aliases.length ? h("p", { class: "small muted" }, "Also called: " + c.aliases.join(", ")) : null,
+      c.description ? h("p", { class: "small" }, c.description) : null,
+      h("label", {}, "Name"), name, h("label", {}, "Voice"), voice, h("label", {}, "Same person as\u2026 (merge)"), merge,
+    ], async () => {
+      const body = { name: name.value.trim(), voice: voice.value || null };
+      if (merge.value) body.merge_into = merge.value;
+      await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, body);
+      await reloadScript();
+    });
+  }
+
+  async function castVoices() {
+    try { await api("POST", `/api/books/${st.id}/cast`, {}); } catch (e) { alert(e.message); return; }
+    const poll = async () => {
+      st.script = await get(`/api/books/${st.id}/script`);
+      renderStatus();
+      if (st.script.status === "casting") setTimeout(poll, 5000);
+      else { st.voices = (await get("/api/voices?all=1")).voices; renderAll(); }
+    };
+    poll();
+  }
+
+  /* Keep following an analysis that is still running. */
+  function follow() {
+    if (!BUSY.includes(st.script.status)) return;
+    setTimeout(async () => {
+      const before = Object.keys(st.script.lines).length;
+      st.script = await get(`/api/books/${st.id}/script`);
+      renderStatus(); renderCast();
+      if (Object.keys(st.script.lines).length !== before && !st.session && !$("#dlg").open) renderText();
+      if (!BUSY.includes(st.script.status)) { st.voices = (await get("/api/voices?all=1")).voices; renderAll(); }
+      follow();
+    }, 10000);
+  }
+
+  renderAll();
+  get("/api/voices?all=1").then(v => { st.voices = v.voices; st.defaultVoice = v.default; renderSelectors(); renderCast(); }).catch(() => {});
+  get("/api/engines").then(e => { st.engines = e.engines.filter(x => x.installed); st.defaultEngine = e.default; renderSelectors(); }).catch(() => {});
+  follow();
+}
+</script>
+</body>
+</html>

@@ -23,6 +23,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["androidreader_server", "androidreader_server.engines"]
 
+[tool.setuptools.package-data]
+androidreader_server = ["web/*.html"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

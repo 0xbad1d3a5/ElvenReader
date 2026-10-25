@@ -6,6 +6,7 @@ import base64
 import contextlib
 import html
 import io
+import json
 import logging
 import secrets
 import time
@@ -60,7 +61,7 @@ async def auth_middleware(request: web.Request, handler):
     path = request.path
     if path in _PUBLIC_PATHS:
         return await handler(request)
-    if path in _LOOPBACK_ONLY_PATHS:
+    if path in _LOOPBACK_ONLY_PATHS or path == "/books" or path.startswith("/books/"):
         if request.remote not in _LOOPBACK:
             raise web.HTTPNotFound()
         return await handler(request)
@@ -533,7 +534,8 @@ async def index(request: web.Request) -> web.Response:
         "<h2>AndroidReader server</h2>",
         "<p>Scan a code with the phone's camera, open the link, then tap <b>Open AndroidReader</b>. "
         "Every code carries all the addresses below, so the app switches between them by itself "
-        "(e.g. home Wi-Fi and your VPN). Add more with <code>extra_urls</code> in config.json.</p>",
+        "(e.g. home Wi-Fi and your VPN). Add more with <code>extra_urls</code> in config.json.</p>"
+        "<p><a href=\"/books\">Processed books (viewer)</a></p>",
     ]
     if not urls:
         parts.append("<p><b>No network address found.</b> Is this PC connected to a network?</p>")
@@ -543,6 +545,13 @@ async def index(request: web.Request) -> web.Response:
         )
     parts.append(f"<p>Token: <code>{html.escape(cfg.token)}</code></p></body></html>")
     return web.Response(text="".join(parts), content_type="text/html")
+
+
+async def viewer_page(request: web.Request) -> web.Response:
+    """Loopback-only book viewer (contains the token, so the page can call the API)."""
+    page = (Path(__file__).parent / "web" / "viewer.html").read_text(encoding="utf-8")
+    page = page.replace("__TOKEN__", json.dumps(request.app[CONFIG_KEY].token))
+    return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- app
@@ -586,6 +595,8 @@ def make_app(
     app.cleanup_ctx.append(_lifecycle)
     r = app.router
     r.add_get("/", index)
+    r.add_get("/books", viewer_page)
+    r.add_get("/books/{book}", viewer_page)
     r.add_get("/pair", pair_page)
     r.add_get("/api/ping", ping)
     r.add_get("/api/health", health)

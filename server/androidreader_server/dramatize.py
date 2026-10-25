@@ -15,6 +15,7 @@ characters, and correct any line; corrections always win.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -74,6 +75,14 @@ class Chunk:
     quotes: list[tuple[str, int, int, int]]  # (quote id, paragraph, start, end)
 
 
+_POV_RE = re.compile(r"\bPOV\b|point of view|['\u2019]s side\b|\bside\s*[:\u2014-]", re.IGNORECASE)
+
+
+def is_pov_marker(text: str) -> bool:
+    """A short heading such as "(The Neighbor's POV)" that switches the first-person narrator."""
+    return len(text) <= 60 and bool(_POV_RE.search(text))
+
+
 def make_chunks(book: dict, max_words: int = 600) -> list[Chunk]:
     chunks: list[Chunk] = []
     for ci, ch in enumerate(book.get("chapters", [])):
@@ -85,17 +94,36 @@ def make_chunks(book: dict, max_words: int = 600) -> list[Chunk]:
         current: list[int] = []
         words = 0
         k = 0
+
+        def flush():
+            nonlocal current, words, k
+            if any(p in by_para for p in current):
+                chunks.append(Chunk(f"c{ci}k{k}", ci, current, [q for p in current for q in by_para.get(p, [])]))
+                k += 1
+            current, words = [], 0
+
         for pi, text in enumerate(paras):
+            # A point-of-view change starts a new chunk, so each chunk has one narrator.
+            if current and is_pov_marker(text):
+                flush()
             current.append(pi)
             words += len(text.split())
             if words >= max_words:
-                if any(p in by_para for p in current):
-                    chunks.append(Chunk(f"c{ci}k{k}", ci, current, [q for p in current for q in by_para.get(p, [])]))
-                    k += 1
-                current, words = [], 0
-        if current and any(p in by_para for p in current):
-            chunks.append(Chunk(f"c{ci}k{k}", ci, current, [q for p in current for q in by_para.get(p, [])]))
+                flush()
+        if current:
+            flush()
     return chunks
+
+
+def pov_change(book: dict, chunk: Chunk) -> str | None:
+    """The point-of-view heading this chunk starts with (or its chapter title), if any."""
+    chapter = book["chapters"][chunk.chapter]
+    first = chapter["paragraphs"][chunk.paragraphs[0]]
+    if is_pov_marker(first):
+        return first.strip()
+    if chunk.paragraphs[0] == 0 and is_pov_marker(chapter.get("title", "")):
+        return chapter["title"].strip()
+    return None
 
 
 _CONTINUES = re.compile(r"[,;:\u2014\u2013-]\s*$")
@@ -148,16 +176,18 @@ def slug(name: str) -> str:
 
 SYSTEM_PROMPT = """You label dialogue in novels for a multi-voice audiobook.
 For every numbered quotation [n] in the passage, decide:
-- speaker: who says it. Use the exact roster name for known characters. If a new character speaks, use the name the text uses for them (e.g. "the Dormouse", "Mrs. Long"). If an unnamed person speaks, describe them briefly ("a footman"). A character's quoted thoughts ("..." thought Alice) belong to that character. Use "NARRATOR" only for quotations nobody speaks or thinks (titles, signs, written notes, quoted words or phrases).
+- speaker: who says it, as one name without parentheses. Use the exact roster name for known characters, even when the passage calls them by a nickname or title the roster lists under "also called". If a new character speaks, use the name the text uses for them (e.g. "the Dormouse", "Mrs. Long"); if they are known by a real name and a nickname, give the real name and put the nickname in their aliases. If an unnamed person speaks, describe them briefly ("a footman"). A character's quoted thoughts ("..." thought Alice) belong to that character. Use "NARRATOR" only for quotations nobody speaks or thinks (titles, signs, written notes, quoted words or phrases).
 - delivery: how an actor should perform the line, 1-4 lowercase words such as "shouting, urgent", "whispering", "sarcastic", "tearful", "excited", "nervous", "cold, angry", "teasing", "calm". Use "neutral" when nothing special is called for. Base it on speech verbs and adverbs near the quote ("she shrieked", "he said softly"), punctuation and context.
 Rules: in a back-and-forth conversation without speech tags, speakers usually alternate. A number appearing twice marks one quotation interrupted by narration ("Yes," [3] he said, [3] "I will."): label it once. Never change the text; label each number once, in order, giving the first two or three words of its quotation in "starts" so you keep your place. If several characters speak together, give the main one.
-Also list every character who speaks in this passage with their gender and age group."""
+First-person narration: when the story is told by "I", every line the narrator speaks ("...," I said / I asked / I replied, or "I" answering in a conversation) belongs to the narrating character, so give that character's name (never "I", and never another character). Work out who "I" is from the text and the narrator given for the previous passage; chapter titles such as "(Mary's POV)" mean that character narrates. Report the narrator in "narrator" (their name, or "third person" if the passage is not told by "I").
+Also list every character who speaks in this passage with their gender, age group and any other names, titles or nicknames the passage uses for them (aliases)."""
 
 
 def chunk_schema(local_ids: list[str]) -> dict:
     return {
         "type": "object",
         "properties": {
+            "narrator": {"type": "string", "maxLength": 60},
             "quotes": {
                 "type": "array",
                 "minItems": len(local_ids),
@@ -180,14 +210,15 @@ def chunk_schema(local_ids: list[str]) -> dict:
                     "type": "object",
                     "properties": {
                         "name": {"type": "string"},
+                        "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
                         "gender": {"type": "string", "enum": GENDERS},
                         "age": {"type": "string", "enum": AGES},
                     },
-                    "required": ["name", "gender", "age"],
+                    "required": ["name", "aliases", "gender", "age"],
                 },
             },
         },
-        "required": ["quotes", "speakers"],
+        "required": ["narrator", "quotes", "speakers"],
     }
 
 
@@ -220,6 +251,18 @@ ROSTER_SCHEMA = {
 # ----------------------------------------------------------------- script state
 
 
+def book_summary(book: dict) -> dict:
+    chapters = book.get("chapters", [])
+    return {
+        "title": book.get("title", ""),
+        "author": book.get("author", ""),
+        "language": book.get("language"),
+        "chapters": len(chapters),
+        "quotes": sum(len(c.get("quotes", [])) for c in chapters),
+        "words": sum(len(p.split()) for c in chapters for p in c.get("paragraphs", [])),
+    }
+
+
 class ScriptStore:
     """data/books/<id>/{book.json, script.json}."""
 
@@ -239,8 +282,30 @@ class ScriptStore:
     def save_book(self, book_id: str, payload: dict) -> None:
         d = self.dir(book_id)
         d.mkdir(parents=True, exist_ok=True)
+        cover = payload.get("cover")
         payload = {k: payload[k] for k in ("title", "author", "language", "chapters") if k in payload}
         (d / "book.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        if isinstance(cover, str) and cover:
+            try:
+                (d / "cover.jpg").write_bytes(base64.b64decode(cover))
+            except ValueError:
+                pass
+        (d / "meta.json").write_text(json.dumps(book_summary(payload) | {"uploaded": time.time()},
+                                                ensure_ascii=False), encoding="utf-8")
+
+    def summary(self, book_id: str) -> dict | None:
+        d = self.dir(book_id)
+        if (d / "meta.json").exists():
+            return json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        book = self.book(book_id)
+        return book_summary(book) if book else None
+
+    def ids(self) -> list[str]:
+        return [d.name for d in self.root.iterdir() if (d / "book.json").exists() and _ID_RE.match(d.name)]
+
+    def cover(self, book_id: str) -> Path | None:
+        p = self.dir(book_id) / "cover.jpg"
+        return p if p.exists() else None
 
     def book(self, book_id: str) -> dict | None:
         p = self.dir(book_id) / "book.json"
@@ -290,8 +355,65 @@ class ScriptStore:
             "model": script.get("model", ""),
             "characters": chars,
             "lines": lines,
+            # [chapter, first paragraph, character id or None]: who narrates from there on.
+            "narration": script.get("narration", []),
         }
 
+
+_SAY = (r"(?:said|asked|replied|answered|attempted|told|added|muttered|whispered|shouted|called|responded|"
+        r"continued|explained|offered|admitted|insisted|murmured|went on|yelled|cried|mumbled|remarked|"
+        r"suggested|ventured|managed|blurted|countered|pressed|repeated|say|ask|reply|answer|add|mutter|whisper|"
+        r"shout|call|respond|continue|explain|offer|admit|insist|murmur|yell|cry|mumble|remark|tell)")
+_I_SAID_AFTER = re.compile(rf"^[\s,;:\u2014\u2013-]*(?:\w+ly\s+)?I\s+(?:\w+ly\s+)?{_SAY}\b")
+_I_SAID_BEFORE = re.compile(rf"\bI\s+(?:\w+ly\s+)?{_SAY}(?:\s+\w+)?[,:]?\s*$")
+
+
+def compute_narration(book: dict, script: dict) -> list[list]:
+    """Who narrates each section, for first-person books.
+
+    Evidence is deterministic: the character that quotations tagged "…," I said
+    are attributed to. Sections are split at chapters and point-of-view headings;
+    a section without evidence keeps the book's main narrator, unless it starts
+    with a point-of-view change (then it is left to the book's narrator voice).
+    Third-person books (little or no evidence) get an empty list.
+    """
+    lines = ScriptStore.public(script)["lines"]
+    sections: list[tuple[int, int, dict[str, int], bool]] = []
+    for ci, ch in enumerate(book.get("chapters", [])):
+        paras = ch.get("paragraphs", [])
+        by_para: dict[int, list] = {}
+        for qid, p, s, e in ch.get("quotes", []):
+            by_para.setdefault(int(p), []).append((qid, int(s), int(e)))
+        start, votes = 0, {}
+        pov = is_pov_marker(ch.get("title", ""))
+        for pi, text in enumerate(paras):
+            if pi > 0 and is_pov_marker(text):
+                sections.append((ci, start, votes, pov))
+                start, votes, pov = pi, {}, True
+            for qid, s, e in by_para.get(pi, []):
+                speaker = (lines.get(qid) or {}).get("speaker")
+                if speaker and (_I_SAID_AFTER.match(text[e:e + 60]) or _I_SAID_BEFORE.search(text[max(0, s - 60):s])):
+                    votes[speaker] = votes.get(speaker, 0) + 1
+        sections.append((ci, start, votes, pov))
+    totals: dict[str, int] = {}
+    for _, _, votes, _ in sections:
+        for k, v in votes.items():
+            totals[k] = totals.get(k, 0) + v
+    if sum(totals.values()) < 3:
+        return []
+    main = max(totals, key=totals.get)
+    out: list[list] = []
+    for ci, start, votes, pov in sections:
+        who = max(votes, key=votes.get) if votes else (None if pov else main)
+        if not out or out[-1][2] != who:
+            out.append([ci, start, who])
+    return out
+
+
+def refresh_narration(store: "ScriptStore", book_id: str, script: dict) -> None:
+    book = store.book(book_id)
+    if book is not None:
+        script["narration"] = compute_narration(book, script)
 
 def find_character(script: dict, name: str) -> str | None:
     key = norm_name(name)
@@ -301,10 +423,16 @@ def find_character(script: dict, name: str) -> str | None:
     return None
 
 
-def ensure_character(script: dict, name: str, gender: str = "unknown", age: str = "unknown") -> str | None:
+def ensure_character(script: dict, name: str, gender: str = "unknown", age: str = "unknown",
+                     aliases: list[str] | tuple = ()) -> str | None:
     if not name or name.strip().upper() == NARRATOR:
         return None
     cid = find_character(script, name)
+    if cid is None:
+        for alias in aliases:
+            cid = find_character(script, alias) if is_proper_alias(alias) else None
+            if cid:
+                break
     if cid is None:
         cid = slug(name)
         base, n = cid, 2
@@ -313,11 +441,52 @@ def ensure_character(script: dict, name: str, gender: str = "unknown", age: str 
         script["characters"][cid] = {"name": name.strip(), "aliases": [], "gender": gender, "age": age,
                                      "accent": "", "temperament": "", "description": "", "voice": None}
     c = script["characters"][cid]
+    for alias in [name, *aliases]:
+        alias = alias.strip()
+        if not is_proper_alias(alias) or norm_name(alias) == norm_name(c["name"]):
+            continue
+        if norm_name(alias) in (norm_name(a) for a in c.setdefault("aliases", [])):
+            continue
+        owner = find_character(script, alias)
+        if owner is None:  # never steal another character's name
+            c["aliases"].append(alias)
     if c.get("gender", "unknown") == "unknown" and gender in GENDERS:
         c["gender"] = gender
     if c.get("age", "unknown") == "unknown" and age in AGES:
         c["age"] = age
     return cid
+
+
+def is_proper_alias(alias: str) -> bool:
+    """Nicknames and names ("Makeup", "Robot Girl", "Zhang Lee"), not descriptions ("the man")."""
+    alias = alias.strip()
+    return 0 < len(alias) <= 40 and any(ch.isupper() for ch in alias) and alias.upper() != NARRATOR
+
+
+_FIRST_PERSON = {"i", "me", "myself", "narrator (i)", "the narrator", "narrator", "i (narrator)"}
+
+
+def resolve_speaker(script: dict, raw: str, narrator: str = "") -> str | None:
+    """Maps a model's speaker answer to a character id (None = narration)."""
+    name = (raw or "").strip()
+    if not name or name.upper() == NARRATOR:
+        return None
+    first_person = narrator if narrator and narrator.lower() not in ("third person", "unknown", "none") else ""
+    if name.lower() in _FIRST_PERSON:
+        return ensure_character(script, first_person) if first_person else None
+    m = re.match(r"^(.*?)\s*\((.+)\)\s*$", name)
+    if m:
+        outer, inner = m.group(1).strip(), m.group(2).strip()
+        if inner.lower() in _FIRST_PERSON or outer.lower() in _FIRST_PERSON:
+            other = outer if inner.lower() in _FIRST_PERSON else inner
+            return ensure_character(script, first_person or other)
+        for candidate in (inner, outer):
+            if candidate and find_character(script, candidate):
+                return find_character(script, candidate)
+        if is_proper_alias(inner) and inner.lower() not in ("unnamed", "unknown"):
+            return ensure_character(script, inner)
+        return ensure_character(script, outer or inner)
+    return ensure_character(script, split_group(name)[0])
 
 
 def roster_text(script: dict, limit: int = 40) -> str:
@@ -350,9 +519,25 @@ def recent_text(script: dict, book: dict, chunk: Chunk, n: int = 6) -> str:
 
 
 def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) -> int:
+    narrator = (result.get("narrator") or "").strip()
+    if narrator.lower() in _FIRST_PERSON:
+        narrator = script.get("narrator", "")
+    if narrator:
+        script["narrator"] = narrator
+        if narrator.lower() not in ("third person", "unknown", "none", NARRATOR.lower()):
+            ensure_character(script, narrator)
+    else:
+        narrator = script.get("narrator", "")
     for sp in result.get("speakers", []):
-        for name in split_group(sp.get("name", "")):
-            ensure_character(script, name, sp.get("gender", "unknown"), sp.get("age", "unknown"))
+        name = sp.get("name", "")
+        if name.strip().lower() in _FIRST_PERSON:
+            continue
+        for part in split_group(name):
+            if "(" in part:
+                resolve_speaker(script, part, narrator)
+                continue
+            ensure_character(script, part, sp.get("gender", "unknown"), sp.get("age", "unknown"),
+                             [a for a in sp.get("aliases") or [] if isinstance(a, str)])
     n = 0
     for q in result.get("quotes", []):
         qids = local.get(str(q.get("id")))
@@ -364,7 +549,7 @@ def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) 
         if delivery in ("neutral", "none", "normal", ""):
             delivery = None
         # "the Hatter and the March Hare" in chorus: voiced by the first.
-        speaker = ensure_character(script, split_group(q.get("speaker", ""))[0])
+        speaker = resolve_speaker(script, q.get("speaker", ""), narrator)
         for qid in qids:
             script["lines"][qid] = {"speaker": speaker, "delivery": delivery}
             n += 1
@@ -480,10 +665,16 @@ class LocalLlm:
 async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk) -> tuple[dict, dict[str, str]]:
     text, local = render_chunk(book, chunk)
     chapter = book["chapters"][chunk.chapter]
+    narrator = script.get("narrator") or "unknown (work it out from the passage)"
+    pov = pov_change(book, chunk)
+    if pov:
+        narrator = (f"{narrator}. But this passage starts with a point-of-view change, \"{pov}\": from here "
+                    f"\"I\" is that character, not the previous narrator. Lines \"I\" says belong to them.")
     user = (
         f"Book: {book.get('title', '')} by {book.get('author', '')}\n"
         f"Chapter: {chapter.get('title', '')}\n\n"
         f"Known characters:\n{roster_text(script)}\n\n"
+        f"Narrator of the previous passage: {narrator}\n\n"
         f"Most recent lines before this passage:\n{recent_text(script, book, chunk)}\n\n"
         f"Passage:\n{text}\n\n"
         f"Label every number from 1 to {len(local)} once."
@@ -644,6 +835,7 @@ class Analyzer:
             fresh.update(status="done", progress=1.0,
                          detail=f"{len(fresh['lines'])} lines in {time.perf_counter() - t0:.0f}s")
             fresh.setdefault("stats", {})["seconds"] = round(time.perf_counter() - t0, 1)
+            fresh["narration"] = compute_narration(book, fresh)
             self.store.save_script(book_id, fresh)
         logger.info("analysed %s: %d lines", book_id, len(fresh["lines"]))
 
@@ -688,11 +880,12 @@ async def cast_voices(app: web.Application, book_id: str, engine: str, main_line
     s = store.script(book_id)
     public = ScriptStore.public(s)
     lines_by = {c["id"]: c["lines"] for c in public["characters"]}
+    narrators = {who for _, _, who in s.get("narration", []) if who}
     created = []
     for cid, c in s["characters"].items():
         if c.get("voice") and voices.get(c["voice"]):
             continue
-        if lines_by.get(cid, 0) >= main_lines:
+        if lines_by.get(cid, 0) >= main_lines or cid in narrators:
             vid = f"ch-{book_id[:8]}-{cid}"[:64]
             v = voices.get(vid) or await design_voice(
                 app, engine, character_description(c), c["name"], source="character", voice_id=vid,
@@ -723,6 +916,50 @@ ANALYZER_KEY = web.AppKey("analyzer", Analyzer)
 CAST_TASKS_KEY = web.AppKey("cast_tasks", set)
 
 
+async def list_books(request: web.Request) -> web.Response:
+    store = request.app[DRAMA_STORE_KEY]
+    books = []
+    for book_id in store.ids():
+        summary = store.summary(book_id) or {}
+        s = store.script(book_id)
+        public = ScriptStore.public(s)
+        books.append({
+            **summary,
+            "id": book_id,
+            "status": s.get("status", "none"),
+            "progress": s.get("progress", 0.0),
+            "detail": s.get("detail", ""),
+            "lines": len(public["lines"]),
+            "characters": len(public["characters"]),
+            "voiced": sum(1 for c in public["characters"] if c.get("voice")),
+            "cover": store.cover(book_id) is not None,
+            "updated": s.get("updated") or summary.get("uploaded", 0),
+        })
+    books.sort(key=lambda b: -(b.get("updated") or 0))
+    return web.json_response({"books": books})
+
+
+async def get_book(request: web.Request) -> web.Response:
+    store = request.app[DRAMA_STORE_KEY]
+    try:
+        book = store.book(request.match_info["book"])
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if book is None:
+        return web.json_response({"error": "book not uploaded"}, status=404)
+    return web.json_response(book)
+
+
+async def get_cover(request: web.Request) -> web.StreamResponse:
+    try:
+        path = request.app[DRAMA_STORE_KEY].cover(request.match_info["book"])
+    except ValueError:
+        path = None
+    if path is None:
+        return web.json_response({"error": "no cover"}, status=404)
+    return web.FileResponse(path, headers={"Content-Type": "image/jpeg"})
+
+
 async def upload_book(request: web.Request) -> web.Response:
     book_id = request.match_info["book"]
     try:
@@ -736,6 +973,13 @@ async def upload_book(request: web.Request) -> web.Response:
         store.save_book(book_id, body)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
+    if body.get("reanalyze"):
+        async with store.lock(book_id):
+            s = store.script(book_id)
+            if s.get("status") not in ("queued", "running", "casting"):
+                # Start over; user corrections, names and voices are kept.
+                s.update(status="none", progress=0.0, lines={}, chunks_done=[], narrator="")
+                store.save_script(book_id, s)
     if body.get("analyze"):
         await request.app[ANALYZER_KEY].enqueue(book_id)
     return web.json_response(ScriptStore.public(store.script(book_id)))
@@ -749,7 +993,13 @@ async def get_script(request: web.Request) -> web.Response:
             return web.json_response({"error": "book not uploaded"}, status=404)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
-    return web.json_response(ScriptStore.public(store.script(book_id)))
+    s = store.script(book_id)
+    if s.get("status") == "done" and "narration" not in s:  # analysed before narration existed
+        async with store.lock(book_id):
+            s = store.script(book_id)
+            refresh_narration(store, book_id, s)
+            store.save_script(book_id, s)
+    return web.json_response(ScriptStore.public(s))
 
 
 async def analyze(request: web.Request) -> web.Response:
@@ -774,6 +1024,8 @@ async def patch_line(request: web.Request) -> web.Response:
             fix["speaker"] = sp or None
         if "delivery" in body:
             fix["delivery"] = (body.get("delivery") or "").strip() or None
+        if s.get("status") == "done":
+            refresh_narration(store, book_id, s)
         store.save_script(book_id, s)
     return web.json_response(ScriptStore.public(s))
 
@@ -801,6 +1053,8 @@ async def patch_character(request: web.Request) -> web.Response:
                     if line.get("speaker") == cid:
                         line["speaker"] = target
             del s["characters"][cid]
+            if s.get("status") == "done":
+                refresh_narration(store, book_id, s)
         store.save_script(book_id, s)
     return web.json_response(ScriptStore.public(s))
 
@@ -873,6 +1127,9 @@ def setup(app: web.Application) -> None:
 
     app.cleanup_ctx.append(_ctx)
     r = app.router
+    r.add_get("/api/books", list_books)
+    r.add_get("/api/books/{book}", get_book)
+    r.add_get("/api/books/{book}/cover", get_cover)
     r.add_post("/api/books/{book}", upload_book)
     r.add_get("/api/books/{book}/script", get_script)
     r.add_post("/api/books/{book}/analyze", analyze)

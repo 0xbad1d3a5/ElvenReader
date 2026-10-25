@@ -40,7 +40,7 @@ def names_for(gold: dict, label: str) -> set[str]:
 async def evaluate(path: Path, llm: dz.LocalLlm, session) -> dict:
     gold = json.loads(path.read_text(encoding="utf-8"))
     book = gold_book(gold)
-    script = {"characters": {}, "lines": {}}
+    script = {"characters": {}, "lines": {}, "narrator": gold.get("previous_narrator", "")}
     t0 = time.perf_counter()
     prompt_tps, gen_tps, tokens = [], [], 0
     for chunk in dz.make_chunks(book):
@@ -62,7 +62,12 @@ async def evaluate(path: Path, llm: dz.LocalLlm, session) -> dict:
             predicted = {dz.norm_name(c["name"]), *(dz.norm_name(a) for a in c.get("aliases", []))}
         else:
             predicted = {dz.norm_name("NARRATOR")} if sp is None else set()
-        if predicted & names_for(gold, q["speaker"]):
+        if q["speaker"] == "*":
+            named = set().union(*(names_for(gold, n) for n in gold.get("characters", {})))
+            ok = bool(predicted) and not predicted & (named | {dz.norm_name("NARRATOR")})
+        else:
+            ok = bool(predicted & names_for(gold, q["speaker"]))
+        if ok:
             correct += 1
         else:
             wrong.append((q["id"], q["text"][:50], q["speaker"], next(iter(predicted), "?")))

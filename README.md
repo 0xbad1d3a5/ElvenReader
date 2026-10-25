@@ -162,7 +162,8 @@ test connection**. *Settings* also holds the default model, voice and sentence p
 
 ## 5. Reading
 
-* **Import:** *Import EPUB* opens the system file picker. Books are copied into the app, with covers.
+* **Import:** *Import EPUB* opens the system file picker, and file managers can *Open with
+  AndroidReader*. Books are copied into the app, with covers.
   Long-press a book to remove it.
 * **Reader:** tap any sentence to start reading from it; the sentence being read is highlighted
   and the page follows it. The list icon opens the table of contents.
@@ -243,6 +244,57 @@ echo each quote's first words. Without them labels drifted by one after an inter
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
 `"gpu"` and `"cpu"` force one or the other.
 
+**First-person books.** Many novels (and most light novels) are told by "I". The model reports
+each passage's narrator, the next passage is told who "I" was, and a point-of-view heading such as
+*(The Neighbor's POV)* starts a new passage with an explicit "the narrator changes here". The
+model also reports nicknames ("Makeup", "Robot Girl"), which are merged into the character they
+belong to. On a hand-labelled excerpt of *Sasaki and Peeps* vol. 10 (108 quotations: Sasaki's
+first-person prison scene, then the neighbor's POV with her nicknames for everyone) this raised
+accuracy from 36% to 88%. The remaining misses are group banter in the neighbor's chapter; fix
+them in the viewer or the app. That excerpt is copyrighted, so it lives in the git-ignored
+`server\tests\gold\private\`.
+
+## 8. Process a book on the PC
+
+Dramatize a book without touching the phone, then optionally put it on the phone:
+
+```powershell
+cd D:\Dev\AndroidReader\server
+.\run-server.ps1                               # in another window
+.\.venv\Scripts\python.exe scripts\process_book.py "E:\Light Novels\Series\Book v10.epub" --phone
+```
+
+1. The EPUB is parsed with **the app's own Kotlin parser** on the JVM (`ExportBookTool`, run through
+   Gradle, so JDK 17 and the Android SDK are needed), so the book ID (SHA-1 of the file) and every
+   quotation ID match what the phone produces when it imports the same file.
+2. The text is uploaded and analysed (progress is printed; about an hour per 100k words on the
+   GPU), then voices are created for the cast.
+3. With `--phone` (phone connected over adb, app installed and paired) the EPUB is copied into the
+   app and imported with dramatized reading switched on. Without it, import the same file in the
+   app later: it finds the finished analysis because the IDs match.
+
+Options: `--no-cast`, `--engine qwen3tts` (voice-design engine), `--reanalyze` (start over; your
+corrections, names and voices are kept). Running it again on a finished book only does the
+missing steps.
+
+## 9. PC viewer
+
+Open **http://127.0.0.1:3950/books** on the PC (served to this PC only, like the pairing page):
+
+* **Library:** every analysed book with its cover, word count, analysis progress and cast status.
+* **Book:** chapters in reading order; quotations coloured by speaker with the speaker's name and
+  delivery (*shouting, urgent*); ✎ marks your corrections.
+* **Cast panel:** characters with aliases, line counts and voices; ▶ plays the voice sample. Click a
+  name to list all of that character's lines across the book (or use the speaker filter, which
+  also offers *quotes given to the narrator*); search finds text.
+* **Playback:** click any line or narration to play from there through the chapter with each
+  speaker's voice and delivery, using the chosen narrator voice and model. Audio comes from the
+  same server cache as the phone.
+* **Editing:** click a speaker tag to change the speaker or delivery; ✎ on a character renames it,
+  merges it into another (aliases) or changes its voice; *Create missing voices* runs the cast.
+  Changes go through the same API as the app; the phone picks them up the next time you open
+  the book (sentences it had already prepared are re-synthesized).
+
 ## Troubleshooting
 
 * **Could not reach the PC:** server running? Firewall rule added (`allow-firewall.ps1`, elevated)?
@@ -269,9 +321,10 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET/POST /api/voices` · `PATCH/DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store. |
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
-| `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`), dramatization status and lines. |
+| `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |
+| `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`, `reanalyze`, optional base64 `cover`), dramatization status and lines. |
 | `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice, create character voices. |
-| `GET /pair` · `GET /` | Pairing page (token in the URL fragment) · QR codes (PC only). |
+| `GET /pair` · `GET /` · `GET /books[/{id}]` | Pairing page (token in the URL fragment) · QR codes · book viewer (both PC only). |
 
 ## Development
 

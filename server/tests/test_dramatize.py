@@ -164,3 +164,132 @@ async def test_analysis_error_is_reported(aiohttp_client, tmp_path, monkeypatch)
     await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
     s = await wait_done(c)
     assert s["status"] == "error" and "No local LLM" in s["detail"]
+
+
+async def test_book_list_text_cover_and_viewer(drama_client):
+    import base64
+
+    c = drama_client
+    assert (await (await c.get("/api/books", headers=AUTH)).json()) == {"books": []}
+    jpeg = b"\xff\xd8\xff\xe0fakejpeg"
+    r = await c.post("/api/books/book1", json={**book_payload(), "cover": base64.b64encode(jpeg).decode()}, headers=AUTH)
+    assert r.status == 200
+    books = (await (await c.get("/api/books", headers=AUTH)).json())["books"]
+    assert len(books) == 1
+    b = books[0]
+    assert (b["id"], b["title"], b["status"], b["cover"], b["chapters"], b["quotes"]) == ("book1", "Test", "none", True, 1, 4)
+    assert b["words"] == sum(len(p.split()) for p in PARAS)
+    text = await (await c.get("/api/books/book1", headers=AUTH)).json()
+    assert text["chapters"][0]["paragraphs"] == PARAS and "cover" not in text
+    assert await (await c.get("/api/books/book1/cover", headers=AUTH)).read() == jpeg
+    assert (await c.get("/api/books/nope/cover", headers=AUTH)).status == 404
+    assert (await c.get("/api/books/nope", headers=AUTH)).status == 404
+    assert (await c.get("/api/books", headers={})).status == 401
+
+    # The viewer pages are served to this PC only and carry the token for their API calls.
+    for path in ("/books", "/books/book1"):
+        page = await (await c.get(path)).text()
+        assert "AndroidReader books" in page and '"testtoken"' in page and "__TOKEN__" not in page
+
+
+async def test_viewer_is_loopback_only(drama_client):
+    from unittest import mock
+
+    from aiohttp.test_utils import make_mocked_request
+
+    from androidreader_server.app import auth_middleware
+    from aiohttp import web
+
+    req = make_mocked_request("GET", "/books/book1", transport=mock.Mock(get_extra_info=lambda *a, **k: ("192.168.1.9", 1234)))
+    with pytest.raises(web.HTTPNotFound):
+        await auth_middleware(req, lambda r: None)
+
+
+async def test_reanalyze_keeps_corrections(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    await c.patch("/api/books/book1/lines/c0p1q0", json={"speaker": "tom", "delivery": "calm"}, headers=AUTH)
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True, "reanalyze": True}, headers=AUTH)
+    s = await wait_done(c)
+    assert s["status"] == "done"
+    assert s["lines"]["c0p1q0"] == {"speaker": "tom", "delivery": "calm", "corrected": True}
+    assert s["lines"]["c0p2q11"]["speaker"] == "tom"
+
+
+def test_first_person_narrator_is_tracked_and_prompted():
+    script = {"characters": {}, "lines": {}}
+    local = {"1": ["c0p0q0"]}
+    dz.apply_chunk_result(script, {"narrator": "Sasaki", "speakers": [],
+                                   "quotes": [{"id": "1", "starts": "No", "speaker": "Sasaki", "delivery": "firm"}]}, local)
+    assert script["narrator"] == "Sasaki" and "sasaki" in script["characters"]
+    dz.apply_chunk_result(script, {"narrator": "third person", "speakers": [], "quotes": []}, {})
+    assert script["narrator"] == "third person" and list(script["characters"]) == ["sasaki"]
+    assert "narrator" in dz.chunk_schema(["1"])["required"]
+    assert "(Mary's POV)" in dz.SYSTEM_PROMPT
+
+
+def test_speaker_resolution_first_person_parentheses_and_aliases():
+    script = {"characters": {}, "lines": {}, "narrator": "Sasaki"}
+    local = {str(i): [f"q{i}"] for i in range(1, 7)}
+    dz.apply_chunk_result(script, {
+        "narrator": "I",  # the model restating "I" keeps the known narrator
+        "speakers": [
+            {"name": "Miss Hoshizaki", "aliases": ["Makeup", "the girl"], "gender": "female", "age": "teen"},
+            {"name": "Nick", "aliases": ["Zhang Lee"], "gender": "male", "age": "adult"},
+        ],
+        "quotes": [
+            {"id": "1", "starts": "", "speaker": "I", "delivery": "nervous"},
+            {"id": "2", "starts": "", "speaker": "man (Zhang Lee)", "delivery": ""},
+            {"id": "3", "starts": "", "speaker": "Makeup", "delivery": ""},
+            {"id": "4", "starts": "", "speaker": "I (narrator)", "delivery": ""},
+            {"id": "5", "starts": "", "speaker": "a guard", "delivery": ""},
+            {"id": "6", "starts": "", "speaker": "NARRATOR", "delivery": ""},
+        ],
+    }, local)
+    speakers = [script["lines"][f"q{i}"]["speaker"] for i in range(1, 7)]
+    assert speakers == ["sasaki", "nick", "miss-hoshizaki", "sasaki", "guard", None]
+    assert script["characters"]["miss-hoshizaki"]["aliases"] == ["Makeup"]  # "the girl" is a description
+    assert script["narrator"] == "Sasaki"
+    # An alias never takes over another character's name.
+    dz.apply_chunk_result(script, {"narrator": "third person", "quotes": [],
+                                   "speakers": [{"name": "Nick", "aliases": ["Miss Hoshizaki"], "gender": "male", "age": "adult"}]}, {})
+    assert "Miss Hoshizaki" not in script["characters"]["nick"]["aliases"]
+
+
+def test_pov_marker_starts_a_new_chunk():
+    paras = ["Chapter", "\u201cHi,\u201d I said.", "(The Neighbor\u2019s POV)", "\u201cHello,\u201d I say."]
+    quotes = [[f"c0p{pi}q{s}", pi, s, e] for pi, t in enumerate(paras) for s, e in dz.quote_regions(t)]
+    book = {"chapters": [{"title": "One", "paragraphs": paras, "quotes": quotes}]}
+    chunks = dz.make_chunks(book)
+    assert [c.paragraphs for c in chunks] == [[0, 1], [2, 3]]
+    assert dz.pov_change(book, chunks[0]) is None
+    assert dz.pov_change(book, chunks[1]) == "(The Neighbor\u2019s POV)"
+    assert not dz.is_pov_marker("He looked at the point where the road ended and kept walking for a long time.")
+
+
+def test_narration_follows_first_person_evidence_and_pov_changes():
+    Q, E = "\u201c", "\u201d"
+    chapters = [
+        {"title": "One", "paragraphs": [f"{Q}Hello,{E} I said.", f"{Q}Hi,{E} said Tom.", f"I asked, {Q}Why?{E}"]},
+        {"title": "Two", "paragraphs": ["Nothing is said here.", "(The Neighbor\u2019s POV)", f"{Q}Oh,{E} I say.",
+                                        "More of her narration."]},
+        {"title": "Three", "paragraphs": ["Back to the main narrator, no dialogue."]},
+    ]
+    for ch in chapters:
+        ch["quotes"] = []
+        for pi, t in enumerate(ch["paragraphs"]):
+            ch["quotes"] += [[f"q{len(ch['quotes'])}-{t[:3]}", pi, s, e] for s, e in dz.quote_regions(t)]
+    book = {"chapters": chapters}
+    speakers = {"One": ["sasaki", "tom", "sasaki"], "Two": ["neighbor"]}
+    lines = {}
+    for ch in chapters:
+        for (qid, *_), who in zip(ch["quotes"], speakers.get(ch["title"], [])):
+            lines[qid] = {"speaker": who, "delivery": None}
+    script = {"characters": {}, "lines": lines, "corrections": {}}
+    third_person = {"chapters": [{"title": "X", "paragraphs": [f"{Q}Hi,{E} I said."], "quotes": [["a", 0, 0, 5]]}]}
+    assert dz.compute_narration(third_person, {"lines": {"a": {"speaker": "tom"}}, "corrections": {}}) == []
+    lines["extra"] = {"speaker": "sasaki", "delivery": None}
+    chapters[0]["paragraphs"].append(f"{Q}Fine,{E} I replied.")
+    chapters[0]["quotes"].append(["extra", 3, 0, 7])
+    assert dz.compute_narration(book, script) == [[0, 0, "sasaki"], [1, 1, "neighbor"], [2, 0, "sasaki"]]
