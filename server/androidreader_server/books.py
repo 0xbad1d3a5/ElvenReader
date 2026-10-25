@@ -1,8 +1,10 @@
-"""Per-book data on the server. Dramatization (dramatize.py) registers its routes here."""
+"""Per-book data on the server: uploaded text and dramatization scripts (see dramatize.py)."""
 from __future__ import annotations
 
 from aiohttp import web
 
 
 def setup(app: web.Application) -> None:
-    """No per-book routes yet."""
+    from . import dramatize
+
+    dramatize.setup(app)
