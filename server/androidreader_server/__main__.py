@@ -1,51 +1,63 @@
-"""Entry point: ``python -m vs_relay``."""
+"""Entry point: ``python -m androidreader_server``."""
 from __future__ import annotations
 
 import argparse
 import logging
 import logging.handlers
+import os
 import sys
+from pathlib import Path
 
 from aiohttp import web
 
 from . import __version__
-from .app import make_app
+from .app import make_app, pair_url, server_urls
 from .config import default_data_dir, load_config, rotate_token
-from .netinfo import lan_addresses
+from .engines.registry import ENGINES
+from .voices import VoiceStore
+
+VOICESTUDIO_DB = Path(os.path.expandvars(r"%APPDATA%\OmniVoice\omnivoice.db"))
+VOICESTUDIO_VOICES = Path(os.path.expandvars(r"%APPDATA%\OmniVoice\voices"))
 
 
 def _print_pairing(cfg) -> None:
-    addresses = lan_addresses()
-    print(f"\nVoiceStudio TTS relay {__version__}")
-    print(f"  VoiceStudio backend : {cfg.voicestudio_url}")
-    print(f"  Listening on        : {cfg.host}:{cfg.port}")
-    print(f"  Token               : {cfg.token}")
-    if not addresses:
-        print("  No LAN address found - connect this PC to a network.")
+    urls = server_urls(cfg.port)
+    print(f"\nAndroidReader server {__version__}")
+    print(f"  Listening on   : {cfg.host}:{cfg.port}")
+    print(f"  Models         : {cfg.models_path}")
+    print(f"  Default engine : {cfg.default_engine}")
+    print(f"  Token          : {cfg.token}")
+    if not urls:
+        print("  No network address found - connect this PC to a network.")
         return
-    for addr in addresses:
-        print(f"  Phone server URL    : http://{addr['ip']}:{cfg.port}   ({addr['kind']})")
+    for url in urls:
+        print(f"  Phone URL      : {url}")
     print(f"\nPairing QR codes: open http://127.0.0.1:{cfg.port}/ in a browser on this PC.")
     try:
         import qrcode
 
         qr = qrcode.QRCode(border=1)
-        qr.add_data(f"http://{addresses[0]['ip']}:{cfg.port}/pair#{cfg.token}")
+        qr.add_data(pair_url(urls[0], urls, cfg.token))
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")
-        print(f"Or scan this ({addresses[0]['ip']}):")
+        print(f"Or scan this ({urls[0]}):")
         qr.print_ascii(out=sys.stdout, invert=True)
     except Exception:  # noqa: BLE001 - the QR is a convenience only
         pass
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="vs_relay", description=__doc__)
+    parser = argparse.ArgumentParser(prog="androidreader_server", description=__doc__)
     parser.add_argument("--host", help="bind address (default from config: 0.0.0.0)")
     parser.add_argument("--port", type=int, help="port (default from config: 3950)")
-    parser.add_argument("--voicestudio-url", help="VoiceStudio backend URL (default http://127.0.0.1:3900)")
+    parser.add_argument("--engine", help=f"default engine ({', '.join(ENGINES)})")
+    parser.add_argument("--no-preload", action="store_true", help="don't load the default engine at start-up")
     parser.add_argument("--rotate-token", action="store_true", help="generate a new token and exit")
     parser.add_argument("--show-pairing", action="store_true", help="print pairing info and exit")
+    parser.add_argument(
+        "--import-voicestudio", action="store_true",
+        help="copy VoiceStudio voice profiles (read-only) into the voice store and exit",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -56,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     data_dir = default_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     file_log = logging.handlers.RotatingFileHandler(
-        data_dir / "relay.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+        data_dir / "server.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8"
     )
     file_log.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(file_log)
@@ -65,8 +77,21 @@ def main(argv: list[str] | None = None) -> int:
         cfg.host = args.host
     if args.port:
         cfg.port = args.port
-    if args.voicestudio_url:
-        cfg.voicestudio_url = args.voicestudio_url.rstrip("/")
+    if args.engine:
+        cfg.default_engine = args.engine
+    if args.no_preload:
+        cfg.preload = False
+
+    if args.import_voicestudio:
+        store = VoiceStore(data_dir / "voices")
+        if not VOICESTUDIO_DB.exists():
+            print(f"VoiceStudio database not found at {VOICESTUDIO_DB}")
+            return 1
+        imported = store.import_omnivoice(VOICESTUDIO_DB, VOICESTUDIO_VOICES)
+        for v in imported:
+            print(f"  imported {v.id}  {v.name}")
+        print(f"{len(imported)} voice(s) imported; {len(store.list())} in the store.")
+        return 0
 
     _print_pairing(cfg)
     if args.rotate_token or args.show_pairing:

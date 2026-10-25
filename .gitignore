@@ -3,8 +3,9 @@ __pycache__/
 *.py[cod]
 .venv/
 .pytest_cache/
+*.egg-info/
 
-# Relay runtime data (contains the pairing token)
+# Server runtime data: config with the pairing token, voices, cache, logs, books
 server/data/
 
 # Android / Gradle
@@ -16,6 +17,9 @@ android/local.properties
 android/.idea/
 *.iml
 *.apk
+
+# Build logs
+build.log
 
 # OS / editors
 Thumbs.db

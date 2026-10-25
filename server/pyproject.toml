@@ -1,26 +1,27 @@
 [project]
-name = "voicestudio-tts-relay"
-version = "0.1.0"
-description = "Relay that lets an Android system TTS engine use VoiceStudio running on a PC"
+name = "androidreader-server"
+version = "0.2.0"
+description = "PC server for AndroidReader: runs quality TTS models locally and streams speech to the phone"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "aiohttp>=3.10",
     "qrcode>=7.4",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-aiohttp>=1.0"]
 
 [project.scripts]
-vs-relay = "vs_relay.__main__:main"
+androidreader-server = "androidreader_server.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["vs_relay"]
+packages = ["androidreader_server", "androidreader_server.engines"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -1,10 +1,13 @@
-"""Text clean-up applied before sending a reader's utterance to VoiceStudio."""
+"""Text clean-up and sentence splitting applied before synthesis."""
 from __future__ import annotations
 
 import re
 import unicodedata
 
 MAX_TEXT_CHARS = 4000
+# Quality models degrade (or run out of memory) on very long inputs, so longer
+# requests are synthesized piece by piece and streamed back in order.
+MAX_CHUNK_CHARS = 280
 
 # Soft hyphens and zero-width characters are common in EPUB text and must not be spoken.
 _INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"), None)
@@ -24,8 +27,7 @@ def is_speakable(text: str) -> bool:
     """True when the text contains at least one letter or digit.
 
     Readers sometimes send lone punctuation ("...", "*") or whitespace; those
-    produce no speech, so the relay answers with silence instead of asking
-    VoiceStudio to synthesize them.
+    produce no speech, so the server answers with silence instead.
     """
     return any(ch.isalnum() for ch in text)
 
@@ -73,3 +75,58 @@ def clamp_pause_ms(value: object, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, min(2000, ms))
+
+
+_SPLIT_SENTENCE = re.compile(r"(?<=[.!?\u2026])[\"'\u201d\u2019\u00bb)\]]*\s+(?=\S)")
+_SPLIT_CLAUSE = re.compile(r"(?<=[,;:\u2014])\s+")
+
+
+def split_for_synthesis(text: str, limit: int = MAX_CHUNK_CHARS) -> list[str]:
+    """Split text into pieces no longer than ``limit`` characters.
+
+    Sentences are kept whole when they fit; over-long sentences are split at
+    clause punctuation, then at spaces. Pieces are never empty.
+    """
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    pieces: list[str] = []
+    for sentence in _split_keep(text, _SPLIT_SENTENCE):
+        if len(sentence) <= limit:
+            pieces.append(sentence)
+            continue
+        for clause in _split_keep(sentence, _SPLIT_CLAUSE):
+            if len(clause) <= limit:
+                pieces.append(clause)
+                continue
+            words = clause.split(" ")
+            buf = ""
+            for w in words:
+                if buf and len(buf) + 1 + len(w) > limit:
+                    pieces.append(buf)
+                    buf = w
+                else:
+                    buf = f"{buf} {w}" if buf else w
+            if buf:
+                pieces.append(buf)
+    # Merge tiny neighbours back together so the model gets natural phrases.
+    merged: list[str] = []
+    for p in pieces:
+        if merged and len(merged[-1]) + 1 + len(p) <= limit:
+            merged[-1] = f"{merged[-1]} {p}"
+        else:
+            merged.append(p)
+    return merged
+
+
+def _split_keep(text: str, pattern: re.Pattern) -> list[str]:
+    out, start = [], 0
+    for m in pattern.finditer(text):
+        part = text[start : m.end()].strip()
+        if part:
+            out.append(part)
+        start = m.end()
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out

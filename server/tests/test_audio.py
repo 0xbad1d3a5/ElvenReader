@@ -1,9 +1,9 @@
-import array
+﻿import array
 import random
 
 import pytest
 
-from vs_relay.audio import SilenceTrimmer
+from androidreader_server.audio import SilenceTrimmer, time_stretch
 
 SR = 1000  # 1 sample per ms keeps the arithmetic readable
 
@@ -62,3 +62,23 @@ def test_output_is_whole_samples():
     first = t.feed(pcm((5000, 3)) + b"\x01")  # odd byte held back
     assert len(first) % 2 == 0
     assert len(t.feed(b"\x00")) % 2 == 0
+
+
+
+@pytest.mark.parametrize("speed", [0.75, 1.25, 1.5, 2.0])
+def test_time_stretch_changes_duration_not_pitch(speed):
+    import numpy as np
+
+    rate = 16000
+    t = np.arange(rate * 2) / rate
+    tone = (8000 * np.sin(2 * np.pi * 220 * t)).astype("<i2").tobytes()
+    out = np.frombuffer(time_stretch(tone, rate, speed), dtype="<i2").astype(np.float32)
+    assert abs(len(out) / (rate * 2) - 1 / speed) < 0.05
+    spectrum = np.abs(np.fft.rfft(out[rate // 4 : rate // 4 + 8192]))
+    peak_hz = np.argmax(spectrum) * rate / 8192
+    assert abs(peak_hz - 220) < 6
+
+
+def test_time_stretch_identity_and_tiny_input():
+    assert time_stretch(b"\x01\x00" * 10, 16000, 1.5) == b"\x01\x00" * 10
+    assert time_stretch(b"abcd", 16000, 1.0) == b"abcd"

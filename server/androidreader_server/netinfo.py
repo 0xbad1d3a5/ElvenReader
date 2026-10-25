@@ -2,7 +2,30 @@
 from __future__ import annotations
 
 import ipaddress
+import json
+import shutil
 import socket
+import subprocess
+import sys
+
+
+def tailscale_names() -> list[str]:
+    """This PC's Tailscale MagicDNS name, when the Tailscale CLI is installed and logged in."""
+    exe = shutil.which("tailscale") or (
+        r"C:\Program Files\Tailscale\tailscale.exe" if sys.platform == "win32" else None
+    )
+    if not exe:
+        return []
+    try:
+        out = subprocess.run(
+            [exe, "status", "--self", "--peers=false", "--json"],
+            capture_output=True, timeout=3, creationflags=0x08000000 if sys.platform == "win32" else 0,
+        )
+        info = json.loads(out.stdout or b"{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    name = ((info.get("Self") or {}).get("DNSName") or "").rstrip(".")
+    return [name] if name else []
 
 
 def _primary_ipv4() -> str | None:

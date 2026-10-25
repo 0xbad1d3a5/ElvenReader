@@ -1,0 +1,611 @@
+"""aiohttp application: the phone-facing API of the AndroidReader server."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import html
+import io
+import logging
+import secrets
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+import aiohttp
+from aiohttp import web
+
+from . import __version__
+from .audio import SilenceTrimmer, time_stretch, wav_bytes
+from .cache import AudioCache, cache_key
+from .config import ServerConfig
+from .engines.manager import AudioChunk, Done, EngineError, EngineManager, StreamStart
+from .engines.registry import ENGINES, EngineSpec
+from .netinfo import lan_addresses, tailscale_names
+from .pronunciation import PHONEME_FORMATS, Entry, PronunciationStore, apply, entries_version
+from .text import (
+    MAX_TEXT_CHARS,
+    clamp_pause_ms,
+    clamp_speed,
+    clean_text,
+    is_speakable,
+    split_for_synthesis,
+    trailing_pause_ms,
+)
+from .voices import VoiceStore
+
+logger = logging.getLogger("androidreader")
+
+ANDROID_PACKAGE = "com.androidreader"
+PAIR_SCHEME = "areader"
+
+CONFIG_KEY = web.AppKey("config", ServerConfig)
+ENGINES_KEY = web.AppKey("engines", EngineManager)
+VOICES_KEY = web.AppKey("voices", VoiceStore)
+PRON_KEY = web.AppKey("pronunciations", PronunciationStore)
+CACHE_KEY = web.AppKey("cache", AudioCache)
+EXTRA_KEY = web.AppKey("extra", dict)
+
+_PUBLIC_PATHS = {"/api/ping", "/pair"}
+_LOOPBACK_ONLY_PATHS = {"/"}
+_LOOPBACK = {"127.0.0.1", "::1"}
+
+
+def _json_error(status: int, detail: str) -> web.Response:
+    return web.json_response({"error": detail}, status=status)
+
+
+@web.middleware
+async def auth_middleware(request: web.Request, handler):
+    path = request.path
+    if path in _PUBLIC_PATHS:
+        return await handler(request)
+    if path in _LOOPBACK_ONLY_PATHS:
+        if request.remote not in _LOOPBACK:
+            raise web.HTTPNotFound()
+        return await handler(request)
+    expected = request.app[CONFIG_KEY].token
+    header = request.headers.get("Authorization", "")
+    supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not supplied or not secrets.compare_digest(supplied.encode(), expected.encode()):
+        return _json_error(401, "Missing or invalid token")
+    return await handler(request)
+
+
+async def _json_body(request: web.Request) -> dict:
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text='{"error": "Body must be JSON"}', content_type="application/json") from exc
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text='{"error": "Body must be a JSON object"}', content_type="application/json")
+    return body
+
+
+def _str(body: dict, key: str) -> str:
+    v = body.get(key)
+    return v.strip() if isinstance(v, str) else ""
+
+
+# ---------------------------------------------------------------- status
+
+
+async def ping(request: web.Request) -> web.Response:
+    return web.json_response({"service": "androidreader-server", "version": __version__})
+
+
+async def health(request: web.Request) -> web.Response:
+    app = request.app
+    cfg = app[CONFIG_KEY]
+    manager = app[ENGINES_KEY]
+    default_spec = manager.specs.get(cfg.default_engine)
+    return web.json_response(
+        {
+            "server": "ok",
+            "version": __version__,
+            "default_engine": cfg.default_engine,
+            "default_engine_label": default_spec.label if default_spec else None,
+            "engine": manager.status(),
+            "voices": len(app[VOICES_KEY].list()),
+            "cache": app[CACHE_KEY].stats(),
+        }
+    )
+
+
+async def engines(request: web.Request) -> web.Response:
+    manager = request.app[ENGINES_KEY]
+    return web.json_response(
+        {"engines": manager.engines(), "default": request.app[CONFIG_KEY].default_engine, "status": manager.status()}
+    )
+
+
+async def engine_load(request: web.Request) -> web.Response:
+    manager = request.app[ENGINES_KEY]
+    try:
+        await manager.preload(request.match_info["engine"])
+    except EngineError as exc:
+        return _json_error(exc.status, exc.detail)
+    return web.json_response({"status": manager.status()})
+
+
+async def engine_unload(request: web.Request) -> web.Response:
+    await request.app[ENGINES_KEY].unload()
+    return web.json_response({"status": request.app[ENGINES_KEY].status()})
+
+
+# ---------------------------------------------------------------- voices
+
+
+async def voices(request: web.Request) -> web.Response:
+    store = request.app[VOICES_KEY]
+    default = store.default(request.app[CONFIG_KEY].default_voice)
+    include_characters = request.query.get("all") == "1"
+    items = [v.public() for v in store.list() if include_characters or v.source != "character"]
+    return web.json_response({"voices": items, "default": default.id if default else None})
+
+
+async def voice_create(request: web.Request) -> web.Response:
+    store = request.app[VOICES_KEY]
+    fields: dict[str, str] = {}
+    audio: bytes | None = None
+    if request.content_type.startswith("multipart/"):
+        reader = await request.multipart()
+        async for part in reader:
+            if part.name == "audio":
+                audio = await part.read(decode=False)
+            elif part.name:
+                fields[part.name] = (await part.text()).strip()
+    else:
+        body = await _json_body(request)
+        fields = {k: str(v) for k, v in body.items() if isinstance(v, (str, int, float))}
+        if isinstance(body.get("audio_base64"), str):
+            audio = base64.b64decode(body["audio_base64"])
+    if not audio:
+        return _json_error(400, "Missing reference audio (WAV)")
+    try:
+        voice = store.add(
+            fields.get("name", ""), audio, fields.get("ref_text", ""), language=fields.get("language", ""),
+            instruct=fields.get("instruct", ""),
+        )
+    except ValueError as exc:
+        return _json_error(400, str(exc))
+    return web.json_response(voice.public(), status=201)
+
+
+async def voice_update(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    voice = request.app[VOICES_KEY].update(request.match_info["voice"], **body)
+    if voice is None:
+        return _json_error(404, "No such voice")
+    return web.json_response(voice.public())
+
+
+async def voice_delete(request: web.Request) -> web.Response:
+    if not request.app[VOICES_KEY].delete(request.match_info["voice"]):
+        return _json_error(404, "No such voice")
+    return web.json_response({"deleted": True})
+
+
+async def voice_audio(request: web.Request) -> web.StreamResponse:
+    voice = request.app[VOICES_KEY].get(request.match_info["voice"])
+    if voice is None or voice.wav_path is None:
+        return _json_error(404, "No such voice")
+    return web.FileResponse(voice.wav_path, headers={"Content-Type": "audio/wav"})
+
+
+async def collect_audio(stream) -> tuple[int, bytes]:
+    rate, parts = 24000, []
+    async with contextlib.aclosing(stream):
+        async for ev in stream:
+            if isinstance(ev, StreamStart):
+                rate = ev.sample_rate
+            elif isinstance(ev, AudioChunk):
+                parts.append(ev.pcm)
+    return rate, b"".join(parts)
+
+
+DESIGN_TEXT = (
+    "The old house stood at the end of the lane, and every evening the lamps came on one by one, "
+    "as if someone inside were still waiting for us to come home."
+)
+
+
+async def design_voice(app: web.Application, engine: str, description: str, name: str, *, text: str = "",
+                       seed: int | None = None, source: str = "design", voice_id: str | None = None,
+                       language: str = "English"):
+    """Create a voice from a description and lock it to the generated clip."""
+    text = text or DESIGN_TEXT
+    rate, pcm = await collect_audio(app[ENGINES_KEY].design(engine, description, text, seed))
+    if not pcm:
+        raise EngineError("Voice design produced no audio")
+    pcm = SilenceTrimmer(rate).feed(pcm)
+    return app[VOICES_KEY].add(
+        name, wav_bytes(pcm, rate), text, language=language, instruct=description, seed=seed,
+        source=source, description=description, voice_id=voice_id,
+    )
+
+
+async def voice_design(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    description = _str(body, "description")
+    if not description:
+        return _json_error(400, "Describe the voice, e.g. 'female, young adult, warm, british accent'")
+    engine = _str(body, "engine") or "qwen3tts"
+    try:
+        voice = await design_voice(request.app, engine, description, _str(body, "name") or description[:40],
+                                   text=_str(body, "text"), seed=body.get("seed"))
+    except EngineError as exc:
+        return _json_error(exc.status, exc.detail)
+    return web.json_response(voice.public(), status=201)
+
+
+# ---------------------------------------------------------------- pronunciations
+
+
+async def pronunciations(request: web.Request) -> web.Response:
+    return web.json_response(request.app[PRON_KEY].listing(request.query.get("book") or None))
+
+
+async def pronunciation_add(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    book = _str(body, "book") if _str(body, "scope") != "global" else ""
+    try:
+        entry = request.app[PRON_KEY].add(
+            _str(body, "term"), _str(body, "respelling"), phonemes=_str(body, "phonemes"),
+            case_sensitive=bool(body.get("case_sensitive")), book=book or None,
+        )
+    except ValueError as exc:
+        return _json_error(400, str(exc))
+    return web.json_response(entry.to_json(), status=201)
+
+
+async def pronunciation_update(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    entry = request.app[PRON_KEY].update(request.match_info["entry"], **body)
+    if entry is None:
+        return _json_error(404, "No such entry")
+    return web.json_response(entry.to_json())
+
+
+async def pronunciation_delete(request: web.Request) -> web.Response:
+    if not request.app[PRON_KEY].delete(request.match_info["entry"]):
+        return _json_error(404, "No such entry")
+    return web.json_response({"deleted": True})
+
+
+# ---------------------------------------------------------------- synthesis
+
+
+def _audio_headers(sample_rate: int, **extra: str) -> dict:
+    h = {
+        "Content-Type": f"audio/L16; rate={sample_rate}; channels=1",
+        "X-Sample-Rate": str(sample_rate),
+        "X-Channels": "1",
+        "X-Encoding": "pcm16le",
+        "Cache-Control": "no-store",
+    }
+    h.update(extra)
+    return h
+
+
+def _extra_entries(body: dict) -> list[Entry]:
+    out = []
+    for raw in body.get("extra_pronunciations") or []:
+        if isinstance(raw, dict) and str(raw.get("term", "")).strip():
+            out.append(Entry(term=" ".join(str(raw["term"]).split()), respelling=str(raw.get("respelling") or ""),
+                             phonemes=str(raw.get("phonemes") or "").upper(),
+                             case_sensitive=bool(raw.get("case_sensitive")), book="__preview__"))
+    return out
+
+
+class SynthesisPlan:
+    """Everything decided before synthesis: engine, voice, final text and cache key."""
+
+    def __init__(self, app: web.Application, body: dict, text: str):
+        cfg = app[CONFIG_KEY]
+        manager = app[ENGINES_KEY]
+        self.engine_id = _str(body, "engine") or cfg.default_engine
+        self.spec: EngineSpec = manager.spec(self.engine_id)
+        if not self.spec.installed(manager.models_dir):
+            raise EngineError(f"{self.spec.label} is not installed on the PC", 503)
+        store = app[VOICES_KEY]
+        requested = _str(body, "voice")
+        self.voice = store.get(requested) if requested else None
+        if self.voice is None:
+            self.voice = store.default(cfg.default_voice)
+        if self.voice is None:
+            raise EngineError("No voices on the PC yet. Import or upload one first.", 503)
+        book = _str(body, "book") or None
+        entries = app[PRON_KEY].for_book(book)
+        extra = _extra_entries(body)
+        if extra:
+            keys = {e.key() for e in extra}
+            entries = [e for e in entries if e.key() not in keys] + extra
+        self.pron_version = entries_version(entries)
+        self.text = apply(text, entries, PHONEME_FORMATS.get(self.spec.phonemes))
+        self.language = _str(body, "language") or None
+        self.delivery = _str(body, "delivery") or _str(body, "instruct") or None
+        if not self.spec.delivery:
+            self.delivery = None
+        seed = body.get("seed")
+        self.seed = int(seed) if isinstance(seed, (int, float)) else self.voice.seed
+        options = {**self.spec.defaults, **cfg.engine_options.get(self.engine_id, {})}
+        self.key = cache_key(
+            engine=self.engine_id, options=options, voice=self.voice.fingerprint, language=self.language,
+            delivery=self.delivery, seed=self.seed, text=self.text, trim=cfg.trim_silence, v=2,
+        )
+
+    def worker_payload(self, text: str) -> dict:
+        return {
+            "text": text,
+            "voice": self.voice.worker_spec(),
+            "language": self.language,
+            "seed": self.seed,
+            "delivery": self.delivery,
+        }
+
+
+async def tts(request: web.Request) -> web.StreamResponse:
+    """Synthesize one utterance and stream raw PCM16LE mono back.
+
+    Errors before any audio is produced are JSON with a 4xx/5xx status. An
+    error after audio has started aborts the connection, so the client sees a
+    truncated chunked body rather than a clean end. Closing the connection
+    cancels synthesis.
+    """
+    app = request.app
+    cfg = app[CONFIG_KEY]
+    body = await _json_body(request)
+    text = clean_text(str(body.get("text") or ""))
+    if len(text) > MAX_TEXT_CHARS:
+        return _json_error(413, f"Text longer than {MAX_TEXT_CHARS} characters")
+    if not is_speakable(text):
+        return web.Response(body=b"", headers=_audio_headers(24000))
+    try:
+        plan = SynthesisPlan(app, body, text)
+    except EngineError as exc:
+        return _json_error(exc.status, exc.detail)
+
+    speed = clamp_speed(body.get("speed"))
+    pause_ms = trailing_pause_ms(text, clamp_pause_ms(body.get("sentence_pause_ms"), cfg.sentence_pause_ms))
+    use_cache = body.get("cache", True) is not False
+    meta = {"X-Engine": plan.engine_id, "X-Voice": plan.voice.id, "X-Pronunciation-Version": plan.pron_version}
+
+    cached = app[CACHE_KEY].get(plan.key) if use_cache else None
+    if cached is not None:
+        rate, pcm = cached
+        pcm = time_stretch(pcm, rate, speed) + bytes(int(rate * pause_ms / 1000) * 2)
+        return web.Response(body=pcm, headers=_audio_headers(rate, **meta, **{"X-Cache": "hit"}))
+
+    manager = app[ENGINES_KEY]
+    t0 = time.perf_counter()
+    first_audio: float | None = None
+    resp: web.StreamResponse | None = None
+    rate = 24000
+    trimmer: SilenceTrimmer | None = None
+    full = bytearray()
+    sent = 0
+    complete = False
+    try:
+        for piece in split_for_synthesis(plan.text):
+            stream = manager.synthesize(plan.engine_id, plan.worker_payload(piece))
+            piece_pcm = bytearray()
+            async with contextlib.aclosing(stream):
+                async for ev in stream:
+                    if isinstance(ev, StreamStart):
+                        rate = ev.sample_rate
+                        if trimmer is None and cfg.trim_silence:
+                            trimmer = SilenceTrimmer(rate)
+                        if resp is None:
+                            resp = web.StreamResponse(headers=_audio_headers(rate, **meta, **{"X-Cache": "miss"}))
+                            resp.enable_chunked_encoding()
+                            await resp.prepare(request)
+                    elif isinstance(ev, AudioChunk) and resp is not None:
+                        pcm = trimmer.feed(ev.pcm) if trimmer else ev.pcm
+                        if not pcm:
+                            continue
+                        full += pcm
+                        if speed == 1.0:
+                            if first_audio is None:
+                                first_audio = time.perf_counter() - t0
+                            sent += len(pcm)
+                            await resp.write(pcm)
+                        else:
+                            piece_pcm += pcm
+            if piece_pcm and resp is not None:
+                out = time_stretch(bytes(piece_pcm), rate, speed)
+                if first_audio is None:
+                    first_audio = time.perf_counter() - t0
+                sent += len(out)
+                await resp.write(out)
+        if trimmer is not None and resp is not None:
+            tail = trimmer.flush()
+            if tail:
+                full += tail
+                out = time_stretch(tail, rate, speed) if speed != 1.0 else tail
+                sent += len(out)
+                await resp.write(out)
+        complete = True
+    except EngineError as exc:
+        if resp is None:
+            logger.warning("tts failed: %s", exc.detail)
+            return _json_error(exc.status, exc.detail)
+        logger.warning("tts failed mid-stream, aborting: %s", exc.detail)
+        if request.transport is not None:
+            request.transport.close()
+        return resp
+    except (ConnectionResetError, aiohttp.ClientConnectionResetError):
+        logger.info("client cancelled after %d bytes", sent)
+        return resp or web.Response(status=499)
+    except asyncio.CancelledError:
+        logger.info("client cancelled after %d bytes", sent)
+        raise
+
+    if complete and full and use_cache:
+        app[CACHE_KEY].put(plan.key, rate, bytes(full))
+    if resp is None:
+        return web.Response(body=b"", headers=_audio_headers(rate, **meta))
+    if sent and pause_ms:
+        silence = bytes(int(rate * pause_ms / 1000) * 2)
+        await resp.write(silence)
+    await resp.write_eof()
+    audio_s = len(full) / 2 / rate
+    total = time.perf_counter() - t0
+    logger.info(
+        "tts %s/%s %d chars -> %.1fs audio, first audio %s, total %.2fs (RTF %.2f)",
+        plan.engine_id, plan.voice.id, len(text), audio_s,
+        f"{first_audio * 1000:.0f}ms" if first_audio is not None else "n/a", total,
+        total / audio_s if audio_s else 0,
+    )
+    return resp
+
+
+# ---------------------------------------------------------------- pairing
+
+
+def server_urls(port: int) -> list[str]:
+    """URLs the phone can try, LAN first, then Tailscale (IP and MagicDNS name)."""
+    urls = []
+    addrs = lan_addresses()
+    for kind in ("lan", "tailscale", "other"):
+        urls += [f"http://{a['ip']}:{port}" for a in addrs if a["kind"] == kind]
+        if kind == "tailscale":
+            urls += [f"http://{name}:{port}" for name in tailscale_names()]
+    seen = set()
+    return [u for u in urls if not (u in seen or seen.add(u))]
+
+
+def pairing_link(urls: list[str], token: str) -> str:
+    """Deep link understood by the Android app."""
+    q = "&".join(f"url={quote(u, safe='')}" for u in urls)
+    return f"{PAIR_SCHEME}://pair?{q}&token={quote(token, safe='')}"
+
+
+_PAIR_PAGE = """<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Pair AndroidReader</title><style>body{font-family:sans-serif;margin:2em;line-height:1.5}
+a.btn{display:inline-block;padding:.8em 1.2em;background:#3557d6;color:#fff;border-radius:.5em;text-decoration:none}
+code{background:#eee;padding:.1em .3em;word-break:break-all}</style></head><body>
+<h2>AndroidReader</h2><p id=msg>Opening the app&hellip;</p>
+<p><a class=btn id=open href="#">Open AndroidReader</a></p>
+<p>Or enter manually in the app:<br>Server URLs: <code id=url></code><br>Token: <code id=tok></code></p>
+<script>
+var h = location.hash.slice(1), tok = '', urls = [location.origin];
+if (h.indexOf('=') < 0) { tok = decodeURIComponent(h); } else {
+  h.split('&').forEach(function (kv) { var p = kv.split('='), v = decodeURIComponent(p[1] || '');
+    if (p[0] == 't') tok = v; if (p[0] == 'u' && v) v.split(',').forEach(function (u) { if (urls.indexOf(u) < 0) urls.push(u); }); });
+}
+document.getElementById('url').textContent = urls.join(', ');
+document.getElementById('tok').textContent = tok || '(missing - scan the QR code again)';
+var q = urls.map(function (u) { return 'url=' + encodeURIComponent(u); }).join('&') + '&token=' + encodeURIComponent(tok);
+document.getElementById('open').href = 'intent://pair?' + q + '#Intent;scheme=__SCHEME__;package=__PKG__;end';
+document.getElementById('msg').textContent = tok ? 'Tap the button to pair this phone.' : 'No token in link.';
+</script></body></html>"""
+
+
+async def pair_page(request: web.Request) -> web.Response:
+    # Public on purpose: the token lives in the URL fragment, which browsers never send to the server.
+    page = _PAIR_PAGE.replace("__PKG__", ANDROID_PACKAGE).replace("__SCHEME__", PAIR_SCHEME)
+    return web.Response(text=page, content_type="text/html")
+
+
+def _qr_svg(data: str) -> str:
+    import qrcode
+    import qrcode.image.svg
+
+    img = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, box_size=6, border=2)
+    buf = io.BytesIO()
+    img.save(buf)
+    return buf.getvalue().decode("utf-8")
+
+
+def pair_url(base: str, urls: list[str], token: str) -> str:
+    others = ",".join(u for u in urls if u != base)
+    return f"{base}/pair#t={quote(token, safe='')}" + (f"&u={quote(others, safe=':/,')}" if others else "")
+
+
+async def index(request: web.Request) -> web.Response:
+    """Loopback-only page showing pairing QR codes (it contains the token)."""
+    cfg = request.app[CONFIG_KEY]
+    urls = server_urls(cfg.port)
+    parts = [
+        "<!doctype html><html><head><title>AndroidReader server</title>"
+        "<style>body{font-family:sans-serif;margin:2em}.card{display:inline-block;margin:1em;"
+        "padding:1em;border:1px solid #ccc;border-radius:.5em;vertical-align:top}</style></head><body>",
+        "<h2>AndroidReader server</h2>",
+        "<p>Scan a code with the phone's camera, open the link, then tap <b>Open AndroidReader</b>. "
+        "Every code carries all the addresses below, so the app can switch between home Wi-Fi and "
+        "Tailscale by itself.</p>",
+    ]
+    if not urls:
+        parts.append("<p><b>No network address found.</b> Is this PC connected to a network?</p>")
+    for base in urls:
+        parts.append(
+            f"<div class=card><h3>{html.escape(base)}</h3>{_qr_svg(pair_url(base, urls, cfg.token))}</div>"
+        )
+    parts.append(f"<p>Token: <code>{html.escape(cfg.token)}</code></p></body></html>")
+    return web.Response(text="".join(parts), content_type="text/html")
+
+
+# ---------------------------------------------------------------- app
+
+
+def make_app(
+    cfg: ServerConfig,
+    *,
+    specs: dict[str, EngineSpec] | None = None,
+    manager: EngineManager | None = None,
+) -> web.Application:
+    data = cfg.data_path
+    app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
+    app[CONFIG_KEY] = cfg
+    app[ENGINES_KEY] = manager or EngineManager(
+        specs or ENGINES,
+        cfg.models_path,
+        options=cfg.engine_options,
+        load_timeout_s=cfg.load_timeout_s,
+        synth_timeout_s=cfg.synth_timeout_s,
+    )
+    app[VOICES_KEY] = VoiceStore(data / "voices")
+    app[PRON_KEY] = PronunciationStore(data / "pronunciations.json")
+    app[CACHE_KEY] = AudioCache(data / "cache", cfg.cache_max_mb * 1024 * 1024)
+    app[EXTRA_KEY] = {}
+
+    async def _lifecycle(app: web.Application):
+        task = None
+        if cfg.preload and cfg.default_engine in app[ENGINES_KEY].specs:
+            async def _preload():
+                try:
+                    await app[ENGINES_KEY].preload(cfg.default_engine)
+                except EngineError as exc:
+                    logger.warning("could not preload %s: %s", cfg.default_engine, exc.detail)
+            task = asyncio.ensure_future(_preload())
+        yield
+        if task is not None:
+            task.cancel()
+        await app[ENGINES_KEY].close()
+
+    app.cleanup_ctx.append(_lifecycle)
+    r = app.router
+    r.add_get("/", index)
+    r.add_get("/pair", pair_page)
+    r.add_get("/api/ping", ping)
+    r.add_get("/api/health", health)
+    r.add_get("/api/engines", engines)
+    r.add_post("/api/engines/unload", engine_unload)
+    r.add_post("/api/engines/{engine}/load", engine_load)
+    r.add_get("/api/voices", voices)
+    r.add_post("/api/voices", voice_create)
+    r.add_post("/api/voices/design", voice_design)
+    r.add_patch("/api/voices/{voice}", voice_update)
+    r.add_delete("/api/voices/{voice}", voice_delete)
+    r.add_get("/api/voices/{voice}/audio", voice_audio)
+    r.add_get("/api/pronunciations", pronunciations)
+    r.add_post("/api/pronunciations", pronunciation_add)
+    r.add_patch("/api/pronunciations/{entry}", pronunciation_update)
+    r.add_delete("/api/pronunciations/{entry}", pronunciation_delete)
+    r.add_post("/api/tts", tts)
+
+    from . import books
+
+    books.setup(app)
+    return app
