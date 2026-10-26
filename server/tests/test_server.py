@@ -393,7 +393,7 @@ async def test_used_by_and_duplicate_for_one_character(client):
 
     r = await client.post("/api/voices/nar/duplicate", json={"book": "book1", "character": "tom"}, headers=AUTH)
     copy = await r.json()
-    assert r.status == 201 and copy["id"] != "nar" and copy["name"] == "Tom (Narrator)"
+    assert r.status == 201 and copy["id"] != "nar" and copy["name"] == "Tom"
     assert [u["name"] for u in copy["used_by"]] == ["Tom"]
     assert store.script("book1")["characters"]["ann"]["voice"] == "nar"
     # the script tells clients which version of each cast voice they should hear
@@ -405,3 +405,14 @@ async def test_used_by_and_duplicate_for_one_character(client):
     assert script["voice_versions"][copy["id"]] != before
     assert (await client.post("/api/voices/nar/duplicate", json={"book": "book1", "character": "zed"},
                               headers=AUTH)).status == 404
+
+
+async def test_option_made_from_a_shared_voice_can_be_kept_on_a_copy(client):
+    r = await client.post("/api/voices/nar/design", json={"description": "deep", "engine": "fake", "count": 1},
+                          headers=AUTH)
+    cand = (await r.json())["candidates"][0]
+    copy = await (await client.post("/api/voices/nar/duplicate", json={}, headers=AUTH)).json()
+    v = await (await client.post(f"/api/voices/{copy['id']}/design/{cand['id']}", headers=AUTH)).json()
+    assert v["id"] == copy["id"] and v["instruct"] == "deep"
+    original = await (await client.get("/api/voices/nar", headers=AUTH)).json()
+    assert original["history"] == []  # the shared voice itself is untouched

@@ -247,7 +247,7 @@ async def voice_duplicate(request: web.Request) -> web.Response:
             return _json_error(404, "No such character")
     name = _str(body, "name")
     if not name and book and character:
-        name = f"{store.script(book)['characters'][character].get('name', character)} ({voice.name})"
+        name = store.script(book)["characters"][character].get("name", character)
     copy = request.app[VOICES_KEY].duplicate(voice.id, name)
     if book and character:
         async with store.lock(book):
@@ -320,18 +320,20 @@ async def candidate_audio(request: web.Request) -> web.StreamResponse:
 
 
 async def voice_select_candidate(request: web.Request) -> web.Response:
-    """Keep a designed candidate: it becomes the voice's locked reference."""
+    """Keep a designed candidate: it becomes the voice's locked reference. The candidate may have been
+    made from another voice (a shared voice the user then chose to copy for one character)."""
     voice = _voice_or_404(request)
     found = _candidate(request)
-    if found is None or found[1].get("voice") != voice.id:
-        return _json_error(404, "No such candidate for this voice")
+    if found is None:
+        return _json_error(404, "No such option (they are kept for a day)")
     path, meta = found
+    made_for = {voice.id, meta.get("voice")}
     voice = request.app[VOICES_KEY].replace_audio(
         voice.id, path.with_suffix(".wav").read_bytes(), meta["text"], instruct=meta["description"],
         description=meta["description"], seed=meta["seed"])
     for p in _candidates_dir(request.app).glob("*.json"):
         try:
-            if json.loads(p.read_text(encoding="utf-8")).get("voice") == voice.id:
+            if json.loads(p.read_text(encoding="utf-8")).get("voice") in made_for:
                 p.unlink(missing_ok=True)
                 p.with_suffix(".wav").unlink(missing_ok=True)
         except (OSError, ValueError):

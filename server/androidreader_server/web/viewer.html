@@ -230,23 +230,35 @@ async function voicesView() {
   load().catch(e => tokenScreen.shown || $("#vlist").replaceChildren(h("p", {}, "Error: " + e.message)));
 }
 
-/* The voice editor. ctx: { book, character, characterName, onChange(voice) }. */
+/* The voice editor: describe the voice, pick one of three takes. Everything else is under Advanced.
+   ctx: { book, character, characterName, onChange(voice) }. */
 async function openVoiceEditor(voiceId, ctx = {}) {
   const d = $("#vdlg");
   let v = await get(`/api/voices/${voiceId}`);
   const engines = await installedEngines().catch(() => []);
-  let chosen = false;            // shared voice: "this character only" or "everywhere" picked
-  let candidates = [];
-  let clip = null;               // { blob, url, duration } for a new reference
+  const designers = engines.filter(e => e.voice_design);
+  let takes = [];                // generated options to choose from
+  let message = "";              // short status line ("Saved.")
+  let clip = null;               // advanced: { blob, url, duration } for a recorded or uploaded reference
   let recorder = null;
   const ui = {};                 // inputs that survive re-rendering
 
-  const changed = async (fresh) => { v = fresh; render(); if (ctx.onChange) await ctx.onChange(v); };
+  // A voice shared with other characters is copied for this one, unless the user says otherwise.
+  const others = () => v.used_by.filter(u => !(u.book === ctx.book && u.character === ctx.character));
+  const forThisOnly = () => ctx.character && others().length > 0 && !(ui.everyone && ui.everyone.checked);
+  async function target() {
+    if (!forThisOnly()) return v.id;
+    const copy = (await api("POST", `/api/voices/${v.id}/duplicate`, { book: ctx.book, character: ctx.character })).data;
+    v = copy;
+    return copy.id;
+  }
+
+  const changed = async (fresh, note) => { v = fresh; message = note || ""; render(); if (ctx.onChange) await ctx.onChange(v); };
   async function busy(btn, label, fn) {
     const old = btn.textContent; btn.disabled = true; btn.textContent = label;
     try { await fn(); } catch (e) { alert(e.message); } finally { btn.disabled = false; btn.textContent = old; }
   }
-  function input(key, attrs, value) {
+  function field(key, attrs, value) {
     if (!ui[key]) {
       ui[key] = h(attrs.rows ? "textarea" : "input", attrs);
       ui[key].addEventListener("input", () => { ui[key].dataset.touched = "1"; });
@@ -254,35 +266,33 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     if (value !== undefined && !ui[key].dataset.touched) ui[key].value = value ?? "";
     return ui[key];
   }
-  const engineSelect = (key, list, preferred) => {
+  const untouch = (...keys) => keys.forEach(k => ui[k] && delete ui[k].dataset.touched);
+  function engineSelect(key, list, preferred) {
     if (!ui[key]) {
       ui[key] = h("select", {}, ...list.map(e => h("option", { value: e.id }, e.label)));
       if (list.some(e => e.id === preferred)) ui[key].value = preferred;
     }
     return ui[key];
-  };
+  }
+
+  async function send(method, path, form) {
+    const r = await fetch(path, { method, body: form, headers: { Authorization: "Bearer " + TOKEN } });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
+    return data;
+  }
 
   async function setClip(blob) {
-    const buf = await blob.arrayBuffer();
     let duration = 0;
     try {
       const ac = new (window.AudioContext || window.webkitAudioContext)();
-      duration = (await ac.decodeAudioData(buf.slice(0))).duration;
+      duration = (await ac.decodeAudioData(await blob.arrayBuffer())).duration;
       ac.close();
     } catch (e) { alert("This browser can't play that file; the server may still read it."); }
     clip = { blob, url: URL.createObjectURL(blob), duration };
-    ui.start = null; ui.end = null;
+    ui.start = null; ui.end = null; ui.clipText = null;
     render();
   }
-
-  function previewTrim() {
-    if (!clip) return;
-    const a = sharedPlayer, s = Number(ui.start.value) || 0, e = Number(ui.end.value) || clip.duration;
-    a.pause(); a.src = clip.url;
-    a.onloadedmetadata = () => { a.currentTime = s; a.play(); };
-    a.ontimeupdate = () => { if (a.currentTime >= e) { a.pause(); a.ontimeupdate = null; } };
-  }
-
   function clipForm(extra) {
     const f = new FormData();
     f.append("audio", clip.blob, "clip");
@@ -291,13 +301,12 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     for (const [k, val] of Object.entries(extra)) if (val) f.append(k, val);
     return f;
   }
-  async function send(method, path, form) {
-    const r = await fetch(path, { method, body: form, headers: { Authorization: "Bearer " + TOKEN } });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || "HTTP " + r.status);
-    return data;
+  function listenToClip() {
+    const a = sharedPlayer, s = Number(ui.start.value) || 0, e = Number(ui.end.value) || clip.duration;
+    a.pause(); a.src = clip.url;
+    a.onloadedmetadata = () => { a.currentTime = s; a.play(); };
+    a.ontimeupdate = () => { if (a.currentTime >= e) { a.pause(); a.ontimeupdate = null; } };
   }
-
   async function toggleRecording(btn) {
     if (recorder) { recorder.stop(); return; }
     let stream;
@@ -311,121 +320,116 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     btn.textContent = "\u25A0 Stop recording";
   }
 
-  function render() {
-    const others = v.used_by.filter(u => !(u.book === ctx.book && u.character === ctx.character));
-    const shared = ctx.character && others.length > 0;
-    const sections = [];
-    const head = h("div", { class: "line" }, h("h3", { style: { margin: 0, flex: 1 } }, "Voice: " + v.name),
-      h("button", { onclick: () => d.close() }, "Close"));
-    const info = h("p", { class: "small muted" }, `${v.source} \u00b7 used by ${usedByText(v)}`);
+  async function makeTakes(btn) {
+    const description = ui.description.value.trim();
+    if (!description) { alert("Describe the voice first."); return; }
+    await busy(btn, "Making 3 options\u2026 (about a minute)", async () => {
+      const body = { description, count: 3 };
+      if (ui.designEngine) body.engine = ui.designEngine.value;
+      if (ui.sampleLine && ui.sampleLine.value.trim()) body.text = ui.sampleLine.value.trim();
+      takes = (await api("POST", `/api/voices/${v.id}/design`, body)).data.candidates;
+      message = "";
+      render();
+      playPath(`/api/voice-candidates/${takes[0].id}/audio`);
+    });
+  }
+  async function keep(btn, take, i) {
+    await busy(btn, "Saving\u2026", async () => {
+      const id = await target();
+      takes = [];
+      untouch("description", "name", "refText", "seed");
+      await changed((await api("POST", `/api/voices/${id}/design/${take.id}`)).data, `Saved option ${i + 1}.`);
+    });
+  }
 
-    if (shared && !chosen) {
-      sections.push(h("div", { class: "banner" },
-        h("p", { style: { margin: "0 0 6px" } }, `This voice is also used by ${others.slice(0, 8).map(u => u.name).join(", ")}${others.length > 8 ? ` and ${others.length - 8} more` : ""}.`),
-        h("div", { class: "line" },
-          h("button", { class: "primary", onclick: (e) => busy(e.target, "Copying\u2026", async () => {
-            const copy = await api("POST", `/api/voices/${v.id}/duplicate`, { book: ctx.book, character: ctx.character }).then(r => r.data);
-            chosen = true; await changed(copy);
-          }) }, `Edit for ${ctx.characterName || "this character"} only (makes a copy)`),
-          h("button", { onclick: () => { chosen = true; render(); } }, "Edit everywhere"))));
-      d.replaceChildren(head, info, ...sections);
-      return;
-    }
+  function advanced() {
+    const s = [];
+    s.push(h("label", {}, "Voice-design model"), engineSelect("designEngine", designers, "qwen3tts"),
+      h("label", {}, "What the options say (empty: a standard sentence)"), field("sampleLine", { placeholder: "e.g. a line this character says in the book" }));
 
-    // Reference and details
-    sections.push(h("div", { class: "sec" }, h("h4", {}, "Details"),
-      h("div", { class: "line" }, h("button", { onclick: () => playPath(`/api/voices/${v.id}/audio`) }, "\u25B6 Reference clip"),
-        h("span", { class: "small muted" }, v.seed != null ? `seed ${v.seed}` : "")),
-      h("label", {}, "Name"), input("name", {}, v.name),
-      h("label", {}, "Description (for you; use \u201cRedesign\u201d to change how it sounds)"), input("description", { rows: 2 }, v.description || v.instruct),
+    s.push(h("h4", {}, "Details"),
+      h("label", {}, "Name"), field("name", {}, v.name),
       h("div", { class: "line" },
-        h("label", {}, "Language ", input("language", { list: "langs", style: { width: "11em" } }, v.language || "")),
-        h("label", {}, "Seed ", input("seed", { type: "number", step: 1 }, v.seed ?? ""))),
+        h("label", {}, "Language ", field("language", { list: "langs", style: { width: "11em" } }, v.language || "")),
+        h("label", {}, "Seed ", field("seed", { type: "number", step: 1 }, v.seed ?? ""))),
       h("datalist", { id: "langs" }, ...Object.values(LANGS).map(l => h("option", { value: l }))),
-      h("label", {}, "Transcript of the reference clip (must match what is said)"), input("refText", { rows: 3 }, v.ref_text),
-      h("div", { class: "line" }, h("button", { class: "primary", onclick: (e) => busy(e.target, "Saving\u2026", async () => {
-        const body = { name: ui.name.value, description: ui.description.value, language: ui.language.value,
-          seed: ui.seed.value === "" ? null : ui.seed.value, ref_text: ui.refText.value };
-        for (const k of ["name", "description", "language", "seed", "refText"]) delete ui[k].dataset.touched;
-        await changed((await api("PATCH", `/api/voices/${v.id}`, body)).data);
-      }) }, "Save details"))));
+      h("label", {}, "Transcript of the reference clip"), field("refText", { rows: 2 }, v.ref_text),
+      h("button", { onclick: (e) => busy(e.target, "Saving\u2026", async () => {
+        const id = await target();
+        const body = { name: ui.name.value, language: ui.language.value, seed: ui.seed.value === "" ? null : ui.seed.value,
+          ref_text: ui.refText.value, description: ui.description.value.trim() };
+        untouch("name", "language", "seed", "refText", "description");
+        await changed((await api("PATCH", `/api/voices/${id}`, body)).data, "Details saved.");
+      }) }, "Save details"));
 
-    // Redesign from a description
-    const designers = engines.filter(e => e.voice_design);
-    sections.push(h("div", { class: "sec" }, h("h4", {}, "Redesign from a description"),
-      designers.length ? null : h("p", { class: "small muted" }, "No installed engine can design voices."),
-      input("designText", { rows: 2, placeholder: "e.g. male, elderly, low pitch, british accent, dry humour" }, v.instruct || v.description),
-      h("div", { class: "line" }, h("span", { class: "small muted" }, "Engine"), engineSelect("designEngine", designers, "qwen3tts"),
-        h("button", { class: "primary", disabled: !designers.length, onclick: (e) => busy(e.target, "Generating 3 voices\u2026 (about a minute)", async () => {
-          candidates = (await api("POST", `/api/voices/${v.id}/design`, { description: ui.designText.value.trim(),
-            engine: ui.designEngine.value, count: 3, text: ui.designLine.value.trim() })).data.candidates;
-          render();
-        }) }, "Generate 3 candidates")),
-      h("label", {}, "Line the candidates speak (it becomes the new transcript)"),
-      input("designLine", { placeholder: "Leave empty to use the current transcript" }),
-      ...candidates.map((c, i) => h("div", { class: "line" },
-        h("button", { onclick: () => playPath(`/api/voice-candidates/${c.id}/audio`) }, `\u25B6 Candidate ${i + 1}`),
-        h("span", { class: "small muted" }, `seed ${c.seed}`),
-        h("button", { onclick: (e) => busy(e.target, "Keeping\u2026", async () => {
-          candidates = []; delete ui.designText.dataset.touched;
-          await changed((await api("POST", `/api/voices/${v.id}/design/${c.id}`)).data);
-        }) }, "Keep this one")))));
-
-    // New reference clip
     const canRecord = !!(navigator.mediaDevices && window.MediaRecorder);
-    const file = h("input", { type: "file", accept: "audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm", onchange: (e) => e.target.files[0] && setClip(e.target.files[0]) });
-    const rec = h("button", { disabled: !canRecord, title: canRecord ? "" : "Recording needs this page on the PC (http://127.0.0.1) or HTTPS",
-      onclick: (e) => toggleRecording(e.target) }, recorder ? "\u25A0 Stop recording" : "\u25CF Record");
-    const clipBox = [];
+    s.push(h("h4", {}, "Use a real recording instead"),
+      h("p", { class: "small muted", style: { margin: 0 } }, "5\u201320 s of one person speaking clearly. Any audio format."),
+      h("div", { class: "line" },
+        h("input", { type: "file", accept: "audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm", onchange: (e) => e.target.files[0] && setClip(e.target.files[0]) }),
+        h("button", { disabled: !canRecord, title: canRecord ? "" : "Recording needs this page on the PC (http://127.0.0.1) or HTTPS",
+          onclick: (e) => toggleRecording(e.target) }, recorder ? "\u25A0 Stop recording" : "\u25CF Record")));
     if (clip) {
       ui.start = ui.start || h("input", { type: "number", step: 0.1, min: 0, value: 0 });
       ui.end = ui.end || h("input", { type: "number", step: 0.1, min: 0, value: clip.duration.toFixed(1) });
-      ui.newText = ui.newText || h("textarea", { rows: 3, placeholder: "Transcript (Transcribe fills it in; leave empty to let the server do it)" });
-      clipBox.push(
-        h("div", { class: "line" }, h("span", { class: "small" }, `Clip: ${clip.duration.toFixed(1)} s. Keep`),
-          h("span", { class: "small muted" }, "from"), ui.start, h("span", { class: "small muted" }, "to"), ui.end, h("span", { class: "small muted" }, "s"),
-          h("button", { onclick: previewTrim }, "\u25B6 Listen")),
-        ui.newText,
+      ui.clipText = ui.clipText || h("textarea", { rows: 2, placeholder: "What is said (filled in automatically if left empty)" });
+      s.push(h("div", { class: "line" }, h("span", { class: "small" }, `${clip.duration.toFixed(1)} s \u2014 keep from`),
+          ui.start, h("span", { class: "small" }, "to"), ui.end, h("span", { class: "small" }, "s"),
+          h("button", { onclick: listenToClip }, "\u25B6 Listen")),
+        ui.clipText,
         h("div", { class: "line" },
           h("button", { onclick: (e) => busy(e.target, "Transcribing\u2026", async () => {
-            ui.newText.value = (await send("POST", "/api/transcribe", clipForm({ language: v.language }))).text;
-          }) }, "Transcribe (Whisper)"),
+            ui.clipText.value = (await send("POST", "/api/transcribe", clipForm({ language: v.language }))).text;
+          }) }, "Fill in what is said"),
           h("button", { class: "primary", onclick: (e) => busy(e.target, "Saving\u2026", async () => {
-            const fresh = await send("PUT", `/api/voices/${v.id}/audio`, clipForm({ ref_text: ui.newText.value.trim(), language: v.language }));
-            clip = null; ui.newText = null; delete ui.refText.dataset.touched;
-            await changed(fresh);
-          }) }, "Use as the reference")));
+            const id = await target();
+            const fresh = await send("PUT", `/api/voices/${id}/audio`, clipForm({ ref_text: ui.clipText.value.trim(), language: v.language }));
+            clip = null; untouch("refText");
+            await changed(fresh, "Recording saved as the voice.");
+          }) }, "Use this recording")));
     }
-    sections.push(h("div", { class: "sec" }, h("h4", {}, "Replace the reference clip"),
-      h("p", { class: "small muted", style: { margin: 0 } }, "5\u201320 s of clear speech by one person works best. WAV, MP3 and most other formats."),
-      h("div", { class: "line" }, file, rec), ...clipBox));
 
-    // Preview
-    const allEngines = engines;
-    sections.push(h("div", { class: "sec" }, h("h4", {}, "Preview"),
-      input("previewText", {}, "Stop! Don't you dare take another step, or I'll make you regret it."),
-      h("div", { class: "line" }, h("span", { class: "small muted" }, "Delivery"),
-        input("previewDelivery", { placeholder: "e.g. shouting", style: { width: "14em" } }),
-        h("span", { class: "small muted" }, "Engine"), engineSelect("previewEngine", allEngines, ENGINE_INFO.def),
-        h("button", { class: "primary", onclick: (e) => busy(e.target, "Synthesizing\u2026", async () => {
-          const body = { text: ui.previewText.value.trim(), voice: v.id, engine: ui.previewEngine.value };
-          if (ui.previewDelivery.value.trim()) body.delivery = ui.previewDelivery.value.trim();
+    s.push(h("h4", {}, "Test with your own text"),
+      field("testText", {}, "Stop! Don't you dare take another step, or I'll make you regret it."),
+      h("div", { class: "line" }, field("testDelivery", { placeholder: "delivery, e.g. shouting", style: { width: "14em" } }),
+        engineSelect("testEngine", engines, ENGINE_INFO.def),
+        h("button", { onclick: (e) => busy(e.target, "Speaking\u2026", async () => {
+          const body = { text: ui.testText.value.trim(), voice: v.id, engine: ui.testEngine.value };
+          if (ui.testDelivery.value.trim()) body.delivery = ui.testDelivery.value.trim();
           if (v.language) body.language = v.language;
           const r = await api("POST", "/api/tts", body);
           playUrl(URL.createObjectURL(wav(r.data, Number(r.headers.get("X-Sample-Rate") || 24000))));
-        }) }, "\u25B6 Preview"))));
+        }) }, "\u25B6 Say it")));
+    return s;
+  }
 
-    // Undo
-    sections.push(h("div", { class: "sec" }, h("div", { class: "line" },
-      h("button", { disabled: !v.history.length, onclick: (e) => busy(e.target, "Undoing\u2026", async () => {
-        for (const k in ui) if (ui[k] && ui[k].dataset) delete ui[k].dataset.touched;
-        await changed((await api("POST", `/api/voices/${v.id}/revert`)).data);
-      }) }, "\u21B6 Undo last change"),
-      h("span", { class: "small muted" }, v.history.length
-        ? `${v.history.length} earlier version${v.history.length > 1 ? "s" : ""} kept (last saved ${new Date(v.history[0].saved * 1000).toLocaleString()})`
-        : "No earlier versions."))));
-
-    d.replaceChildren(...nonNull([head, info, v.used_by.length > 1 ? h("p", { class: "small" }, `Changes apply to all ${v.used_by.length} users of this voice.`) : null, ...sections]));
+  function render() {
+    const shared = ctx.character && others().length > 0;
+    ui.adv = ui.adv || h("details", { class: "sec" });
+    ui.adv.replaceChildren(h("summary", { style: { cursor: "pointer" } }, "Advanced"), ...nonNull(advanced()));
+    d.replaceChildren(...nonNull([
+      h("div", { class: "line" },
+        h("h3", { style: { margin: 0, flex: 1 } }, ctx.characterName ? `Voice for ${ctx.characterName}` : v.name),
+        h("button", { onclick: () => playPath(`/api/voices/${v.id}/audio`) }, "\u25B6 Current voice"),
+        h("button", { onclick: () => d.close() }, "Close")),
+      h("label", {}, "Describe the voice"),
+      field("description", { rows: 3, placeholder: "e.g. a young girl's high, light voice, but old-fashioned and teasing like a grandmother" },
+        v.instruct || v.description),
+      shared ? h("label", { class: "small", style: { color: "var(--fg)" } }, ui.everyone = ui.everyone || h("input", { type: "checkbox", style: { width: "auto" } }),
+        ` Also change it for ${others().length} other character${others().length > 1 ? "s" : ""} who share this voice`) : null,
+      h("div", { class: "line" },
+        h("button", { class: "primary", disabled: !designers.length, onclick: (e) => makeTakes(e.target) },
+          takes.length ? "Try again" : "Make 3 options"),
+        v.history.length ? h("button", { onclick: (e) => busy(e.target, "Undoing\u2026", async () => {
+          untouch(...Object.keys(ui));
+          await changed((await api("POST", `/api/voices/${v.id}/revert`)).data, "Went back to the previous voice.");
+        }) }, "\u21B6 Undo") : null,
+        message ? h("span", { class: "small" }, message) : null),
+      takes.length ? h("div", {}, ...takes.map((t, i) => h("div", { class: "line" },
+        h("button", { onclick: () => playPath(`/api/voice-candidates/${t.id}/audio`) }, `\u25B6 Option ${i + 1}`),
+        h("button", { onclick: (e) => keep(e.target, t, i) }, "Use this")))) : null,
+      ui.adv,
+    ]));
   }
 
   render();

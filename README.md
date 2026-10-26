@@ -363,19 +363,22 @@ Edit any voice by hand in the viewer: 🎙 next to a character in a book's cast 
 (http://127.0.0.1:3950/books/voices, linked from every viewer page). The Voices page lists every
 voice, including imported VoiceStudio voices, pool voices and character voices, with who uses it.
 
-* **Details:** name, description, language, seed and the transcript of the reference clip.
-* **Redesign from a description:** describe the voice ("male, elderly, low pitch, british accent,
-  dry humour"), generate 3 candidates with different seeds (Qwen3-TTS or OmniVoice voice design;
-  about a minute), listen, and keep one. It becomes the voice's locked reference.
-* **Replace the reference clip:** upload a WAV, MP3 or other clip, or record one in the browser
-  (only on the PC itself or over HTTPS, browser rule). Trim the start and end, then **Transcribe**
-  with Whisper (large-v3-turbo, run in the IndexTTS venv; 5–20 s of one clear speaker works best)
-  and correct the transcript before saving. Left empty, the server transcribes on save.
-* **Preview:** any text, an optional delivery (*shouting*) and any installed engine.
-* **Shared voices:** pool voices are shared by many minor characters and possibly other books.
-  Editing one from a character asks first: *Edit for this character only* makes a copy and
-  assigns it to that character; *Edit everywhere* changes it for all.
-* **Undo:** every change keeps the previous version (the last 5); *Undo last change* goes back.
+Describe the voice in plain words ("a young girl's high, light voice, but old-fashioned and teasing
+like a grandmother"), press **Make 3 options**, listen, and press **Use this** on the one you like.
+That's all. It takes about a minute, and **Undo** goes back to the previous voice (the last 5 are
+kept). A voice shared by several characters, such as a pool voice for minor characters, is
+copied for the character you are editing. Tick *Also change it for N other characters* to change
+it for all of them.
+
+**Advanced** holds the rest:
+
+* **Voice-design model and sample line:** which model makes the options and what they say.
+* **Details:** name, language, seed and the transcript of the reference clip.
+* **Use a real recording instead:** upload a WAV, MP3 or other clip, or record one in the browser
+  (only on the PC itself or over HTTPS, a browser rule). Trim it, and *Fill in what is said* runs
+  Whisper (large-v3-turbo in the IndexTTS venv); correct the text before saving. 5–20 s of one
+  clear speaker works best.
+* **Test with your own text:** any text, a delivery (*shouting*) and any installed engine.
 
 The audio cache key includes a fingerprint of the voice's reference audio, transcript, language,
 seed and design description, not only its ID. Edited voices are therefore never served from old
