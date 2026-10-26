@@ -168,7 +168,10 @@ test connection**. *Settings* also holds the default model, voice and sentence p
   AndroidReader*. Books are copied into the app, with covers.
   Long-press a book to remove it.
 * **Reader:** tap any sentence to start reading from it; the sentence being read is highlighted
-  and the page follows it. The list icon opens the table of contents.
+  and the page follows it. The list icon opens the table of contents. Chapters follow the book's
+  own table of contents: when a publisher splits a chapter into several files (often at every
+  illustration), the files are joined back into one chapter. Books imported with an older version
+  are re-split the next time you open them, and your place is kept.
 * **Controls:** play/pause, previous/next sentence and chapter, also from the lock screen,
   notification and Bluetooth headsets. Unplugging headphones pauses; calls pause reading.
 * **Reading options** (sliders icon): text size, theme (light/sepia/dark), speed (pitch is kept),
@@ -336,7 +339,9 @@ cd D:\Dev\AndroidReader\server
 
 Options: `--no-cast`, `--engine qwen3tts` (voice-design engine), `--reanalyze` (start over; your
 corrections, names and voices are kept). Running it again on a finished book only does the
-missing steps.
+missing steps. It always sends the text again, so if a newer version of the app splits the book
+into chapters differently, the server moves the existing analysis and your corrections to the new
+chapter numbering.
 
 ## 9. PC viewer
 

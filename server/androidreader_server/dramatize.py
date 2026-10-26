@@ -80,8 +80,14 @@ _POV_RE = re.compile(r"\bPOV\b|point of view|['\u2019]s side\b|\bside\s*[:\u2014
 
 
 def is_pov_marker(text: str) -> bool:
-    """A short heading such as "(The Neighbor's POV)" that switches the first-person narrator."""
-    return len(text) <= 60 and bool(_POV_RE.search(text))
+    """A short heading such as "(The Neighbor's POV)" or "Suiran's Side" that switches the first-person
+    narrator. Ordinary sentences that merely mention someone's side ("...into Suiran's side.") are not."""
+    t = text.strip()
+    if len(t) > 60 or not _POV_RE.search(t):
+        return False
+    if re.search(r"\bPOV\b|point of view", t, re.IGNORECASE):
+        return True
+    return t[:1] in "([<\u3010\u300c" or t[-1:] not in ".!?\u2026\u201d\"'\u2019"
 
 
 def make_chunks(book: dict, max_words: int = 600, runs: list[tuple[int, int, str]] | None = None) -> list[Chunk]:
@@ -552,6 +558,30 @@ _PRESENT_WORDS = re.compile(r"\b(?:is|are|am|has|does|isn't|aren't|doesn't|hasn'
                             r"nods|turns|replies)\b", re.I)
 
 
+def _exact_switch(raw: list[int], labels: list, guess: int, before: str, after: str, lo: int, hi: int,
+                  reach: int = 10) -> int:
+    """Move a smoothed tense switch to the paragraph where the narration's tense really changes.
+
+    Picks the split with the fewest paragraphs on the wrong side (narration that clearly uses the other
+    tense); among equally good splits (dialogue-only paragraphs in between) the one just before the first
+    paragraph in the new tense. A chapter start between the old narration and that point wins.
+    """
+    sign = {"present": 1, "past": -1}
+    a, b = max(lo, guess - reach), min(hi, guess + reach)
+    if a > b:
+        return guess
+    costs = {k: sum(1 for i in range(a, k) if raw[i] * sign[before] < 0) +
+                sum(1 for i in range(k, b + 1) if raw[i] * sign[after] < 0) for k in range(a, b + 1)}
+    low = min(costs.values())
+    # the best splits form a run ending at the first paragraph in the new tense: take that one
+    best = max(k for k, v in costs.items() if v == low)
+    last_old = max((i for i in range(a, best) if raw[i] * sign[before] > 0), default=a - 1)
+    for i in range(last_old + 1, best + 1):
+        if labels[i][1] == 0:
+            return i
+    return best
+
+
 def tense_runs(book: dict, window: int = 4, min_run: int = 12) -> list[tuple[int, int, str]]:
     """Where the narration switches between past and present tense: [(chapter, paragraph, tense)].
 
@@ -561,6 +591,7 @@ def tense_runs(book: dict, window: int = 4, min_run: int = 12) -> list[tuple[int
     nearby point-of-view headings.
     """
     labels: list[tuple[int, int, str | None]] = []
+    raw: list[int] = []  # per-paragraph score, same order as labels
     markers: set[tuple[int, int]] = set()
     current = None
     for ci, ch in enumerate(book.get("chapters", [])):
@@ -574,6 +605,7 @@ def tense_runs(book: dict, window: int = 4, min_run: int = 12) -> list[tuple[int
                 t = t[:s] + " " + t[e:]
             t = t.replace("\u2019", "'")
             scores.append(len(_PRESENT_WORDS.findall(t)) - len(_PAST_WORDS.findall(t)))
+        raw.extend(scores)
         for pi in range(len(paras)):
             v = sum(scores[max(0, pi - window): pi + window + 1])
             current = "present" if v > 0 else "past" if v < 0 else current
@@ -597,11 +629,14 @@ def tense_runs(book: dict, window: int = 4, min_run: int = 12) -> list[tuple[int
                 merged.append(r)
         runs = merged
     position = {(c, p): i for i, (c, p, _) in enumerate(labels)}
-    for r in runs[1:]:
+    for k, r in enumerate(runs[1:], start=1):
         c, p, _ = labels[r[0]]
         near = [position[m] for m in markers if m[0] == c and abs(m[1] - p) <= 8]
         if near:
             r[0] = min(near, key=lambda i: abs(i - r[0]))
+        else:
+            r[0] = _exact_switch(raw, labels, r[0], runs[k - 1][1], r[1],
+                                 lo=runs[k - 1][0] + 1, hi=runs[k + 1][0] - 1 if k + 1 < len(runs) else len(labels) - 1)
     first_story = next((ci for ci, ch in enumerate(book.get("chapters", [])) if ch.get("quotes")), 0)
     if len(runs) > 1 and labels[runs[1][0]][0] <= first_story and labels[runs[1][0]][1] == 0:
         del runs[0]  # front matter (copyright pages etc.) goes with the first story narrator
@@ -1210,6 +1245,23 @@ class Analyzer:
             prune_characters(fresh)
             self.store.save_script(book_id, fresh)
         logger.info("analysed %s: %d lines", book_id, len(fresh["lines"]))
+        await self._cast_new_speakers(book_id, fresh)
+
+    async def _cast_new_speakers(self, book_id: str, script: dict) -> None:
+        """A re-analysis can bring new speakers ("TV Announcer"); if the book was cast before, give them
+        voices too, so their lines are not read in the narrator's voice."""
+        public = ScriptStore.public(script)
+        if not any(c.get("voice") for c in public["characters"]):
+            return
+        if not any(c["lines"] and not c.get("voice") for c in public["characters"]):
+            return
+        from .engines.manager import EngineError
+
+        try:
+            result = await cast_voices(self.app, book_id, self.llm.cfg.voice_design_engine)
+            logger.info("voices for new speakers in %s: %s", book_id, result["created"])
+        except (EngineError, OSError) as exc:
+            logger.warning("could not create voices for new speakers: %s", exc)
 
 
 def prune_characters(script: dict) -> list[str]:
@@ -1372,9 +1424,17 @@ async def upload_book(request: web.Request) -> web.Response:
         return web.json_response({"error": "chapters missing"}, status=400)
     store = request.app[DRAMA_STORE_KEY]
     try:
+        old_book = store.book(book_id)
         store.save_book(book_id, body)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
+    if old_book is not None:
+        async with store.lock(book_id):
+            s = store.script(book_id)
+            if migrate_ids(old_book, store.book(book_id), s):
+                store.save_script(book_id, s)
+                logger.info("book %s re-split into %d chapters; analysis moved to the new ids",
+                            book_id, len(body["chapters"]))
     if body.get("reanalyze") or body.get("relabel"):
         async with store.lock(book_id):
             s = store.script(book_id)
@@ -1384,6 +1444,50 @@ async def upload_book(request: web.Request) -> web.Response:
     if body.get("analyze"):
         await request.app[ANALYZER_KEY].enqueue(book_id)
     return web.json_response(ScriptStore.public(store.script(book_id)))
+
+
+_QID_RE = re.compile(r"^c(\d+)p(\d+)q(\d+)$")
+
+
+def position_map(old: dict, new: dict) -> dict[tuple[int, int], tuple[int, int]] | None:
+    """(chapter, paragraph) in `old` -> in `new`, when both have the same paragraphs in the same order
+    and only the chapter boundaries differ (a newer parser split the book differently)."""
+    flat_old = [(c, p, t) for c, ch in enumerate(old.get("chapters", [])) for p, t in enumerate(ch.get("paragraphs", []))]
+    flat_new = [(c, p, t) for c, ch in enumerate(new.get("chapters", [])) for p, t in enumerate(ch.get("paragraphs", []))]
+    if len(flat_old) != len(flat_new) or any(a[2] != b[2] for a, b in zip(flat_old, flat_new)):
+        return None
+    if [len(ch.get("paragraphs", [])) for ch in old.get("chapters", [])] == \
+            [len(ch.get("paragraphs", [])) for ch in new.get("chapters", [])]:
+        return None  # same split: nothing to do
+    return {(a[0], a[1]): (b[0], b[1]) for a, b in zip(flat_old, flat_new)}
+
+
+def migrate_ids(old: dict, new: dict, script: dict) -> bool:
+    """Move a script's line labels, corrections and positions to a book's new chapter split."""
+    pos = position_map(old, new)
+    if pos is None:
+        return False
+
+    def qid(q: str) -> str:
+        m = _QID_RE.match(q)
+        if not m:
+            return q
+        c, p = pos.get((int(m.group(1)), int(m.group(2))), (int(m.group(1)), int(m.group(2))))
+        return f"c{c}p{p}q{m.group(3)}"
+
+    for table in ("lines", "corrections"):
+        script[table] = {qid(k): v for k, v in script.get(table, {}).items()}
+    script["chunks_done"] = []  # chunk keys follow the old split; a finished analysis does not need them
+    for c in script.get("characters", {}).values():
+        for f in (c.get("dossier") or {}).get("facts", []):
+            if isinstance(f.get("at"), list) and len(f["at"]) == 2:
+                f["at"] = list(pos.get(tuple(f["at"]), tuple(f["at"])))
+    (script.get("dossier_state") or {}).pop("scenes", None)
+    if script.get("status") == "done":
+        script["narration"] = compute_narration(new, script)
+    else:
+        script.pop("narration", None)
+    return True
 
 
 def reset_for_analysis(s: dict, keep_dossier: bool) -> None:

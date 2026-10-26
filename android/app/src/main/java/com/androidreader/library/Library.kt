@@ -184,9 +184,10 @@ class Library private constructor(context: Context) {
     @Synchronized
     fun content(id: String): BookContent {
         cached?.let { if (it.meta.id == id) return it }
-        val meta = get(id) ?: throw IllegalArgumentException("Unknown book $id")
-        val json = JSONObject(File(dir(id), "content.json").readText())
-        val chapters = json.getJSONArray("chapters").let { arr ->
+        var meta = get(id) ?: throw IllegalArgumentException("Unknown book $id")
+        val file = File(dir(id), "content.json")
+        val json = JSONObject(file.readText())
+        var chapters = json.getJSONArray("chapters").let { arr ->
             (0 until arr.length()).map { i ->
                 val c = arr.getJSONObject(i)
                 val ps = c.getJSONArray("p")
@@ -194,6 +195,17 @@ class Library private constructor(context: Context) {
                     val p = ps.getJSONArray(k)
                     Paragraph(p.getString(0), p.optInt(1) == 1)
                 })
+            }
+        }
+        val epub = File(dir(id), "book.epub")
+        if (json.optInt("parser", 1) < EpubParser.VERSION && epub.exists()) {
+            // Parsed by an older version that split the book differently: parse again and keep the place.
+            runCatching { EpubParser.parse(epub) }.getOrNull()?.let { book ->
+                val (c, p) = EpubParser.remap(chapters, book.chapters, meta.position.chapter, meta.position.paragraph)
+                chapters = book.chapters
+                writeContent(file, book.title, book.author, book.language, chapters)
+                meta = meta.copy(chapterCount = chapters.size, position = meta.position.copy(chapter = c, paragraph = p))
+                update(meta)
             }
         }
         return BookContent(meta, chapters).also { cached = it }
@@ -214,7 +226,7 @@ class Library private constructor(context: Context) {
             }
             file.writeText(
                 JSONObject().put("title", title).put("author", author).put("language", language ?: JSONObject.NULL)
-                    .put("chapters", arr).toString(),
+                    .put("parser", EpubParser.VERSION).put("chapters", arr).toString(),
             )
         }
 

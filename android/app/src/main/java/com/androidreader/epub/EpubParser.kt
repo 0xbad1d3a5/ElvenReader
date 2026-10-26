@@ -23,8 +23,26 @@ data class EpubBook(
 
 class EpubException(message: String) : Exception(message)
 
-/** Reads an EPUB 2/3 file into plain paragraphs per spine document. */
+/** Reads an EPUB 2/3 file into plain paragraphs per chapter of its table of contents. */
 object EpubParser {
+    /** Bumped when parsing changes how a book is split; books parsed earlier are re-parsed. */
+    const val VERSION = 2
+
+    /**
+     * Where [position] (in a book split as [old]) is in the same text split as [new]: the books have
+     * the same paragraphs in the same order, only the chapter boundaries differ.
+     */
+    fun remap(old: List<Chapter>, new: List<Chapter>, chapter: Int, paragraph: Int): Pair<Int, Int> {
+        var flat = 0
+        for (c in 0 until chapter.coerceAtMost(old.size)) flat += old[c].paragraphs.size
+        flat += paragraph
+        for ((c, ch) in new.withIndex()) {
+            if (flat < ch.paragraphs.size) return c to flat
+            flat -= ch.paragraphs.size
+        }
+        return (new.size - 1).coerceAtLeast(0) to 0
+    }
+
     private val BLOCKS = setOf(
         "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "dt", "dd",
         "section", "article", "header", "footer", "aside", "figure", "figcaption", "table", "tr", "td", "th",
@@ -65,6 +83,10 @@ object EpubParser {
         }
 
         val chapters = mutableListOf<Chapter>()
+        // Publishers often split one chapter into several files (at every illustration). Only files the
+        // table of contents points to start a chapter; the others continue the one before them.
+        val tocStarts = toc.keys.toSet()
+        val groupByToc = tocStarts.size >= 2
         for (ref in opf.select("spine > itemref")) {
             if (ref.attr("linear") == "no") continue
             val item = manifest[ref.attr("idref")] ?: continue
@@ -72,6 +94,11 @@ object EpubParser {
             val html = readText(item.href) ?: continue
             val paragraphs = extractParagraphs(html)
             if (paragraphs.isEmpty()) continue
+            if (groupByToc && item.href !in tocStarts && chapters.isNotEmpty()) {
+                val last = chapters.removeAt(chapters.size - 1)
+                chapters += last.copy(paragraphs = last.paragraphs + paragraphs)
+                continue
+            }
             val chapterTitle = toc[item.href]
                 ?: paragraphs.firstOrNull { it.heading }?.text?.take(80)
                 ?: "Section ${chapters.size + 1}"

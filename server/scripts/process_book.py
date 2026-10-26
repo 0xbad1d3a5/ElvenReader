@@ -159,11 +159,12 @@ def main() -> None:
 
     status, current = server.call("GET", f"/api/books/{book_id}/script")
     already = status == 200 and current.get("status") == "done" and not args.reanalyze
-    if not already:
-        payload["reanalyze"] = args.reanalyze
-        status, s = server.call("POST", f"/api/books/{book_id}", {**payload, "analyze": True}, timeout=600)
-        if status != 200:
-            sys.exit(f"upload failed ({status}): {s}")
+    # Always send the text: a newer parser may split the book differently, and the server then moves
+    # the existing analysis to the new chapter numbering.
+    payload["reanalyze"] = args.reanalyze
+    status, s = server.call("POST", f"/api/books/{book_id}", {**payload, "analyze": not already}, timeout=600)
+    if status != 200:
+        sys.exit(f"upload failed ({status}): {s}")
     t_analysis = time.time()
     s = wait(server, book_id, {"queued", "running"}, "analysis")
     if s["status"] != "done":

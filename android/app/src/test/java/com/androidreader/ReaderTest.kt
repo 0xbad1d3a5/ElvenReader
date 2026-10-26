@@ -217,6 +217,42 @@ class EpubParserTest {
         assertEquals("OEBPS/images/a.jpg", EpubParser.resolve("OEBPS/text/c.xhtml", "../images/a.jpg"))
         assertEquals("c.xhtml", EpubParser.resolve("content.opf", "c.xhtml"))
     }
+
+    @Test
+    fun filesMissingFromTheTocContinueThePreviousChapter() {
+        val dir = createTempDir()
+        try {
+            val file = File(dir, "split.epub")
+            ZipOutputStream(file.outputStream()).use { zip ->
+                fun put(name: String, text: String) {
+                    zip.putNextEntry(ZipEntry(name)); zip.write(text.toByteArray()); zip.closeEntry()
+                }
+                put("META-INF/container.xml", """<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>""")
+                put("content.opf", """<package><metadata><dc:title>Split</dc:title></metadata><manifest>
+                    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                    <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="a1" href="a-01.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="b" href="b.xhtml" media-type="application/xhtml+xml"/></manifest>
+                    <spine><itemref idref="a"/><itemref idref="a1"/><itemref idref="b"/></spine></package>""")
+                put("nav.xhtml", """<html><body><nav epub:type="toc"><ol><li><a href="a.xhtml">Part One</a></li>
+                    <li><a href="b.xhtml">Part Two</a></li></ol></nav></body></html>""")
+                put("a.xhtml", "<html><body><p>One.</p></body></html>")
+                // after an illustration, the chapter continues in another file with a mid-chapter heading
+                put("a-01.xhtml", "<html><body><p>Still one.</p><h3>(The Neighbor's POV)</h3><p>Hers.</p></body></html>")
+                put("b.xhtml", "<html><body><p>Two.</p></body></html>")
+            }
+            val book = EpubParser.parse(file)
+            assertEquals(listOf("Part One", "Part Two"), book.chapters.map { it.title })
+            assertEquals(listOf("One.", "Still one.", "(The Neighbor's POV)", "Hers."), book.chapters[0].paragraphs.map { it.text })
+            // a position saved with the old one-chapter-per-file split lands on the same paragraph
+            val old = listOf(Chapter("Part One", book.chapters[0].paragraphs.take(1)),
+                Chapter("(The Neighbor's POV)", book.chapters[0].paragraphs.drop(1)), book.chapters[1])
+            assertEquals(0 to 3, EpubParser.remap(old, book.chapters, 1, 2))
+            assertEquals(1 to 0, EpubParser.remap(old, book.chapters, 2, 0))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }
 
 class BookScriptTest {

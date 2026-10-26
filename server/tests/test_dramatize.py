@@ -536,3 +536,69 @@ def test_consolidation_merges_duplicates_drops_groups_and_fills_gaps():
     assert (t["gender"], t["age"]) == ("female", "child")
     assert script["dossier_state"]["scenes"] if "scenes" in script["dossier_state"] else True
     assert "makeup" in script["characters"] and "robot-girl" not in script["characters"]
+
+
+def test_pov_markers_are_headings_not_sentences():
+    assert dz.is_pov_marker("(The Neighbor\u2019s POV)")
+    assert dz.is_pov_marker("Suiran\u2019s Side")
+    assert dz.is_pov_marker("(Suiran's side)")
+    assert not dz.is_pov_marker("And as I watched, he slammed straight into Suiran\u2019s side.")
+    assert not dz.is_pov_marker("She stood by my side.")
+
+
+def test_a_book_re_split_by_a_newer_parser_keeps_its_analysis():
+    Q, E = "\u201c", "\u201d"
+    paras = [f"{Q}Hi,{E} said Tom.", "Narration.", f"{Q}Bye,{E} said Ann."]
+
+    def book(split):
+        chapters, start = [], 0
+        for n in split:
+            ps = paras[start:start + n]
+            quotes = [[f"c{len(chapters)}p{i}q{s}", i, s, e] for i, t in enumerate(ps) for s, e in dz.quote_regions(t)]
+            chapters.append({"title": f"T{len(chapters)}", "paragraphs": ps, "quotes": quotes})
+            start += n
+        return {"chapters": chapters}
+
+    old, new = book([1, 2]), book([3])
+    script = {"status": "done", "characters": {"tom": {"name": "Tom"}, "ann": {"name": "Ann"}},
+              "lines": {"c0p0q0": {"speaker": "tom"}, "c1p1q0": {"speaker": "ann"}},
+              "corrections": {"c1p1q0": {"speaker": "ann", "delivery": "sad"}}, "chunks_done": ["c0k0"]}
+    assert dz.migrate_ids(old, new, script)
+    assert set(script["lines"]) == {"c0p0q0", "c0p2q0"} and script["corrections"] == {"c0p2q0": {"speaker": "ann", "delivery": "sad"}}
+    assert script["chunks_done"] == []
+    assert not dz.migrate_ids(new, new, script)  # same split
+    assert not dz.migrate_ids(old, {"chapters": [{"paragraphs": ["other"]}]}, script)  # different text
+
+
+async def test_upload_with_a_new_split_migrates_and_new_speakers_get_voices(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    await c.post("/api/books/book1/cast", json={}, headers=AUTH)
+    s = await wait_done(c)
+    assert all(ch["voice"] for ch in s["characters"])
+    # a new speaker appears in a re-analysis: it gets a voice without casting again by hand
+    store = c.server.app[dz.DRAMA_STORE_KEY]
+    raw = store.script("book1")
+    raw["characters"]["zed"] = {"name": "Zed", "aliases": [], "gender": "male", "age": "adult", "voice": None}
+    raw["corrections"]["c0p2q11"] = {"speaker": "zed"}
+    store.save_script("book1", raw)
+    await c.post("/api/books/book1/analyze", json={"relabel": True}, headers=AUTH)
+    s = await wait_done(c)
+    for _ in range(50):
+        s = await (await c.get("/api/books/book1/script", headers=AUTH)).json()
+        if next(ch for ch in s["characters"] if ch["id"] == "zed").get("voice"):
+            break
+        await asyncio.sleep(0.05)
+    assert next(ch for ch in s["characters"] if ch["id"] == "zed")["voice"]
+
+
+def test_unmarked_end_of_a_pov_section_is_found_exactly():
+    Q, E = "\u201c", "\u201d"
+    past = [f"The room was quiet and we were tired, it was late {i}." for i in range(20)]
+    present = [f"The room is quiet and we are tired, it is late {i}." for i in range(20)]
+    talk = [f"{Q}Line {i}.{E}" for i in range(3)]  # dialogue only: no tense of its own
+    paras = past + ["(The Neighbor\u2019s POV)"] + present + talk + past
+    book = {"chapters": [{"title": "One", "paragraphs": paras, "quotes": []}]}
+    runs = dz.tense_runs(book)
+    assert runs == [(0, 0, "past"), (0, 20, "present"), (0, 44, "past")]
