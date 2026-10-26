@@ -143,7 +143,7 @@ def cmd_booknlp(args) -> None:
 def cmd_score(args) -> None:
     sys.path.insert(0, str(SERVER))
     bn = json.loads(Path(args.booknlp).read_text(encoding="utf-8"))["predictions"]
-    llm = json.loads(Path(args.llm).read_text(encoding="utf-8")) if args.llm else {}
+    llm =  json.loads(Path(args.llm).read_text(encoding="utf-8")) if args.llm else {}
     if args.script:
         s = json.loads(Path(args.script).read_text(encoding="utf-8"))
         lines = dict(s["lines"])
@@ -207,7 +207,8 @@ def cmd_route(args) -> None:
     cfg.llm_mode = "gpu"
     store = dz.ScriptStore(cfg.data_path / "books")
     book, base = store.book(args.book), store.script(args.book)
-    bn = json.loads(Path(args.booknlp).read_text(encoding="utf-8"))["predictions"]
+    bn = json.loads(Path(args.booknlp).read_text(encoding="utf-8"))["predictions"] if args.booknlp else None
+    jev = json.loads(Path(args.jev).read_text(encoding="utf-8")) if args.jev else []
     golds = [(Path(p).name, json.loads(Path(p).read_text(encoding="utf-8"))) for p in args.gold]
     lines = dz.ScriptStore.public(base)["lines"]
 
@@ -218,8 +219,8 @@ def cmd_route(args) -> None:
         async with aiohttp.ClientSession() as session:
             try:
                 for name, gold in golds:
-                    flagged = set()
-                    for q in gold["quotes"]:
+                    flagged = {r["id"] for r in jev if r["set"] == name and not r["agree"] and r["conf"] >= args.min_conf}
+                    for q in gold["quotes"] if bn else []:
                         b = bn[name].get(q["id"])
                         b_cid = dz.find_character(base, b) if b else None
                         if b is None or b_cid != (lines.get(q["id"]) or {}).get("speaker"):
@@ -258,7 +259,9 @@ def main() -> None:
     r = sub.add_parser("route")
     r.add_argument("gold", nargs="+")
     r.add_argument("--book", required=True)
-    r.add_argument("--booknlp", required=True)
+    r.add_argument("--booknlp", help="flag where ModernBookNLP disagrees")
+    r.add_argument("--jev", help="or flag from eval_jev.py --out rows (disagrees with confidence >= --min-conf)")
+    r.add_argument("--min-conf", type=float, default=0.5)
     a = sub.add_parser("booknlp")
     a.add_argument("gold", nargs="+")
     a.add_argument("--out", required=True)

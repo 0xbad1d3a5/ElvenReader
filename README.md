@@ -265,6 +265,38 @@ precision, and 15% of the classics' lines with 7% precision. Re-checking that ma
 more than it can gain, so it is not part of the pipeline. `scripts\eval_flagger.py` reproduces
 the numbers.
 
+**Jev-like classifiers as a second opinion (tried, not used).** Each quotation is asked as one
+multiple-choice question: the local scene (about 250 words before, the quote marked, 80 after,
+plus a note naming the first-person narrator), with options = characters the LLM found speaking
+nearby + "someone else" + "nobody". The same gold sets as above; minutes per 2,600-quotation book.
+
+| Second opinion | Alone: *Sasaki* / classics | Lines flagged (*Sasaki*) | Precision | LLM errors caught | min/book |
+|---|---|---|---|---|---|
+| ModernBookNLP (for comparison) | 55.9% / 85.7% | 43% | 30% | 23 of 25 | 7 (CPU) |
+| OpenJev-Flash-9B Q8_0, every disagreement | 65.2% / 98.4% | 26.1% | 17% | 7 of 23 | 7 |
+| OpenJev, disagreement with confidence ≥ 0.5 | | 6.8% | 45% | 5 of 23 | |
+| OpenJev, confidence ≥ 0.8 | | 1.2% | 100% | 2 of 23 | |
+| jeff + GLiFormer-large, every disagreement | 19.9% / 42.9% | 79.5% | 15% | 19 of 23 | 2.5 |
+
+OpenJev ([openjev/OpenJev-Flash-9B-GGUF](https://huggingface.co/openjev/OpenJev-Flash-9B-GGUF),
+CC BY-NC; the "APUS-OpenJev" name on community pages does not exist) runs on llama.cpp and its
+confidence is usable: thresholding shrinks the flags to a small, precise set (on the classics,
+≥ 0.5 flags 1.1% of lines, ≥ 0.8 flags one line, an actual error). jeff with GLiFormer mostly
+picks the first-listed option with near-uniform confidence; with only the quote's paragraph as
+the state it reaches 85.7% on the classics but still 24.8% on *Sasaki*, so it is not useful here.
+
+Routing OpenJev's ≥ 0.5 flags back to Qwen3.5 with reasoning on:
+
+| Re-check | *Sasaki* (161 lines) | Classics (182) | Added time |
+|---|---|---|---|
+| Re-label the flagged passages (as in the normal pass) | 85.7% → 88.8% (+5, none broken) | | ≈ 8 h per book |
+| Ask about each flagged line on a wider scene (600 words) | 85.7% → 86.3% (+2, −1) | 98.9% → 99.5% | ≈ 1–5 h per book |
+
+The passage re-check works but costs several times the whole labelling pass for three points,
+so it is not in the default path. `scripts\eval_jev.py` reproduces the classifier numbers
+(`--backend openjev|jeff`, and `--recheck rows.json` for the per-line routing);
+`scripts\eval_flagger.py route --jev rows.json --min-conf 0.5` runs the passage re-check.
+
 `"llm_mode": "auto"` (default) runs the LLM on the GPU only after two minutes without speech
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
 `"gpu"` and `"cpu"` force one or the other.
