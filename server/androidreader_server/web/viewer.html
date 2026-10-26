@@ -40,8 +40,9 @@
   .q { border-radius:4px; padding:1px 2px; cursor:pointer; }
   .nar { cursor:pointer; border-radius:4px; }
   .cur { outline:2px solid var(--accent); background:var(--hl); }
-  .tag { font-size:11.5px; border-radius:10px; padding:0 6px; margin:0 3px; white-space:nowrap; vertical-align:2px; cursor:pointer; border:1px solid currentColor; opacity:.85; }
-  .tag i { opacity:.8; } .tag.fix::after { content:" \270E"; }
+  .tag { font-size:12px; border-radius:10px; padding:0 7px; margin:0 3px; white-space:nowrap; vertical-align:1px; cursor:pointer; color:var(--fg); border:1px solid var(--line); }
+  .tag i { color:var(--muted); }
+  .tag.fix::after { content:" \270E"; }
   .player { position:fixed; bottom:0; left:300px; right:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   dialog { border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); min-width:380px; max-width:560px; }
   dialog label { display:block; margin:8px 0 2px; font-size:13px; color:var(--muted); }
@@ -139,7 +140,8 @@ function wav(pcm, rate) {
   return new Blob([b, pcm], { type: "audio/wav" });
 }
 
-const PALETTE = ["#e6194b","#3cb44b","#4363d8","#f58231","#911eb4","#2bb5d8","#f032e6","#9a6324","#469990","#808000","#b07cd8","#000075","#a9a9a9","#7fb800","#d6608a","#d98c3a","#2e8b57","#8a5cf6","#800000","#c9a500"];
+// Mid-lightness colours: readable as tints and underlines on both the light and the dark theme.
+const PALETTE = ["#e6194b","#3cb44b","#4f7cff","#f58231","#b05ce6","#2bb5d8","#f032e6","#c08a3e","#3fae9f","#a8a820","#9b8cff","#5aa0ff","#a9a9a9","#7fb800","#d6608a","#d98c3a","#2fae6a","#8a5cf6","#e0605a","#c9a500"];
 const LANGS = { en:"English", de:"German", fr:"French", es:"Spanish", it:"Italian", pt:"Portuguese", ja:"Japanese", zh:"Chinese", ko:"Korean", ru:"Russian", nl:"Dutch", pl:"Polish" };
 const BUSY = ["queued", "running", "casting"];
 
@@ -597,7 +599,8 @@ async function bookView(id) {
       const sameTurn = next && next.kind === "q" && between.text.length < 80 && /[,;:\u2014\u2013-]\s*$/.test(between.text) &&
         JSON.stringify(lines[next.qid] || null) === JSON.stringify(line || null);
       if (!sameTurn) {
-        p.append(h("span", { class: "tag" + (line && line.corrected ? " fix" : ""), style: { color: line ? col : "var(--muted)" },
+        p.append(h("span", { class: "tag" + (line && line.corrected ? " fix" : ""),
+          style: line ? { background: col + "40", borderColor: col, boxShadow: `inset 3px 0 0 ${col}` } : { color: "var(--muted)" },
           title: line && line.corrected ? "Corrected by you. Click to change." : "Change speaker or delivery",
           onclick: (e) => { e.stopPropagation(); editLine(piece.qid, piece.text); } },
           line ? (c ? c.name : "narrator") : "not analysed yet", line && line.delivery ? h("i", {}, " \u00b7 " + line.delivery) : null));

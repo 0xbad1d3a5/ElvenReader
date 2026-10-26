@@ -129,7 +129,10 @@ class VoiceStore:
     def default(self, preferred: str = "") -> Voice | None:
         if preferred and (v := self.get(preferred)):
             return v
-        voices = [v for v in self.list() if v.source != "character"]
+        # Your own voices (imported or uploaded) before designed ones, which are mostly made for characters.
+        rank = {"voicestudio": 0, "upload": 1}
+        voices = sorted((v for v in self.list() if v.source != "character"),
+                        key=lambda v: (rank.get(v.source, 2), v.name.lower()))
         return voices[0] if voices else None
 
     def add(

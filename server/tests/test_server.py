@@ -426,3 +426,12 @@ async def test_voice_clip_is_revalidated_after_edits(client):
     assert await (await client.get("/api/voices/nar/audio", headers=AUTH)).read() != before
     listing = await client.get("/api/voices?all=1", headers=AUTH)
     assert listing.headers["Cache-Control"] == "no-cache"
+
+
+def test_default_voice_prefers_your_own_voices_over_designed_ones(tmp_path):
+    store = VoiceStore(tmp_path)
+    wav = wav_bytes(b"\x10\x00" * 2400, 24000)
+    store.add("Alpha (designed for a character)", wav, "x", source="design")
+    store.add("The Documentarian", wav, "x", source="voicestudio")
+    store.add("Zed", wav, "x", source="upload")
+    assert store.default().name == "The Documentarian"
