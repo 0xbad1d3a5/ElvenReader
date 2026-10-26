@@ -730,6 +730,20 @@ def roster_text(script: dict, limit: int = 40) -> str:
     return "\n".join(parts)
 
 
+def user_notes(script: dict) -> str:
+    """The reader's own dossier edits, as short notes next to the roster (speech style helps attribution;
+    apparent age and form mostly matter for voices)."""
+    out = []
+    for c in script["characters"].values():
+        d = c.get("dossier_user") or {}
+        bits = [f"{label} {d[k]}" for k, label in (("speech_style", "talks:"), ("form", "is"), ("true_nature", "really"),
+                                                    ("introduced_as", "first appears as"), ("relationships", "relations:"))
+                if d.get(k)]
+        if bits:
+            out.append(f"- {c['name']}: " + "; ".join(bits))
+    return "\n".join(out)
+
+
 def recent_text(script: dict, book: dict, chunk: Chunk, n: int = 6) -> str:
     """The last few attributed quotations before this chunk, for continuity."""
     ch = book["chapters"][chunk.chapter]
@@ -918,7 +932,7 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     if pov:
         narrator = (f"{narrator}. But this passage starts with a point-of-view change, \"{pov}\": from here "
                     f"\"I\" is that character, not the previous narrator. Lines \"I\" says belong to them.")
-    if script.get("dossier_state") or any(c.get("dossier_user") for c in script["characters"].values()):
+    if script.get("dossier_state"):
         from .dossier import render_dossier, scene_cast
 
         present = [script["characters"][c]["name"] for c in scene_cast(script, chunk.chapter, chunk.paragraphs)]
@@ -929,6 +943,9 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
                  + (f"\n\nPresent in this part of the story: {', '.join(present)}" if present else ""))
     else:
         known = f"Known characters:\n{roster_text(script)}"
+        notes = user_notes(script)
+        if notes:
+            known += f"\n\nNotes on some characters (from the reader):\n{notes}"
     user = (
         f"Book: {book.get('title', '')} by {book.get('author', '')}\n"
         f"Chapter: {chapter.get('title', '')}\n\n"
