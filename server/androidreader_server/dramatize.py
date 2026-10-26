@@ -868,8 +868,9 @@ class LocalLlm:
     async def ensure(self, session, model: str | None = None, context: int | None = None) -> None:
         model_file = model or self.cfg.llm_model
         context = context or self.cfg.llm_context
+        budget = getattr(self.cfg, "llm_reasoning_budget", -1)
         if self.proc is not None and self.proc.returncode is None and (
-                self.running_gpu != self.gpu or self.running != (model_file, context)):
+                self.running_gpu != self.gpu or self.running != (model_file, context, budget)):
             await self.stop()
         if await self._alive(session):
             return
@@ -885,6 +886,8 @@ class LocalLlm:
         port = int(self.url.rsplit(":", 1)[1].split("/")[0])
         args = [str(exe), "-m", str(model), "--port", str(port), "--host", "127.0.0.1",
                 "-c", str(context), "-t", str(self.cfg.llm_threads), "--jinja", "-np", "1"]
+        if budget >= 0:
+            args += ["--reasoning-budget", str(budget)]
         if self.gpu:
             args += ["-ngl", "99", "--n-cpu-moe", str(self.cfg.llm_cpu_moe)]
         else:
@@ -894,7 +897,7 @@ class LocalLlm:
         self.proc = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log,
                                                          creationflags=0x08000000)
         self.running_gpu = self.gpu
-        self.running = (model_file, context)
+        self.running = (model_file, context, budget)
         for _ in range(600):
             await asyncio.sleep(1)
             if self.proc.returncode is not None:
@@ -947,8 +950,28 @@ class LocalLlm:
         return parsed
 
 
+def preceding_text(book: dict, chunk: Chunk, words: int) -> str:
+    """Up to `words` words of the chapter just before this chunk (unnumbered, for context)."""
+    paras = book["chapters"][chunk.chapter]["paragraphs"]
+    out, n, k = [], 0, chunk.paragraphs[0] - 1
+    while k >= 0 and n < words:
+        out.insert(0, paras[k])
+        n += len(paras[k].split())
+        k -= 1
+    return "\n\n".join(out)
+
+
+REVIEW_NOTE = ("A first reading proposed the labels below. Check every one against the speech tags, who is "
+               "addressed, turn-taking, who is present and who \"I\" is, and correct the ones that are wrong "
+               "(keep the right ones). Return the full list.")
+
+
 async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk,
-                      thinking: bool = False, model: str | None = None) -> tuple[dict, dict[str, str]]:
+                      thinking: bool = False, model: str | None = None, effort: str = "high",
+                      context_words: int = 0, recent: int = 6,
+                      proposed: dict[str, str] | None = None) -> tuple[dict, dict[str, str]]:
+    """Label one chunk. `context_words` adds the preceding text, `recent` sets how many earlier
+    attributions are shown, and `proposed` (number -> speaker) asks the model to review a first pass."""
     text, local = render_chunk(book, chunk)
     chapter = book["chapters"][chunk.chapter]
     narrator = script.get("narrator") or "unknown (work it out from the passage)"
@@ -981,19 +1004,25 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         notes = user_notes(script)
         if notes:
             known += f"\n\nNotes on some characters (from the reader):\n{notes}"
+    before = preceding_text(book, chunk, context_words) if context_words else ""
+    review = ""
+    if proposed:
+        review = (f"{REVIEW_NOTE}\n" + "\n".join(f"[{n}] {proposed.get(n, '?')}" for n in local) + "\n\n")
     user = (
         f"Book: {book.get('title', '')} by {book.get('author', '')}\n"
         f"Chapter: {chapter.get('title', '')}\n\n"
         f"{known}\n\n"
         f"Narrator of the previous passage: {narrator}\n\n"
-        f"Most recent lines before this passage:\n{recent_text(script, book, chunk)}\n\n"
+        + (f"Story just before this passage (for context only):\n{before}\n\n" if before else "")
+        + f"Most recent lines before this passage:\n{recent_text(script, book, chunk, n=recent)}\n\n"
         f"Passage:\n{text}\n\n"
+        f"{review}"
         f"Label every number from 1 to {len(local)} once."
     )
     # Generous budget: reasoning models (gpt-oss) spend tokens before the JSON, and the
     # schema grammar ends the output as soon as the JSON is complete anyway.
     budget = 1024 + 60 * len(local)
-    extra = {"thinking": True} if thinking else {}
+    extra = {"thinking": True, "effort": effort} if thinking else {}
     if model:
         extra["model"] = model
     if thinking:
@@ -1119,7 +1148,10 @@ class Analyzer:
 
     async def _label(self, session, book: dict, script: dict, chunk: Chunk):
         thinking = self.llm.cfg.llm_label_thinking
-        return await self._gpu(lambda: label_chunk(self.llm, session, book, script, chunk, thinking=thinking))
+        cfg = self.llm.cfg
+        return await self._gpu(lambda: label_chunk(self.llm, session, book, script, chunk, thinking=thinking,
+                                                   context_words=cfg.llm_label_context_words,
+                                                   recent=cfg.llm_label_recent_lines))
 
     async def _read_for_dossier(self, session, book: dict, book_id: str) -> None:
         """Pass 1: the reasoning model reads the whole book and builds the character dossier."""

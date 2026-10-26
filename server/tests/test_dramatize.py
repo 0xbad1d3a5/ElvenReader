@@ -383,6 +383,17 @@ def test_mixed_tense_books_are_chunked_by_tense_and_hint_the_narrator():
     script["narrator_by_tense"] = {"past": "Hero"}
     asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunks[1]))
     assert "switches from the past to the present tense" in seen[-1]
+    assert "Story just before this passage" not in seen[-1]
+
+    # more context: the preceding text and more recent lines; a review lists the proposed labels
+    script["lines"] = {f"q{pi}": {"speaker": None} for pi in range(15)}
+    asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunks[1], context_words=30, recent=12))
+    before = seen[-1].split("Story just before this passage (for context only):\n")[1].split("\n\nMost recent")[0]
+    assert before.split("\n\n") == paras[13:15]  # whole paragraphs (15 words each) until >= 30 words, in order
+    assert seen[-1].count("NARRATOR: ") == 12
+    _, local = dz.render_chunk(book, chunks[1])
+    asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunks[1], proposed={"1": "Neighbor"}))
+    assert dz.REVIEW_NOTE in seen[-1] and "[1] Neighbor\n[2] ?" in seen[-1] and len(local) > 1
 
 
 # ---------------------------------------------------------------- dossier (pass 1) and series memory

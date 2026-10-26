@@ -80,6 +80,13 @@ class ServerConfig:
     llm_dossier_effort: str = "medium"
     # Let the pass-2 model reason before labelling (slower; only useful with a reasoning llm_model).
     llm_label_thinking: bool = False
+    # Context for each labelling call: words of the story just before the passage, and how many
+    # earlier attributions are shown. 600 / 12 (default) scored about 5 points higher than the
+    # old 0 / 6 on our hardest gold excerpts for ~7% more time (README); 0 / 6 = the old fast pass.
+    llm_label_context_words: int = 600
+    llm_label_recent_lines: int = 12
+    # Cap on reasoning tokens per request (llama.cpp --reasoning-budget); -1 = unlimited.
+    llm_reasoning_budget: int = -1
     # Engine used to create character voices from a description.
     voice_design_engine: str = "qwen3tts"
     # Whisper fills in the transcript of new reference audio: the engine venv that has

@@ -93,6 +93,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `sentence_pause_ms`, `trim_silence` | `300`, `true` | Pacing between sentences. |
 | `cache_max_mb` | `4096` | Sentence audio cache (`data\cache`). |
 | `llm_model`, `llm_mode`, `llm_cpu_moe`, `llm_threads` | Qwen3.5-35B-A3B, `auto`, `20`, `12` | Dramatization LLM (see below). |
+| `llm_label_context_words`, `llm_label_recent_lines` | `600`, `12` | Story text before each passage and earlier attributions shown when labelling; `0`, `6` = the old, slightly faster pass (see *What does more time per book buy?*). |
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
 | `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
 | `voice_design_engine` | `qwen3tts` | Creates character voices. |
@@ -296,6 +297,38 @@ The passage re-check works but costs several times the whole labelling pass for 
 so it is not in the default path. `scripts\eval_jev.py` reproduces the classifier numbers
 (`--backend openjev|jeff`, and `--recheck rows.json` for the per-line routing);
 `scripts\eval_flagger.py route --jev rows.json --min-conf 0.5` runs the passage re-check.
+
+**What does more time per book buy? More context, not more reasoning.** With up to double the
+labelling time allowed, each option below labelled the chunks that contain the *Sasaki and Peeps*
+gold excerpts (161 lines, empty cast) and the two classic chapters (182 lines) on the GPU
+(`scripts\eval_reasoning.py`). Time is relative to the old single pass. Repeated runs of the old
+pass scored 148, 148 and 139 on *Sasaki*, so differences of a line or two are noise.
+
+| Variant | *Sasaki* | Classics | Time |
+|---|---|---|---|
+| Old pass: Qwen3.5, thinking off, 6 recent lines | 145.0/161 = 90.1% (mean of 3) | 180/182 | 1.0× |
+| **+ 600 words of preceding text, 12 recent lines (new default)** | **152.7/161 = 94.8%** (152, 153, 153) | 180/182 | **1.05×** |
+| + 1,200 words of preceding text, 20 recent lines | 153/161 = 95.0% | 180/182 | 1.6× |
+| 1,200-word chunks + 600 words before | 150/161 = 93.2% | 180/182 | 1.0× |
+| Qwen3.5 thinking, 1,024-token budget | 148/161 = 91.9% | 180/182 | 2.0× |
+| gpt-oss-20b, medium reasoning (whole model on the GPU) | 124/161 = 77.0% | 176/182 | 1.0× |
+| Review pass: a second call per chunk checks the first pass's labels | 150/161 = 93.2% | 180/182 | 2.0× |
+| More context + review pass | 152/161 = 94.4% | 180/182 | 2.0–2.8× |
+| Self-consistency: second run on shifted chunks, disagreeing chunks reviewed | 149/161 = 92.5% | 180/182 | 3.2× |
+
+Showing the model the story just before each passage (who entered, who was talking) fixes most
+untagged turns that the old pass got wrong. It is also steadier from run to run. Reasoning,
+reviews and second opinions on top of that add time without adding accuracy, so the extra
+budget is left unused. What remains wrong is mostly fast multi-party banter (Type Twelve, the
+Neighbor and Futarishizuka). The new default is `"llm_label_context_words": 600` and
+`"llm_label_recent_lines": 12`; set them to `0` and `6` for the old pass.
+Re-labelling the whole of *Sasaki and Peeps* v10 with the new default took 64 minutes instead of
+46, about 75 minutes per 100k words; whole-book prompts carry the full cast, so the extra text
+costs more than on the excerpts. It kept the reader's corrections, cast, voices and narrators. On
+the gold excerpts the book went from 138/161 = 85.7% to 142/161 = 88.2% (group banter 54 → 57/59).
+Twelve of the remaining 19 misses come from one chunk at the start of a chapter, which has no
+preceding text to use: there the then-unnamed Nick comes out as "a prisoner", "Nick" or another
+character from run to run, with either setting.
 
 `"llm_mode": "auto"` (default) runs the LLM on the GPU only after two minutes without speech
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
