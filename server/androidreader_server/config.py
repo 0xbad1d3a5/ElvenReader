@@ -59,7 +59,7 @@ class ServerConfig:
     # Local OpenAI-compatible LLM used to dramatize books. With llm_model set (a
     # GGUF file name under <models_dir>/llm), the server starts llama.cpp itself.
     llm_url: str = "http://127.0.0.1:3951/v1"
-    llm_model: str = "Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+    llm_model: str = "Qwen3.5-35B-A3B-Q4_K_M.gguf"
     llm_context: int = 12288
     llm_threads: int = 12
     # Where the LLM runs: "auto" (GPU while no speech has been requested for two

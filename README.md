@@ -92,7 +92,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `engine_options` | `{}` | Per engine, e.g. `{"omnivoice": {"num_step": 16}, "indextts": {"compile": true}}`. |
 | `sentence_pause_ms`, `trim_silence` | `300`, `true` | Pacing between sentences. |
 | `cache_max_mb` | `4096` | Sentence audio cache (`data\cache`). |
-| `llm_model`, `llm_mode`, `llm_cpu_moe`, `llm_threads` | Qwen3-30B-A3B, `auto`, `20`, `12` | Dramatization LLM (see below). |
+| `llm_model`, `llm_mode`, `llm_cpu_moe`, `llm_threads` | Qwen3.5-35B-A3B, `auto`, `20`, `12` | Dramatization LLM (see below). |
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
 | `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
 | `voice_design_engine` | `qwen3tts` | Creates character voices. |
@@ -219,9 +219,10 @@ Lines are voiced as soon as their chunk is analysed. Delivery is applied by engi
 it (Fish S2 Pro: inline tag; IndexTTS: emotion; OmniVoice: laughter/sigh only); others read the
 line plainly in the character's voice. Voice and delivery are part of the cache key.
 
-**LLM setup:** `download-llm.ps1` fetches llama.cpp and **Qwen3-30B-A3B-Instruct-2507** (Q4_K_M,
-18.6 GB, Apache-2.0); `-Alternative` adds gpt-oss-20b (`"llm_model": "gpt-oss-20b-MXFP4.gguf"`,
-Apache-2.0). The server starts and stops llama.cpp itself, and frees its memory when idle.
+**LLM setup:** `download-llm.ps1` fetches llama.cpp and **Qwen3.5-35B-A3B** (Q4_K_M, 22 GB,
+Apache-2.0; a mixture of experts with about 3B parameters active per token, run with thinking off).
+`-Alternative` adds the previous default, Qwen3-30B-A3B-Instruct-2507, and gpt-oss-20b. The
+server starts and stops llama.cpp itself, and frees its memory when idle.
 
 Measured on hand-labelled chapters (*Pride and Prejudice* ch. 1, *Alice* ch. 7; 182 quotations,
 `scripts\eval_attribution.py`). The whole of *Alice* (27k words) was analysed on the GPU in
@@ -229,14 +230,21 @@ Measured on hand-labelled chapters (*Pride and Prejudice* ch. 1, *Alice* ch. 7; 
 
 | LLM | Where | Speaker accuracy | Time per 100k-word book |
 |---|---|---|---|
-| **Qwen3-30B-A3B-Instruct-2507** Q4_K_M (default) | GPU (experts of 20 layers in RAM) | **179/182 = 98.4%** | ~65 min |
+| **Qwen3.5-35B-A3B** Q4_K_M (default) | GPU (experts of 20 layers in RAM) | **180/182 = 98.9%** | ~70 min |
+| Qwen3-30B-A3B-Instruct-2507 Q4_K_M | GPU (experts of 20 layers in RAM) | 179/182 = 98.4% | ~65 min |
 | Qwen3-30B-A3B-Instruct-2507 Q4_K_M | CPU only (16 threads) | 179/182 = 98.4% | ~4 h |
 | gpt-oss-20b MXFP4 | GPU (fully on the card) | 180/182 = 98.9% | ~19 min |
 | gpt-oss-20b MXFP4 | CPU only | 174/182 = 95.6% | ~4 h |
 
+The difference shows on harder text. On two hand-labelled *Sasaki and Peeps* vol. 10 excerpts
+(`scripts\eval_dossier.py --no-dossier --label-model ...`), Qwen3.5 scored **95/102 = 93.1%** on a
+prison scene where Qwen3-30B scored 86/102 = 84.3%. Qwen3.5 recognises an unnamed prisoner as the
+character who gives his name later. Both scored 55/59 = 93.2% on group banter, at the same speed
+(about 45 minutes for that 85k-word book).
+
 The remaining misses are an illustration caption, a chorus line ("Sh! sh!") and, for gpt-oss on
-the CPU, Alice's thoughts and an untagged Bennet exchange. Qwen is the default because it is
-equally accurate on CPU and GPU and writes more actable deliveries (*"dry, amused"*, *"gossipy,
+the CPU, Alice's thoughts and an untagged Bennet exchange. Qwen is preferred over gpt-oss because it
+is equally accurate on CPU and GPU and writes more actable deliveries (*"dry, amused"*, *"gossipy,
 animated"*, *"exasperated, reproachful"* vs gpt-oss's *"curious"*, *"annoyed"*). For reference,
 BookNLP scores 56.7% on the PDNC benchmark and the 2026 state of the art (ModernBookNLP) 94.5%;
 our two chapters are a small sample, not a benchmark. Two prompt details mattered: numbering
