@@ -416,3 +416,13 @@ async def test_option_made_from_a_shared_voice_can_be_kept_on_a_copy(client):
     assert v["id"] == copy["id"] and v["instruct"] == "deep"
     original = await (await client.get("/api/voices/nar", headers=AUTH)).json()
     assert original["history"] == []  # the shared voice itself is untouched
+
+
+async def test_voice_clip_is_revalidated_after_edits(client):
+    r = await client.get("/api/voices/nar/audio", headers=AUTH)
+    assert r.headers["Cache-Control"] == "no-cache" and r.headers.get("ETag")
+    before = await r.read()
+    await _put_audio(client, "nar", wav_bytes(b"\x30\x00" * 24000, 24000), ref_text="Other words.")
+    assert await (await client.get("/api/voices/nar/audio", headers=AUTH)).read() != before
+    listing = await client.get("/api/voices?all=1", headers=AUTH)
+    assert listing.headers["Cache-Control"] == "no-cache"

@@ -72,7 +72,11 @@ async def auth_middleware(request: web.Request, handler):
     supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if not supplied or not secrets.compare_digest(supplied.encode(), expected.encode()):
         return _json_error(401, "Missing or invalid token")
-    return await handler(request)
+    response = await handler(request)
+    # Voices, scripts and casts change under the same URLs: never let a browser reuse a stale answer.
+    if isinstance(response, web.StreamResponse) and "Cache-Control" not in response.headers and not response.prepared:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 async def _json_body(request: web.Request) -> dict:
@@ -190,7 +194,8 @@ async def voice_audio(request: web.Request) -> web.StreamResponse:
     voice = request.app[VOICES_KEY].get(request.match_info["voice"])
     if voice is None or voice.wav_path is None:
         return _json_error(404, "No such voice")
-    return web.FileResponse(voice.wav_path, headers={"Content-Type": "audio/wav"})
+    # The file changes when the voice is edited, so browsers must revalidate (ETag) every time.
+    return web.FileResponse(voice.wav_path, headers={"Content-Type": "audio/wav", "Cache-Control": "no-cache"})
 
 
 async def collect_audio(stream) -> tuple[int, bytes]:
