@@ -255,6 +255,16 @@ our two chapters are a small sample, not a benchmark. Two prompt details mattere
 echo each quote's first words. Without them labels drifted by one after an interrupted quote
 (91.8%).
 
+**ModernBookNLP as a second opinion (tried, not used).** The encoder model from *Fast and Accurate
+Quotation Attribution in Literary Texts* (2026; 94.5% on PDNC) runs on the CPU in about 7 minutes
+per book. On our gold sets it was far weaker than the LLM: 55.9% vs 85.7% on the *Sasaki and
+Peeps* excerpts, and 85.7% vs 98.9% on the two classic chapters (it does well on *Alice*, 98.7%, but
+gets 27% on *Pride and Prejudice* ch. 1, where Mrs. Bennet is never named). Lines where the two
+disagree contain 23 of the LLM's 25 errors, but they make up 43% of *Sasaki*'s lines with 30%
+precision, and 15% of the classics' lines with 7% precision. Re-checking that many lines costs
+more than it can gain, so it is not part of the pipeline. `scripts\eval_flagger.py` reproduces
+the numbers.
+
 `"llm_mode": "auto"` (default) runs the LLM on the GPU only after two minutes without speech
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
 `"gpu"` and `"cpu"` force one or the other.

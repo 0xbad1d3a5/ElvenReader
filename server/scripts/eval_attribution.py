@@ -72,8 +72,13 @@ async def evaluate(path: Path, llm: dz.LocalLlm, session) -> dict:
         else:
             wrong.append((q["id"], q["text"][:50], q["speaker"], next(iter(predicted), "?")))
     deliveries = [(q["text"][:45], script["lines"].get(q["id"], {}).get("delivery")) for q in gold["quotes"]]
+    predicted_names = {}
+    for q in gold["quotes"]:
+        sp = (script["lines"].get(q["id"]) or {}).get("speaker")
+        predicted_names[q["id"]] = script["characters"][sp]["name"] if sp in script["characters"] else "NARRATOR"
     return {
         "file": path.name, "quotes": len(gold["quotes"]), "correct": correct,
+        "predicted": predicted_names,
         "accuracy": round(correct / len(gold["quotes"]), 3), "seconds": round(elapsed, 1),
         "prompt_tps": round(sum(prompt_tps) / len(prompt_tps), 1) if prompt_tps else None,
         "gen_tps": round(sum(gen_tps) / len(gen_tps), 1) if gen_tps else None,
@@ -90,6 +95,7 @@ async def main() -> None:
     parser.add_argument("--gpu", action="store_true", help="offload to the GPU (default: CPU only)")
     parser.add_argument("--cpu-moe", type=int, default=None, help="layers whose experts stay in RAM with --gpu")
     parser.add_argument("--threads", type=int, default=None)
+    parser.add_argument("--dump", help="write every quotation's predicted speaker to this JSON file")
     args = parser.parse_args()
     cfg = load_config()
     if args.model:
@@ -106,7 +112,7 @@ async def main() -> None:
             for g in args.gold:
                 r = await evaluate(Path(g), llm, session)
                 results.append(r)
-                print(json.dumps({k: v for k, v in r.items() if k not in ("wrong", "deliveries")}), flush=True)
+                print(json.dumps({k: v for k, v in r.items() if k not in ("wrong", "deliveries", "predicted")}), flush=True)
                 for w in r["wrong"]:
                     print("   wrong:", w)
                 for d in r["deliveries"]:
@@ -119,6 +125,9 @@ async def main() -> None:
     secs = sum(r["seconds"] for r in results)
     print(f"\nmodel={Path(cfg.llm_model).name} mode={cfg.llm_mode} cpu_moe={cfg.llm_cpu_moe} accuracy={ok}/{total}={ok / total:.1%} "
           f"time={secs:.0f}s for {words} words -> {secs / words * 100000 / 60:.0f} min per 100k-word book")
+    if args.dump:
+        Path(args.dump).write_text(json.dumps({r["file"]: r["predicted"] for r in results}, ensure_ascii=False, indent=1),
+                                   encoding="utf-8")
 
 
 if __name__ == "__main__":
