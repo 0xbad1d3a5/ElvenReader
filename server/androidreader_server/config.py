@@ -68,6 +68,18 @@ class ServerConfig:
     # the GPU path (raise it if VRAM runs out).
     llm_mode: str = "auto"
     llm_cpu_moe: int = 20
+    # Pass 1 of the analysis: a reasoning model reads the whole book and builds a character
+    # dossier (names, apparent age and form, speech style...), which pass 2 (llm_model) uses
+    # to attribute lines. Empty (default) = skip pass 1: on our gold excerpts it lowered
+    # attribution accuracy (see README), so it is opt-in, e.g. "gpt-oss-20b-MXFP4.gguf".
+    llm_dossier_model: str = ""
+    llm_dossier_context: int = 24576
+    # Words per pass-1 passage, and how hard the reasoning model thinks ("low", "medium", "high";
+    # gpt-oss honours it, Qwen3 thinking models always think fully).
+    llm_dossier_words: int = 3500
+    llm_dossier_effort: str = "medium"
+    # Let the pass-2 model reason before labelling (slower; only useful with a reasoning llm_model).
+    llm_label_thinking: bool = False
     # Engine used to create character voices from a description.
     voice_design_engine: str = "qwen3tts"
     # Whisper fills in the transcript of new reference audio: the engine venv that has

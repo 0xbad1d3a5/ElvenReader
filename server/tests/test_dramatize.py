@@ -91,7 +91,7 @@ def test_apply_result_creates_characters_and_matches_aliases():
 async def drama_client(aiohttp_client, tmp_path, monkeypatch):
     VoiceStore(tmp_path / "voices").add("Narrator", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="nar")
 
-    async def fake_complete(self, session, system, user, schema, max_tokens=2048):
+    async def fake_complete(self, session, system, user, schema, max_tokens=2048, **kw):
         if "quotes" in schema["properties"]:
             ids = schema["properties"]["quotes"]["items"]["properties"]["id"]["enum"]
             names = {"1": "Alice", "2": "Alice", "3": "Tom", "4": "NARRATOR"}
@@ -371,7 +371,7 @@ def test_mixed_tense_books_are_chunked_by_tense_and_hint_the_narrator():
     seen = []
 
     class FakeLlm:
-        async def complete(self, session, system, user, schema, max_tokens=0):
+        async def complete(self, session, system, user, schema, max_tokens=0, **kw):
             seen.append(user)
             return {"narrator": "", "speakers": [], "quotes": []}
 
@@ -383,3 +383,156 @@ def test_mixed_tense_books_are_chunked_by_tense_and_hint_the_narrator():
     script["narrator_by_tense"] = {"past": "Hero"}
     asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunks[1]))
     assert "switches from the past to the present tense" in seen[-1]
+
+
+# ---------------------------------------------------------------- dossier (pass 1) and series memory
+
+
+def test_dossier_merge_revises_and_tracks_narrator_and_scenes():
+    from androidreader_server import dossier as ds
+
+    script = {"characters": {}, "lines": {}}
+    first = {"narrator": "Sasaki", "present": ["Sasaki", "the old woman"], "characters": [
+        {"name": "Futarishizuka", "aliases": ["Grandmother"], "gender": "female", "apparent_age": "elderly",
+         "speech_style": "calls people 'dearie'", "facts": [{"fact": "talks like a granny", "quote": "dearie"}]}]}
+    present = ds.merge_update(script, first, (3, 0), "past")
+    c = script["characters"]["futarishizuka"]
+    assert c["age"] == "elderly" and c["dossier"]["speech_style"] == "calls people 'dearie'"
+    assert "Grandmother" in c["aliases"] and "sasaki" in present
+    # a later passage corrects the apparent age; the revision is kept with where it happened
+    later = {"narrator": "third person", "present": [], "characters": [
+        {"name": "Grandmother", "apparent_age": "child", "form": "human, looks like a girl of ten",
+         "true_nature": "centuries old", "revised": "she only talks old; she looks like a little girl"}]}
+    ds.merge_update(script, later, (9, 40), None)
+    assert c["age"] == "child" and c["dossier"]["true_nature"] == "centuries old"
+    assert c["dossier"]["revisions"][0]["at"] == [9, 40]
+    # the user's word wins over the model's, and survives later model updates
+    c["dossier_user"] = {"apparent_age": "teen"}
+    ds.sync_character(c)
+    ds.merge_update(script, later, (10, 0), None)
+    assert ds.effective(c)["apparent_age"] == "teen"
+    assert ds.narrators(script) == {"past": "sasaki"}
+    text = ds.render_dossier(script)
+    assert "Futarishizuka (also: Grandmother): female, teen" in text and "really: centuries old" in text
+    script["dossier_state"]["scenes"] = [[3, 0, 20, ["futarishizuka"]], [4, 0, 9, ["sasaki"]]]
+    assert ds.scene_cast(script, 3, [15, 30]) == ["futarishizuka"]
+    assert "teen female" in ds.voice_description(c)
+
+
+async def test_two_pass_analysis_uses_the_dossier_and_keeps_user_edits(aiohttp_client, tmp_path, monkeypatch):
+    prompts = {"dossier": 0, "label": []}
+
+    async def fake(self, session, system, user, schema, max_tokens=2048, **kw):
+        if "characters" in schema["properties"] and "present" in schema["properties"]:
+            prompts["dossier"] += 1
+            assert kw.get("thinking") is True
+            return {"narrator": "third person", "present": ["Alice", "Tom"], "characters": [
+                {"name": "Tom", "aliases": ["the boy"], "gender": "male", "apparent_age": "child",
+                 "speech_style": "says 'gosh' a lot", "introduced_as": "a boy by the river"}]}
+        if "quotes" in schema["properties"]:
+            prompts["label"].append(user)
+            ids = schema["properties"]["quotes"]["items"]["properties"]["id"]["enum"]
+            return {"narrator": "third person", "speakers": [],
+                    "quotes": [{"id": i, "starts": "", "speaker": "Tom", "delivery": "neutral"} for i in ids]}
+        return {"characters": []}
+
+    monkeypatch.setattr(dz.LocalLlm, "complete", fake)
+    c = await aiohttp_client(make_app(make_cfg(tmp_path, llm_dossier_model="reasoner.gguf"), specs=SPECS))
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    s = await wait_done(c)
+    assert s["status"] == "done" and prompts["dossier"] == 1
+    assert "says 'gosh' a lot" in prompts["label"][0] and "Present in this part of the story: Alice, Tom" in prompts["label"][0]
+    tom = next(ch for ch in s["characters"] if ch["id"] == "tom")
+    assert tom["age"] == "child" and tom["dossier"]["introduced_as"] == "a boy by the river"
+    assert "alice" not in [ch["id"] for ch in s["characters"]]  # present but never speaks: pruned
+
+    # Edit the dossier; relabel runs pass 2 only, with the edit; reanalyze reads again but keeps the edit.
+    r = await c.patch("/api/books/book1/characters/tom", json={"dossier": {"speech_style": "stammers"}}, headers=AUTH)
+    assert next(ch for ch in (await r.json())["characters"] if ch["id"] == "tom")["dossier_user"] == {"speech_style": "stammers"}
+    await c.post("/api/books/book1/analyze", json={"relabel": True}, headers=AUTH)
+    await wait_done(c)
+    assert prompts["dossier"] == 1 and "stammers" in prompts["label"][-1]
+    await c.post("/api/books/book1/analyze", json={"reanalyze": True}, headers=AUTH)
+    s = await wait_done(c)
+    tom = next(ch for ch in s["characters"] if ch["id"] == "tom")
+    assert prompts["dossier"] == 2 and tom["dossier_user"] == {"speech_style": "stammers"}
+
+
+def test_series_name_from_titles():
+    from androidreader_server.series import series_name
+
+    assert series_name("Sasaki and Peeps, Vol. 10") == "Sasaki and Peeps"
+    assert series_name("Sasaki and Peeps v10 [Yen Press]") == "Sasaki and Peeps"
+    assert series_name("The Wandering Inn: Volume 3") == "The Wandering Inn"
+    assert series_name("Mistborn Book 2") == "Mistborn"
+    assert series_name("Alice's Adventures in Wonderland") == "Alice's Adventures in Wonderland"
+
+
+async def test_series_memory_carries_cast_and_voices_to_the_next_volume(drama_client):
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    c = drama_client
+    app = c.server.app
+    await c.post("/api/books/vol1", json={**book_payload(), "title": "Tea Saga, Vol. 1", "analyze": True}, headers=AUTH)
+    await wait_done(c, "vol1")
+    r = await c.patch("/api/books/vol1/characters/alice", json={"voice": "nar", "dossier": {"apparent_age": "child"}},
+                      headers=AUTH)
+    assert r.status == 200
+    series = await (await c.get("/api/series", headers=AUTH)).json()
+    entry = series["series"][0]
+    assert entry["name"] == "Tea Saga" and entry["characters"]["alice"]["voice"] == "nar"
+
+    store = app[DRAMA_STORE_KEY]
+    store.save_book("vol2", {**book_payload(), "title": "Tea Saga, Vol. 2"})
+    from androidreader_server import series as sr
+
+    s2 = store.script("vol2")
+    assert sr.seed(app, "vol2", s2) >= 1
+    assert s2["characters"]["alice"]["voice"] == "nar"
+    assert s2["characters"]["alice"]["dossier_user"]["apparent_age"] == "child"
+    # analysing the next volume starts from the series cast (pass 1 off by default)
+    await c.post("/api/books/vol3", json={**book_payload(), "title": "Tea Saga, Vol. 3", "analyze": True}, headers=AUTH)
+    s3 = await wait_done(c, "vol3")
+    assert next(ch for ch in s3["characters"] if ch["id"] == "alice")["voice"] == "nar"
+    # a book's series can be set by hand (e.g. a spin-off)
+    r = await c.post("/api/books/vol2/series", json={"series": "Tea Saga Side Stories"}, headers=AUTH)
+    assert (await r.json())["series"] == "Tea Saga Side Stories"
+    assert store.summary("vol2")["series"] == "Tea Saga Side Stories"
+
+
+def test_prune_keeps_speakers_narrators_user_edits_and_chosen_voices():
+    script = {"characters": {
+        "a": {"name": "A"}, "b": {"name": "B"}, "n": {"name": "N"}, "u": {"name": "U", "user": True},
+        "v": {"name": "V", "voice": "560fa464"}, "p": {"name": "P", "voice": "pool-male-adult"}},
+        "lines": {"q1": {"speaker": "a"}}, "corrections": {}, "narrator": "N"}
+    assert sorted(dz.prune_characters(script)) == ["b", "p"]
+
+
+def test_consolidation_merges_duplicates_drops_groups_and_fills_gaps():
+    from androidreader_server import dossier as ds
+
+    script = {"characters": {}, "lines": {}, "corrections": {}}
+    ds.merge_update(script, {"narrator": "", "present": ["Robot Girl"], "characters": [
+        {"name": "Type Twelve", "form": "mechanical life-form"}, {"name": "Robot Girl", "speech_style": "formal"},
+        {"name": "Four Large Men"}, {"name": "Makeup", "gender": "female"}]}, (1, 0), None)
+    script["characters"]["makeup"]["user"] = True  # the user's own entry is never folded away
+
+    class FakeLlm:
+        cfg = type("C", (), {"llm_dossier_effort": "high"})
+
+        async def complete(self, *a, **k):
+            return {"merges": [{"keep": "Type Twelve", "same_as": ["Robot Girl"], "why": "same android"},
+                               {"keep": "Type Twelve", "same_as": ["Makeup"], "why": "wrong"}],
+                    "drop": ["Four Large Men"],
+                    "fixes": [{"name": "Type Twelve", "gender": "female", "apparent_age": "child"}]}
+
+    async def step(make):
+        return await make()
+
+    done = asyncio.run(ds.consolidate(FakeLlm(), None, {"title": "T"}, script, "m.gguf", step))
+    t = script["characters"]["type-twelve"]
+    assert done["merged"] == ["Robot Girl -> Type Twelve"] and done["dropped"] == ["Four Large Men"]
+    assert "Robot Girl" in t["aliases"] and t["dossier"]["speech_style"] == "formal"
+    assert (t["gender"], t["age"]) == ("female", "child")
+    assert script["dossier_state"]["scenes"] if "scenes" in script["dossier_state"] else True
+    assert "makeup" in script["characters"] and "robot-girl" not in script["characters"]

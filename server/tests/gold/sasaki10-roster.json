@@ -1,0 +1,16 @@
+{
+  "book_id": "2f145f7d38c07f00",
+  "source": "Sasaki and Peeps v10 (Yen Press); process it first with scripts/process_book.py. Labels are each character's apparent gender and age, i.e. what a listener expects to hear; 'age' lists every acceptable group; 'form' is a regular expression the dossier's form or true nature must match.",
+  "characters": {
+    "Ms. Futarishizuka": {"gender": "female", "age": ["child", "teen"], "nature": "old|centur|immortal|ancient|years", "note": "looks like a young girl, centuries old; 'Grandmother'"},
+    "Yingling": {"gender": "female", "age": ["child"], "note": "'a little girl of about elementary or middle school age'"},
+    "Neighbor": {"gender": "female", "age": ["teen", "child"], "note": "middle-school girl next door"},
+    "Peeps": {"gender": "male", "age": ["adult", "middle-aged", "elderly"], "form": "sparrow|bird", "note": "a Java sparrow who is a reincarnated sage"},
+    "Sasaki": {"gender": "male", "age": ["adult", "middle-aged"], "note": "middle-aged salaryman"},
+    "Type Twelve": {"gender": "female", "age": ["child", "teen"], "form": "android|robot|machin|alien|mechanical", "note": "'the alien girl', the youngest daughter"},
+    "Captain Mason": {"gender": "male", "age": ["adult", "middle-aged"]},
+    "Suiran": {"gender": "female", "age": ["young adult", "adult"], "note": "'the woman looked to be around twenty'"},
+    "Miss Hoshizaki": {"gender": "female", "age": ["teen", "young adult", "adult"]},
+    "Nick": {"gender": "male", "age": ["young adult", "adult", "middle-aged"], "introduced": ".", "note": "first an unnamed Asian prisoner in the yard"}
+  }
+}

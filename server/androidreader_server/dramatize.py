@@ -231,8 +231,12 @@ def chunk_schema(local_ids: list[str]) -> dict:
     }
 
 
-ROSTER_PROMPT = """You are casting voices for an audiobook. For each character, using their lines and how the narration describes them, give:
-gender, age group, accent (e.g. "british", "american", "scottish", "neutral"), temperament (2-4 words), and a voice description for a voice-design model: one sentence covering gender, age, pitch, pace, timbre and manner, e.g. "A middle-aged woman with a high, slightly shrill voice, talking quickly and fussily, with a refined English accent." Keep each character distinct from the others."""
+ROSTER_PROMPT = """You are casting voices for an audiobook. For each character, using their lines and what the book says about how they look, give:
+- appearance: one short sentence on how the character looks and comes across to the people around them, based on the "Described as" lines (apparent age, body, form). Note when their true age or nature differs ("looks like a young girl but is centuries old").
+- gender and age group: as they APPEAR and as a listener would expect them to sound, not their true age. A centuries-old being in a little girl's body is "child"; a teenager is "teen".
+- accent (e.g. "british", "american", "scottish", "neutral"), temperament (2-4 words).
+- voice: one sentence for a voice-design model covering gender, apparent age, pitch, pace, timbre and manner. Follow the apparent age and physical form; put the true age and personality into the manner, e.g. "A young girl's high, light voice, speaking in an old-fashioned, knowing and teasing way." If the book describes the voice itself, follow that. Keep each character distinct from the others.
+If you recognise the book or its series, also use what you know about how each character looks and sounds; later volumes often stop describing the regular cast."""
 
 ROSTER_SCHEMA = {
     "type": "object",
@@ -243,18 +247,58 @@ ROSTER_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
+                    "appearance": {"type": "string"},
                     "gender": {"type": "string", "enum": GENDERS},
                     "age": {"type": "string", "enum": AGES},
                     "accent": {"type": "string"},
                     "temperament": {"type": "string"},
                     "voice": {"type": "string"},
                 },
-                "required": ["name", "gender", "age", "accent", "temperament", "voice"],
+                "required": ["name", "appearance", "gender", "age", "accent", "temperament", "voice"],
             },
         }
     },
     "required": ["characters"],
 }
+
+_LOOKS_STRONG = re.compile(
+    r"\b(?:girls?|boys?|child(?:ren)?|kids?|little|young\w*|youth\w*|teen\w*|old|older|elder\w*|aged|"
+    r"years? old|grand(?:mother|father|ma|pa)|granny|middle[- ]school\w*|high[- ]school\w*|grade|student|"
+    r"petite|tiny|tall|beard\w*|wrinkl\w*|birds?|sparrows?|robot\w*|android|alien|demon|angel|voice|"
+    r"look(?:s|ed)? like|appearance|kimono-clad|uniform)\b", re.IGNORECASE)
+_LOOKS_WEAK = re.compile(r"\b(?:wom[ae]n|m[ae]n|gentlem[ae]n|daughters?|sons?|sisters?|brothers?|small|short|"
+                         r"looked|appear\w*|seem\w*|body)\b", re.IGNORECASE)
+_SENTENCE = re.compile(r"(?<=[.!?\u201d])\s+")
+
+
+def appearance_evidence(book: dict, names: list[str], limit: int = 8, width: int = 240) -> list[str]:
+    """Narration sentences that mention a character together with appearance or age words.
+
+    Dialogue is left out (it is mostly characters addressing each other); the best
+    `limit` sentences are returned in book order.
+    """
+    pats = [re.compile(r"\b" + re.escape(n) + r"\b", re.IGNORECASE) for n in names if len(n) > 2]
+    if not pats:
+        return []
+    found: list[tuple[int, int, str]] = []
+    seen = set()
+    for ch in book.get("chapters", []):
+        for text in ch.get("paragraphs", []):
+            if not any(p.search(text) for p in pats):
+                continue
+            narration = text
+            for s, e in sorted(quote_regions(text), reverse=True):
+                narration = narration[:s] + "\u2026" + narration[e:]
+            for sent in _SENTENCE.split(narration):
+                sent = sent.strip()
+                if len(sent) < 15 or sent in seen or not any(p.search(sent) for p in pats):
+                    continue
+                cues = 2 * len(_LOOKS_STRONG.findall(sent)) + len(_LOOKS_WEAK.findall(sent))
+                if cues >= 2:
+                    seen.add(sent)
+                    found.append((cues, len(found), sent[:width]))
+    best = sorted(found, key=lambda f: (-f[0], f[1]))[:limit]
+    return [s for _, _, s in sorted(best, key=lambda f: f[1])]
 
 
 # ----------------------------------------------------------------- script state
@@ -299,8 +343,15 @@ class ScriptStore:
                 (d / "cover.jpg").write_bytes(base64.b64decode(cover))
             except ValueError:
                 pass
-        (d / "meta.json").write_text(json.dumps(book_summary(payload) | {"uploaded": time.time()},
-                                                ensure_ascii=False), encoding="utf-8")
+        meta_path = d / "meta.json"
+        keep = {}
+        if meta_path.exists():
+            try:
+                keep = {k: v for k, v in json.loads(meta_path.read_text(encoding="utf-8")).items() if k == "series"}
+            except ValueError:
+                pass
+        meta_path.write_text(json.dumps(book_summary(payload) | {"uploaded": time.time()} | keep,
+                                        ensure_ascii=False), encoding="utf-8")
 
     def summary(self, book_id: str) -> dict | None:
         d = self.dir(book_id)
@@ -752,6 +803,7 @@ class LocalLlm:
         # Where the next request should run; the server is restarted when this changes.
         self.gpu = cfg.llm_mode == "gpu"
         self.running_gpu: bool | None = None
+        self.running: tuple | None = None  # (model file, context) of the running server
 
     @property
     def url(self) -> str:
@@ -764,23 +816,26 @@ class LocalLlm:
         except Exception:  # noqa: BLE001
             return False
 
-    async def ensure(self, session) -> None:
-        if self.proc is not None and self.proc.returncode is None and self.running_gpu != self.gpu:
+    async def ensure(self, session, model: str | None = None, context: int | None = None) -> None:
+        model_file = model or self.cfg.llm_model
+        context = context or self.cfg.llm_context
+        if self.proc is not None and self.proc.returncode is None and (
+                self.running_gpu != self.gpu or self.running != (model_file, context)):
             await self.stop()
         if await self._alive(session):
             return
-        model = Path(self.cfg.llm_model) if self.cfg.llm_model else None
+        model = Path(model_file) if model_file else None
         if model and not model.is_absolute():
             model = self.cfg.models_path / "llm" / model
         exe = self.cfg.models_path / "llama.cpp" / ("cuda" if self.gpu else "cpu") / "llama-server.exe"
         if not model or not model.exists() or not exe.exists():
             raise LlmError(
-                "No local LLM configured. Run download-llm.ps1, or point llm_url at a running "
+                f"No local LLM {model_file!r}. Run download-llm.ps1, or point llm_url at a running "
                 "OpenAI-compatible server (LM Studio, Ollama, llama-server)."
             )
         port = int(self.url.rsplit(":", 1)[1].split("/")[0])
         args = [str(exe), "-m", str(model), "--port", str(port), "--host", "127.0.0.1",
-                "-c", str(self.cfg.llm_context), "-t", str(self.cfg.llm_threads), "--jinja", "-np", "1"]
+                "-c", str(context), "-t", str(self.cfg.llm_threads), "--jinja", "-np", "1"]
         if self.gpu:
             args += ["-ngl", "99", "--n-cpu-moe", str(self.cfg.llm_cpu_moe)]
         else:
@@ -790,6 +845,7 @@ class LocalLlm:
         self.proc = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log,
                                                          creationflags=0x08000000)
         self.running_gpu = self.gpu
+        self.running = (model_file, context)
         for _ in range(600):
             await asyncio.sleep(1)
             if self.proc.returncode is not None:
@@ -807,16 +863,22 @@ class LocalLlm:
                 self.proc.kill()
         self.proc = None
         self.running_gpu = None
+        self.running = None
 
-    async def complete(self, session, system: str, user: str, schema: dict, max_tokens: int = 2048) -> dict:
-        await self.ensure(session)
+    async def complete(self, session, system: str, user: str, schema: dict, max_tokens: int = 2048,
+                       model: str | None = None, thinking: bool = False, effort: str = "high") -> dict:
+        """One chat completion constrained to `schema`. With `thinking`, reasoning models reason
+        first (llama.cpp returns the reasoning separately and applies the schema to the answer)."""
+        context = self.cfg.llm_dossier_context if thinking else None
+        await self.ensure(session, model, context)
         body = {
-            "model": self.model_name or "local",
+            "model": Path(model).stem if model else (self.model_name or "local"),
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "temperature": 0.1,
+            "temperature": 0.6 if thinking else 0.1,
             "max_tokens": max_tokens,
             "response_format": {"type": "json_schema", "json_schema": {"name": "labels", "schema": schema}},
-            "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "low"},
+            "chat_template_kwargs": ({"enable_thinking": True, "reasoning_effort": effort} if thinking
+                                     else {"enable_thinking": False, "reasoning_effort": "low"}),
         }
         try:
             async with session.post(f"{self.url}/chat/completions", json=body, timeout=1800) as r:
@@ -836,7 +898,8 @@ class LocalLlm:
         return parsed
 
 
-async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk) -> tuple[dict, dict[str, str]]:
+async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk,
+                      thinking: bool = False, model: str | None = None) -> tuple[dict, dict[str, str]]:
     text, local = render_chunk(book, chunk)
     chapter = book["chapters"][chunk.chapter]
     narrator = script.get("narrator") or "unknown (work it out from the passage)"
@@ -855,10 +918,21 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     if pov:
         narrator = (f"{narrator}. But this passage starts with a point-of-view change, \"{pov}\": from here "
                     f"\"I\" is that character, not the previous narrator. Lines \"I\" says belong to them.")
+    if script.get("dossier_state") or any(c.get("dossier_user") for c in script["characters"].values()):
+        from .dossier import render_dossier, scene_cast
+
+        present = [script["characters"][c]["name"] for c in scene_cast(script, chunk.chapter, chunk.paragraphs)]
+        known = ("Characters (from a first read of the whole book: use their speech styles, verbal tics and "
+                 "relationships to recognise who speaks in untagged dialogue, and \"first appears as\" to give a "
+                 "character's real name even before the book reveals it):\n"
+                 f"{render_dossier(script, limit=30, width=110)}"
+                 + (f"\n\nPresent in this part of the story: {', '.join(present)}" if present else ""))
+    else:
+        known = f"Known characters:\n{roster_text(script)}"
     user = (
         f"Book: {book.get('title', '')} by {book.get('author', '')}\n"
         f"Chapter: {chapter.get('title', '')}\n\n"
-        f"Known characters:\n{roster_text(script)}\n\n"
+        f"{known}\n\n"
         f"Narrator of the previous passage: {narrator}\n\n"
         f"Most recent lines before this passage:\n{recent_text(script, book, chunk)}\n\n"
         f"Passage:\n{text}\n\n"
@@ -867,12 +941,19 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     # Generous budget: reasoning models (gpt-oss) spend tokens before the JSON, and the
     # schema grammar ends the output as soon as the JSON is complete anyway.
     budget = 1024 + 60 * len(local)
+    extra = {"thinking": True} if thinking else {}
+    if model:
+        extra["model"] = model
+    if thinking:
+        budget += 8000
     try:
-        result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget)
+        result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget,
+                                    **extra)
     except LlmError as exc:
         if "invalid JSON" not in str(exc):
             raise
-        result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget * 3)
+        result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget * 3,
+                                    **extra)
     return result, local
 
 
@@ -896,18 +977,41 @@ async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_ch
             ci, pi, s = map(int, m.groups())
             para = book["chapters"][ci]["paragraphs"][pi]
             texts.append(para[max(0, s - 60): s + 160])
-        blocks.append(f"## {c['name']} ({c.get('gender')}, {c.get('age')})\n" + "\n".join(f"- {t}" for t in texts))
+        aliases = [a for a in c.get("aliases", []) if a != c["name"]]
+        raw = script["characters"][c["id"]]
+        if raw.get("dossier") or raw.get("dossier_user"):
+            from .dossier import effective
+
+            d = effective(raw)
+            about = "\n".join(f"- {k.replace('_', ' ')}: {d[k]}" for k in
+                              ("gender", "apparent_age", "form", "true_nature", "personality", "speech_style")
+                              if d.get(k))
+            blocks.append(f"## {c['name']}" + (f" (also called: {', '.join(aliases)})" if aliases else "") + "\n"
+                          + "Dossier (from reading the whole book; follow its gender and apparent age):\n" + about
+                          + "\nLines:\n" + "\n".join(f"- {t}" for t in texts))
+            continue
+        looks = appearance_evidence(book, [c["name"], *aliases])
+        blocks.append(
+            f"## {c['name']}" + (f" (also called: {', '.join(aliases)})" if aliases else "") + "\n"
+            + "Described as:\n" + ("\n".join(f"- {t}" for t in looks) or "- (nothing found)") + "\n"
+            + "Lines:\n" + "\n".join(f"- {t}" for t in texts))
     user = f"Book: {book.get('title', '')} by {book.get('author', '')}\n\n" + "\n\n".join(blocks)
-    result = await llm.complete(session, ROSTER_PROMPT, user, ROSTER_SCHEMA, max_tokens=1024 + 200 * len(main))
+    result = await llm.complete(session, ROSTER_PROMPT, user, ROSTER_SCHEMA, max_tokens=1024 + 300 * len(main))
     for d in result.get("characters", []):
         cid = find_character(script, d.get("name", ""))
         if cid is None:
             continue
         c = script["characters"][cid]
-        for key in ("gender", "age", "accent", "temperament"):
+        for key in ("gender", "age", "accent", "temperament", "appearance"):
             if d.get(key):
                 c[key] = d[key]
         c["description"] = d.get("voice", "")
+        if c.get("dossier") or c.get("dossier_user"):
+            from .dossier import effective, sync_character
+
+            sync_character(c)  # the dossier's apparent gender and age win
+            if effective(c).get("voice"):
+                c["description"] = effective(c)["voice"]
 
 
 # ----------------------------------------------------------------- analysis job
@@ -962,7 +1066,41 @@ class Analyzer:
                         await self.llm.stop()  # free RAM/VRAM when idle
 
     async def _label(self, session, book: dict, script: dict, chunk: Chunk):
-        return await self._gpu(lambda: label_chunk(self.llm, session, book, script, chunk))
+        thinking = self.llm.cfg.llm_label_thinking
+        return await self._gpu(lambda: label_chunk(self.llm, session, book, script, chunk, thinking=thinking))
+
+    async def _read_for_dossier(self, session, book: dict, book_id: str) -> None:
+        """Pass 1: the reasoning model reads the whole book and builds the character dossier."""
+        from . import dossier, series
+
+        cfg = self.llm.cfg
+        s = self.store.script(book_id)
+        if not cfg.llm_dossier_model or (s.get("dossier_state") or {}).get("done"):
+            return
+        if not s.get("dossier_state"):
+            async with self.store.lock(book_id):
+                s = self.store.script(book_id)
+                series.seed(self.app, book_id, s)
+                self.store.save_script(book_id, s)
+
+        async def progress(s: dict, frac: float, detail: str) -> None:
+            s.update(status="running", progress=round(0.5 * frac, 3), detail=detail)
+            self.store.save_script(book_id, s)
+
+        await dossier.build(self.llm, session, book, self.store, book_id, cfg.llm_dossier_model, self._gpu,
+                            progress)
+
+    @staticmethod
+    def narrators_from_dossier(s: dict) -> None:
+        """Record who pass 1 thinks narrates, as dossier context only. Pass 2 keeps tracking the
+        narrator itself: forcing pass 1's per-tense votes onto it measured worse (a confused vote
+        mislabels every "I said" line of a section)."""
+        from .dossier import narrators
+
+        for key, cid in narrators(s).items():
+            if cid in s["characters"]:
+                d = s["characters"][cid].setdefault("dossier", {})
+                d["narrates"] = "yes" if key == "any" else f"the {key}-tense sections"
 
     async def _gpu(self, make_coro):
         """Runs one LLM step on the GPU when allowed and the voice model has been idle,
@@ -986,13 +1124,30 @@ class Analyzer:
         book = self.store.book(book_id)
         if book is None:
             raise LlmError("book text not uploaded")
+        s = self.store.script(book_id)
+        if not s["chunks_done"] and not s.get("dossier_state") and not s.get("series_seeded"):
+            from . import series
+
+            async with self.store.lock(book_id):
+                s = self.store.script(book_id)
+                s["series_seeded"] = series.seed(self.app, book_id, s)
+                self.store.save_script(book_id, s)
+        await self._read_for_dossier(session, book, book_id)
+        has_dossier = bool(self.store.script(book_id).get("dossier_state"))
+        if has_dossier:
+            async with self.store.lock(book_id):
+                s = self.store.script(book_id)
+                if not s["chunks_done"]:
+                    self.narrators_from_dossier(s)
+                    self.store.save_script(book_id, s)
+        base, span = (0.5, 0.5) if has_dossier else (0.0, 1.0)
         chunks = make_chunks(book, runs=mixed_tense_runs(book))
         t0 = time.perf_counter()
         for i, chunk in enumerate(chunks):
             s = self.store.script(book_id)
             if chunk.key in s["chunks_done"]:
                 continue
-            s.update(status="running", progress=round(i / max(1, len(chunks)), 3),
+            s.update(status="running", progress=round(base + span * i / max(1, len(chunks)), 3),
                      detail=f"chapter {chunk.chapter + 1}: {len(s['lines'])} lines so far")
             self.store.save_script(book_id, s)
             result, local = await self._label(session, book, s, chunk)
@@ -1028,15 +1183,36 @@ class Analyzer:
             fresh = self.store.script(book_id)
             for cid, c in s["characters"].items():
                 if cid in fresh["characters"]:
-                    for k in ("gender", "age", "accent", "temperament", "description"):
+                    for k in ("gender", "age", "accent", "temperament", "appearance", "description"):
                         fresh["characters"][cid][k] = c.get(k, fresh["characters"][cid].get(k))
             fresh.update(status="done", progress=1.0,
                          detail=f"{len(fresh['lines'])} lines in {time.perf_counter() - t0:.0f}s")
             fresh.setdefault("stats", {})["seconds"] = round(time.perf_counter() - t0, 1)
             reconcile_narrators(book, fresh)
             fresh["narration"] = compute_narration(book, fresh)
+            prune_characters(fresh)
             self.store.save_script(book_id, fresh)
         logger.info("analysed %s: %d lines", book_id, len(fresh["lines"]))
+
+
+def prune_characters(script: dict) -> list[str]:
+    """Drop characters nobody hears: no lines, not narrating, not edited by the user, no chosen voice.
+
+    The dossier pass records everyone who is mentioned; only speakers belong in the cast.
+    """
+    public = ScriptStore.public(script)
+    lines = {c["id"]: c["lines"] for c in public["characters"]}
+    narrating = {who for _, _, who in script.get("narration", []) if who}
+    narrating |= {find_character(script, n) for n in (script.get("narrator_by_tense") or {}).values()}
+    narrating.add(find_character(script, script.get("narrator") or ""))
+    gone = []
+    for cid, c in list(script["characters"].items()):
+        voice = c.get("voice") or ""
+        generated = not voice or voice.startswith(("ch-", "pool-"))
+        if lines.get(cid, 0) == 0 and cid not in narrating and not c.get("user") and generated:
+            del script["characters"][cid]
+            gone.append(cid)
+    return gone
 
 
 # ----------------------------------------------------------------- casting
@@ -1064,8 +1240,15 @@ def pool_key(gender: str, age: str) -> tuple[str, str]:
 
 
 def character_description(c: dict) -> str:
+    user_voice = (c.get("dossier_user") or {}).get("voice")
+    if user_voice:
+        return user_voice
     if c.get("description"):
         return c["description"]
+    if c.get("dossier"):
+        from .dossier import voice_description
+
+        return voice_description(c)
     parts = [c.get("gender"), c.get("age"), c.get("accent") and f"{c['accent']} accent", c.get("temperament")]
     return ", ".join(p for p in parts if p and p != "unknown") or "an adult speaker with a natural voice"
 
@@ -1116,6 +1299,8 @@ CAST_TASKS_KEY = web.AppKey("cast_tasks", set)
 
 
 async def list_books(request: web.Request) -> web.Response:
+    from .series import series_name as _series_name
+
     store = request.app[DRAMA_STORE_KEY]
     books = []
     for book_id in store.ids():
@@ -1125,6 +1310,7 @@ async def list_books(request: web.Request) -> web.Response:
         books.append({
             **summary,
             "id": book_id,
+            "series": summary.get("series") or _series_name(summary.get("title", "")),
             "status": s.get("status", "none"),
             "progress": s.get("progress", 0.0),
             "detail": s.get("detail", ""),
@@ -1172,17 +1358,26 @@ async def upload_book(request: web.Request) -> web.Response:
         store.save_book(book_id, body)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
-    if body.get("reanalyze"):
+    if body.get("reanalyze") or body.get("relabel"):
         async with store.lock(book_id):
             s = store.script(book_id)
             if s.get("status") not in ("queued", "running", "casting"):
-                # Start over; user corrections, names and voices are kept.
-                s.update(status="none", progress=0.0, lines={}, chunks_done=[], narrator="",
-                         narrator_by_tense={}, last_tense=None)
+                reset_for_analysis(s, keep_dossier=not body.get("reanalyze"))
                 store.save_script(book_id, s)
     if body.get("analyze"):
         await request.app[ANALYZER_KEY].enqueue(book_id)
     return web.json_response(ScriptStore.public(store.script(book_id)))
+
+
+def reset_for_analysis(s: dict, keep_dossier: bool) -> None:
+    """Start the analysis over. Corrections, names, merges, voices and dossier edits are always kept;
+    with keep_dossier only pass 2 (line labels) runs again, using the dossier as it is now."""
+    s.update(status="none", progress=0.0, lines={}, chunks_done=[], narrator="", narrator_by_tense={},
+             last_tense=None, series_seeded=0)
+    if not keep_dossier:
+        s.pop("dossier_state", None)
+        for c in s["characters"].values():
+            c.pop("dossier", None)
 
 
 async def get_script(request: web.Request) -> web.Response:
@@ -1218,11 +1413,22 @@ def with_voice_versions(app: web.Application, public: dict) -> dict:
 
 
 async def analyze(request: web.Request) -> web.Response:
+    """Queue an analysis. {"relabel": true} re-labels the lines with the current dossier (after
+    dossier edits); {"reanalyze": true} also reads the book again for a fresh dossier."""
     book_id = request.match_info["book"]
-    if request.app[DRAMA_STORE_KEY].book(book_id) is None:
+    store = request.app[DRAMA_STORE_KEY]
+    if store.book(book_id) is None:
         return web.json_response({"error": "book not uploaded"}, status=404)
+    body = await request.json() if request.can_read_body else {}
+    if isinstance(body, dict) and (body.get("relabel") or body.get("reanalyze")):
+        async with store.lock(book_id):
+            s = store.script(book_id)
+            if s.get("status") in ("queued", "running", "casting"):
+                return web.json_response({"error": "Busy; try again when it is done"}, status=409)
+            reset_for_analysis(s, keep_dossier=not body.get("reanalyze"))
+            store.save_script(book_id, s)
     await request.app[ANALYZER_KEY].enqueue(book_id)
-    return web.json_response(ScriptStore.public(request.app[DRAMA_STORE_KEY].script(book_id)))
+    return web.json_response(ScriptStore.public(store.script(book_id)))
 
 
 async def patch_line(request: web.Request) -> web.Response:
@@ -1259,6 +1465,24 @@ async def patch_character(request: web.Request) -> web.Response:
             c["name"] = body["name"]
         if "voice" in body:
             c["voice"] = body["voice"] or None
+        if isinstance(body.get("dossier"), dict):
+            from .dossier import FIELDS, effective, sync_character
+
+            mine = c.setdefault("dossier_user", {})
+            for key, value in body["dossier"].items():
+                if key not in FIELDS and key != "narrates":
+                    continue
+                value = (value or "").strip() if isinstance(value, str) else ""
+                if value and value != (c.get("dossier") or {}).get(key):
+                    mine[key] = value
+                elif not value or value == (c.get("dossier") or {}).get(key):
+                    mine.pop(key, None)
+            sync_character(c)
+            if mine.get("voice"):
+                c["description"] = effective(c)["voice"]
+        if isinstance(body.get("aliases"), list):
+            c["aliases"] = [a.strip() for a in body["aliases"] if isinstance(a, str) and a.strip()]
+        c["user"] = True
         target = body.get("merge_into")
         if target and target in s["characters"] and target != cid:
             t = s["characters"][target]
@@ -1271,6 +1495,41 @@ async def patch_character(request: web.Request) -> web.Response:
             if s.get("status") == "done":
                 refresh_narration(store, book_id, s)
         store.save_script(book_id, s)
+    if "merge_into" not in body:
+        from .series import remember
+
+        remember(request.app, book_id, only=cid)
+    return web.json_response(ScriptStore.public(s))
+
+
+async def voice_from_dossier(request: web.Request) -> web.Response:
+    """Design a new voice for a character from its (edited) dossier and assign it.
+    The old voice is left untouched, so it can be reassigned."""
+    from .app import design_voice
+    from .engines.manager import EngineError
+    from .series import remember
+
+    store = request.app[DRAMA_STORE_KEY]
+    book_id, cid = request.match_info["book"], request.match_info["character"]
+    body = await request.json() if request.can_read_body else {}
+    s = store.script(book_id)
+    c = s["characters"].get(cid)
+    if c is None:
+        return web.json_response({"error": "no such character"}, status=404)
+    engine = (body or {}).get("engine") or request.app[CONFIG_KEY_REF].voice_design_engine
+    description = character_description(c)
+    try:
+        v = await design_voice(request.app, engine, description, c["name"], source="character",
+                               voice_id=f"ch-{book_id[:8]}-{cid}"[:55] + f"-{int(time.time()) % 100000}",
+                               seed=zlib.crc32(cid.encode()) % 100000)
+    except EngineError as exc:
+        return web.json_response({"error": exc.detail}, status=exc.status)
+    async with store.lock(book_id):
+        s = store.script(book_id)
+        if cid in s["characters"]:
+            s["characters"][cid].update(voice=v.id, description=description, user=True)
+        store.save_script(book_id, s)
+    remember(request.app, book_id, only=cid)
     return web.json_response(ScriptStore.public(s))
 
 
@@ -1295,6 +1554,9 @@ async def cast(request: web.Request) -> web.Response:
         try:
             result = await cast_voices(request.app, book_id, engine)
             detail = f"{len(result['created'])} voices created"
+            from .series import remember
+
+            remember(request.app, book_id)
         except EngineError as exc:
             detail = f"voice creation failed: {exc.detail}"
         except Exception as exc:  # noqa: BLE001
@@ -1343,6 +1605,10 @@ def setup(app: web.Application) -> None:
     app.cleanup_ctx.append(_ctx)
     r = app.router
     r.add_get("/api/books", list_books)
+    r.add_post("/api/books/{book}/characters/{character}/voice-from-dossier", voice_from_dossier)
+    from . import series
+
+    series.setup(app)
     r.add_get("/api/books/{book}", get_book)
     r.add_get("/api/books/{book}/cover", get_cover)
     r.add_post("/api/books/{book}", upload_book)

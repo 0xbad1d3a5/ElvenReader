@@ -93,6 +93,8 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `sentence_pause_ms`, `trim_silence` | `300`, `true` | Pacing between sentences. |
 | `cache_max_mb` | `4096` | Sentence audio cache (`data\cache`). |
 | `llm_model`, `llm_mode`, `llm_cpu_moe`, `llm_threads` | Qwen3-30B-A3B, `auto`, `20`, `12` | Dramatization LLM (see below). |
+| `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
+| `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
 | `voice_design_engine` | `qwen3tts` | Creates character voices. |
 
 Environment overrides: `ANDROIDREADER_PORT`, `ANDROIDREADER_HOST`, `ANDROIDREADER_TOKEN`,
@@ -204,7 +206,9 @@ the quotations it found (with stable IDs) to the PC, which analyses it in the ba
 2. **LLM pass per ~600-word chunk** (llama.cpp, JSON-schema constrained): for each numbered
    speaker turn, the speaker and a short delivery (*shouting, urgent*), using a rolling character
    roster and the last few attributions.
-3. **Roster pass:** gender, age, accent, temperament and a voice description per main character.
+3. **Roster pass:** gender, apparent age (how old they look and sound, not their true age),
+   accent, temperament and a voice description per main character, from their lines and the
+   narration's descriptions of them.
 4. **Cast:** *Cast → Create voices* designs a voice for each main character (Qwen3-TTS
    VoiceDesign) and locks it as a cloned reference so it stays consistent; minor characters share
    a small pool of voices by gender and age. Any character can be renamed, merged with an alias
@@ -272,6 +276,37 @@ On the full *Sasaki and Peeps* vol. 10, the hand-labelled excerpt spans one of t
 sections. There, wrong speakers fell from 15 to 7 (93.5%). The other 12 misses are Nick's lines
 before he gives his name, which are labelled "a prisoner".
 
+**Series memory.** A book's series is detected from its title (*Sasaki and Peeps, Vol. 10* →
+*Sasaki and Peeps*; change it in the viewer). After casting, and whenever you edit a character, the
+main cast is stored per series: names, aliases, apparent gender and age, dossier and voice. A new
+volume of the series starts its analysis with that cast, so the characters keep the voices you
+chose, including your corrections. *Sasaki and Peeps* is seeded from vol. 10's corrected cast
+(Futarishizuka as a girl's voice with an old woman's manner, the Neighbor as a teenage girl, Peeps
+as an elderly sage, and so on).
+
+**Character dossiers (optional pass 1).** With `"llm_dossier_model"` set (e.g.
+`"gpt-oss-20b-MXFP4.gguf"`), a reasoning model first reads the whole book in about 3,500-word
+passages. It builds a dossier per character: aliases, apparent age and form (what a listener should
+hear), true nature, personality, speech style, relationships, how they first appear, and evidence
+quotes. A final consolidation call merges duplicates. Line labelling then uses the dossier. It is
+**off by default**, because on our gold excerpts it made attribution worse. Wrong identity merges
+from the first read (e.g. Nick made an alias of Sasaki's cover name) spread into many lines, and it
+did not improve the apparent ages either. Measured on *Sasaki and Peeps* vol. 10 (two hand-labelled
+excerpts, 161 quotations; `scripts\eval_dossier.py`):
+
+| Pipeline | Prison scene (ch. 8) | Group banter (ch. 12) | Age/gender/form checks | Pass 1 time |
+|---|---|---|---|---|
+| **Single pass (default)** | **86/102 = 84.3%** | **55/59 = 93.2%** | 18/24 | — |
+| + dossier, gpt-oss-20b, medium reasoning | 72/102 = 70.6% | 53/59 = 89.8% | 18/24 | 16 min |
+| + dossier, gpt-oss-20b, high reasoning | 64/102 = 62.7% | 51/59 = 86.4% | 17/24 | 68 min |
+| Qwen3-30B-A3B-Thinking-2507 / Qwen3.5-35B-A3B | not completed | | | ~2 h (3–3.5 min per passage) |
+
+Dossiers you edit yourself are still useful. In the viewer (📇 on a character) you can set the
+apparent age, form, speech style and other fields. Your fields always win, are used to design the
+character's voice (*Design a new voice from this dossier*) and, once any character has edits, are
+given to the model when you *Re-label lines with the dossiers*. Edits also go into the series
+memory.
+
 ## 8. Process a book on the PC
 
 Dramatize a book without touching the phone, then optionally put it on the phone:
@@ -316,7 +351,9 @@ The viewer has:
   speaker's voice and delivery, using the chosen narrator voice and model. Audio comes from the
   same server cache as the phone.
 * **Editing:** click a speaker tag to change the speaker or delivery; ✎ on a character renames it,
-  merges it into another (aliases) or changes its voice; *Create missing voices* runs the cast.
+  merges it into another (aliases) or changes its voice; 📇 opens its dossier (see *Character
+  dossiers*); *Create missing voices* runs the cast; *Re-label lines with the dossiers* labels the
+  lines again (your corrections are kept). The book's series is shown under the cast and can be changed.
   Changes go through the same API as the app; the phone picks them up the next time you open
   the book (sentences it had already prepared are re-synthesized).
 
@@ -376,7 +413,9 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |
 | `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`, `reanalyze`, optional base64 `cover`), dramatization status and lines. |
-| `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice, create character voices. |
+| `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice/`dossier`/`aliases`, create character voices. |
+| `POST /api/books/{id}/characters/{id}/voice-from-dossier` · `POST /api/books/{id}/analyze` `{relabel\|reanalyze}` | New voice from the dossier · label lines again (keep dossiers) or analyse from scratch (user edits kept). |
+| `GET /api/series` · `POST /api/books/{id}/series` `{series?}` | Series casts · set a book's series and store its cast there. |
 | `GET /pair` · `GET /` · `GET /books[/{id}]` | Pairing page (token in the URL fragment) · QR codes for pairing and the viewer (PC only) · book viewer (any address; asks for the token unless opened on the PC). |
 
 ## Development
@@ -388,6 +427,8 @@ cd server; .\.venv\Scripts\python.exe -m pytest
 # engine benchmark (real models) and attribution accuracy (real LLM)
 .\.venv\Scripts\python.exe scripts\bench_engines.py omnivoice fish_s2 indextts qwen3tts
 .\.venv\Scripts\python.exe scripts\eval_attribution.py tests\gold\pride-ch1.json tests\gold\alice-ch7.json
+# dossier pipeline vs single pass on a processed book (gold excerpts of copyrighted books live in tests\gold\private)
+.\.venv\Scripts\python.exe scripts\eval_dossier.py --dossier-model gpt-oss-20b-MXFP4.gguf --roster tests\gold\sasaki10-roster.json tests\gold\private\sasaki10-ch8.json tests\gold\private\sasaki10-ch12.json
 
 # Android unit tests (EPUB parsing, sentence/quote segmentation, URLs, language names)
 cd android; .\gradlew.bat testDebugUnitTest

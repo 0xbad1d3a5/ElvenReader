@@ -478,7 +478,10 @@ async function bookView(id) {
       h("aside", {},
         h("h3", {}, "Chapters"), h("div", { id: "chapters" }),
         h("h3", {}, "Cast"), h("p", { class: "small muted" }, "Click a name to see all their lines."), h("div", { id: "cast" }),
-        h("p", {}, h("button", { onclick: castVoices }, "Create missing voices"))),
+        h("p", {}, h("button", { onclick: castVoices }, "Create missing voices")),
+        h("p", {}, h("button", { title: "Label every line again using the dossiers as they are now (after your edits)",
+          onclick: relabel }, "Re-label lines with the dossiers")),
+        h("p", { class: "small muted", id: "seriesInfo" })),
       h("main", {}, h("div", { class: "text", id: "text" }))),
     h("div", { class: "player" },
       h("button", { class: "primary", id: "playBtn", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6 Play"),
@@ -512,6 +515,7 @@ async function bookView(id) {
         book: st.id, character: c.id, characterName: c.name,
         onChange: async () => { flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); },
       }) }, "\uD83C\uDF99") : null,
+      h("button", { title: "Character dossier: what the book says about them", onclick: () => editDossier(c) }, "\uD83D\uDCC7"),
       h("button", { title: "Rename, merge or change voice", onclick: () => editCharacter(c) }, "\u270E"))));
   }
 
@@ -756,6 +760,73 @@ async function bookView(id) {
     });
   }
 
+  const DOSSIER_FIELDS = [
+    ["gender", "Gender", ["", "male", "female", "unknown"]],
+    ["apparent_age", "Apparent age (what a listener should hear)", ["", "child", "teen", "young adult", "adult", "middle-aged", "elderly", "unknown"]],
+    ["form", "Form (human, Java sparrow, android girl\u2026)"], ["true_nature", "True age or nature, if different"],
+    ["personality", "Personality"], ["speech_style", "Speech style and verbal tics"], ["relationships", "Relationships"],
+    ["introduced_as", "First appears as (before the book names them)"], ["narrates", "Narrates"],
+    ["voice", "Voice description (for designing their voice)"],
+  ];
+
+  function editDossier(c) {
+    const model = c.dossier || {}, mine = c.dossier_user || {};
+    const inputs = {};
+    const fields = DOSSIER_FIELDS.map(([key, label, options]) => {
+      const value = mine[key] ?? model[key] ?? "";
+      const el = options
+        ? h("select", {}, ...options.map(o => h("option", { value: o }, o || "\u2014")))
+        : h(key === "voice" ? "textarea" : "input", { rows: key === "voice" ? 3 : undefined, style: { width: "100%" } });
+      el.value = value;
+      inputs[key] = el;
+      return [h("label", {}, label, mine[key] != null ? h("span", { class: "small", style: { color: "var(--accent)" } }, " \u270E edited") : null), el];
+    }).flat();
+    const aliases = h("input", { value: (c.aliases || []).join(", ") });
+    const facts = (model.facts || []).map(f => h("li", { class: "small" }, f.fact, " \u2014 ",
+      h("i", {}, "\u201c" + (f.quote || "") + "\u201d"), " ",
+      Array.isArray(f.at) ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); $("#dlg").close(); gotoChapter(f.at[0]); } }, `ch ${f.at[0] + 1}`) : null));
+    const revisions = (model.revisions || []).map(r => h("li", { class: "small" }, r.note));
+    dialog(`${c.name} \u2014 dossier`, [
+      h("p", { class: "small muted" }, "From reading the whole book. Your edits win over the model's and are used when lines are re-labelled and voices designed."),
+      h("label", {}, "Also called (comma separated)"), aliases, ...fields,
+      facts.length ? h("div", {}, h("h4", {}, "Evidence"), h("ul", {}, ...facts)) : null,
+      revisions.length ? h("div", {}, h("h4", {}, "Changed its mind"), h("ul", {}, ...revisions)) : null,
+      h("p", {}, h("button", { type: "button", onclick: async (e) => {
+        e.target.disabled = true; e.target.textContent = "Designing\u2026 (about 20 s)";
+        try {
+          await save();
+          await api("POST", `/api/books/${st.id}/characters/${c.id}/voice-from-dossier`, {});
+          flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); $("#dlg").close();
+        } catch (err) { alert(err.message); e.target.disabled = false; e.target.textContent = "Design a new voice from this dossier"; }
+      } }, "Design a new voice from this dossier")),
+    ], save);
+    async function save() {
+      const dossier = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+      const body = { dossier, aliases: aliases.value.split(",").map(a => a.trim()).filter(Boolean) };
+      await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, body);
+      await reloadScript();
+    }
+  }
+
+  async function relabel() {
+    if (!confirm("Label every line again with the current dossiers? Your line corrections are kept. This takes the second half of a normal analysis (about 45 minutes for a long novel).")) return;
+    try { st.script = (await api("POST", `/api/books/${st.id}/analyze`, { relabel: true })).data; } catch (e) { alert(e.message); return; }
+    renderStatus(); follow();
+  }
+
+  async function showSeries() {
+    const el = $("#seriesInfo");
+    if (!el) return;
+    const meta = (await get("/api/books")).books.find(b => b.id === st.id) || {};
+    el.replaceChildren("Series: ", h("b", {}, meta.series || "(from the title)"), " ",
+      h("button", { onclick: async () => {
+        const name = prompt("Series this book belongs to (its cast and voices carry over to other volumes). Leave empty to detect it from the title.", meta.series || "");
+        if (name === null) return;
+        const r = await api("POST", `/api/books/${st.id}/series`, { series: name });
+        el.querySelector("b").textContent = r.data.series;
+      } }, "Change"));
+  }
+
   async function castVoices() {
     try { await api("POST", `/api/books/${st.id}/cast`, {}); } catch (e) { alert(e.message); return; }
     const poll = async () => {
@@ -783,6 +854,7 @@ async function bookView(id) {
   renderAll();
   get("/api/voices?all=1").then(v => { st.voices = v.voices; st.defaultVoice = v.default; renderSelectors(); renderCast(); }).catch(() => {});
   get("/api/engines").then(e => { st.engines = e.engines.filter(x => x.installed); st.defaultEngine = e.default; renderSelectors(); }).catch(() => {});
+  showSeries().catch(() => {});
   follow();
 }
 </script>
