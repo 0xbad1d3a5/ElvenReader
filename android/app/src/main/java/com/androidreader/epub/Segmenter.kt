@@ -116,6 +116,27 @@ object Sentences {
 object Quotes {
     private val PAIRS = mapOf('\u201c' to '\u201d', '\u00ab' to '\u00bb', '\u201e' to '\u201c', '\u2018' to '\u2019', '"' to '"')
     private const val TRAILING_PUNCT = ",;:.!?\u2026\u2014\u2013"
+    private val MENTION_SPEECH = Regex(
+        "\\b(?:said|says|say|saying|asked|asks|replied|replies|answered|cried|cries|shouted|shouts|whispered|muttered|" +
+            "murmured|exclaimed|added|went|go|goes|sang|sing|sings|singing|called|calls|yelled|screamed|began|continued|" +
+            "repeated|remarked|uttered|read|reads|wrote|tell|told)(?:\\s+to\\s+\\w+|\\s+\\w+ly)?$",
+        RegexOption.IGNORE_CASE,
+    )
+    private val MENTION_INNER_PUNCT = Regex("[,!?;:\u2014\u2013\u2026]|\\.\\S")
+    private const val QUOTE_MARKS = "\u201c\u201d\"\u2018\u2019\u00ab\u00bb\u300c\u300d "
+
+    /**
+     * A word or phrase in quotation marks inside a sentence (Chinese for “cat.”, all the “inspections”),
+     * not dialogue: it directly follows a word, is short, has no inner punctuation and no speech verb
+     * before it. Read as part of the narration. Same rule as the server's is_mention.
+     */
+    fun isMention(text: String, start: Int, end: Int): Boolean {
+        val before = text.substring(0, start).trimEnd()
+        if (before.isEmpty() || !before.last().isLetterOrDigit()) return false
+        val inner = text.substring(start, end).trim { it in QUOTE_MARKS }.trimEnd('.', ',')
+        if (inner.isEmpty() || inner.split(Regex("\\s+")).size > 6 || MENTION_INNER_PUNCT.containsMatchIn(inner)) return false
+        return !MENTION_SPEECH.containsMatchIn(before)
+    }
 
     /** Quotation ranges, including the quote marks. An unclosed quote runs to the paragraph end. */
     fun regions(text: String): List<TextSpan> {
@@ -162,7 +183,8 @@ object Quotes {
      */
     fun segments(text: String, sentences: List<TextSpan>, splitQuotes: Boolean): List<Segment> {
         if (!splitQuotes) return sentences.map { Segment(it.start, it.end) }
-        val regions = regions(text)
+        // Quoted terms inside a sentence stay part of the narration: no cut, no voice change.
+        val regions = regions(text).filterNot { isMention(text, it.start, it.end) }
         val out = mutableListOf<Segment>()
         for (s in sentences) {
             val cuts = sortedSetOf(s.start, s.end)

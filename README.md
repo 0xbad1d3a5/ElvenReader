@@ -339,8 +339,9 @@ requests and on the CPU otherwise, so analysis never evicts the voice model whil
 explicitly. In first-person books the model used to give them to the narrating character: 11–13
 of 18 right in *Sasaki and Peeps* v10, 16–17 with the new wording. A rule backs it up: a short
 quote straight after a word, with no punctuation inside and no speech verb before it ("then said
-“The fourth.”" stays dialogue). Such quotes are read in the narration's voice and shown as plain text
-(dotted underline) in the viewer; double-click one to give it to a speaker. Books analysed earlier
+“The fourth.”" stays dialogue). Such quotes stay inside the narration: the whole sentence is read in
+one go, in the narrator's voice, on the phone and in the viewer, which shows them as plain text
+(dotted underline); double-click one to give it to a speaker. Books analysed earlier
 are fixed when the server opens them. Quotations given to the narrator (signs, notes) are also
 read in the narration's voice, so in first-person passages they no longer switch to a different
 voice mid-sentence.

@@ -105,6 +105,22 @@ class QuoteTest {
         val segs = Quotes.segments(text, Sentences.split(text), splitQuotes = true)
         assertEquals(listOf("\u201cYes\u201d,", "he said."), segs.map { text.substring(it.start, it.end) })
     }
+
+    @Test
+    fun quotedTermsStayInTheNarration() {
+        val text = "I\u2019d heard them say something about \u201cink,\u201d but I hadn\u2019t realized. \u201cStop!\u201d he said."
+        val segs = Quotes.segments(text, Sentences.split(text), splitQuotes = true)
+        assertEquals(
+            listOf("I\u2019d heard them say something about \u201cink,\u201d but I hadn\u2019t realized.", "\u201cStop!\u201d", "he said."),
+            segs.map { text.substring(it.start, it.end) },
+        )
+        assertNull(segs[0].quote)
+        assertEquals(2, Quotes.regions(text).size) // quote ids are unchanged
+        val old = "Alice considered a little, and then said \u201cThe fourth.\u201d"
+        assertEquals(false, Quotes.isMention(old, old.indexOf('\u201c'), old.length))
+        val bill = "then, saying to herself \u201cThis is Bill,\u201d she gave"
+        assertEquals(false, Quotes.isMention(bill, bill.indexOf('\u201c'), bill.indexOf('\u201d') + 1))
+    }
 }
 
 class ReaderLogicTest {

@@ -548,17 +548,21 @@ async function bookView(id) {
     renderText(); $("main").scrollTop = 0;
   }
 
-  /* A paragraph as narration and quotation pieces. */
+  /* A paragraph as narration and quotation pieces. Quoted terms inside a sentence (line.mention) stay in
+     the narration piece, as marks, so the sentence is read in one go. */
   function pieces(ci, pi) {
-    const ch = st.book.chapters[ci], text = ch.paragraphs[pi];
+    const ch = st.book.chapters[ci], text = ch.paragraphs[pi], lines = st.script.lines;
     const qs = ch.quotes.filter(q => q[1] === pi).sort((a, b) => a[2] - b[2]);
-    const out = []; let pos = 0;
+    const out = []; let pos = 0, marks = [];
     for (const [qid, , s, e] of qs) {
-      if (s > pos) out.push({ kind: "n", text: text.slice(pos, s) });
+      const l = lines[qid];
+      if (l && l.mention && !l.speaker) { marks.push({ qid, s, e }); continue; }
+      if (s > pos) out.push({ kind: "n", text: text.slice(pos, s), start: pos, marks });
+      marks = [];
       out.push({ kind: "q", qid, text: text.slice(s, e) });
       pos = e;
     }
-    if (pos < text.length) out.push({ kind: "n", text: text.slice(pos) });
+    if (pos < text.length) out.push({ kind: "n", text: text.slice(pos), start: pos, marks });
     return out;
   }
 
@@ -575,7 +579,17 @@ async function bookView(id) {
     const ps = pieces(ci, pi);
     ps.forEach((piece, k) => {
       if (piece.kind === "n") {
-        const span = h("span", { class: "nar" }, ...highlight(piece.text));
+        const kids = []; let at = 0;
+        for (const m of piece.marks || []) {  // quoted terms: dotted underline, double-click to give to a speaker
+          const a = m.s - piece.start, b = m.e - piece.start;
+          kids.push(...highlight(piece.text.slice(at, a)));
+          const ms = h("span", { class: "mention", title: "Quoted term, read as narration. Double-click to change." },
+            ...highlight(piece.text.slice(a, b)));
+          ms.addEventListener("dblclick", (e) => { e.stopPropagation(); editLine(m.qid, piece.text.slice(a, b)); });
+          kids.push(ms); at = b;
+        }
+        kids.push(...highlight(piece.text.slice(at)));
+        const span = h("span", { class: "nar" }, ...kids);
         if (/[\p{L}\p{N}]/u.test(piece.text)) {
           const idx = units.length;
           const narrator = chars[narratorAt(ci, pi)];
@@ -587,18 +601,6 @@ async function bookView(id) {
         return;
       }
       const line = lines[piece.qid];
-      if (line && line.mention && !line.speaker) {
-        // A quoted term inside the narration ("Chinese for “cat.”"): read and shown as narration.
-        const narrator = chars[narratorAt(ci, pi)];
-        const span = h("span", { class: "nar mention", title: "Quoted term, read as narration. Double-click to change." },
-          ...highlight(piece.text));
-        const idx = units.length;
-        units.push({ text: piece.text, voice: narrator ? narrator.voice : null, delivery: null, el: span, ci, pi, qid: piece.qid });
-        span.addEventListener("click", () => playFrom(idx));
-        span.addEventListener("dblclick", (e) => { e.stopPropagation(); editLine(piece.qid, piece.text); });
-        p.append(span);
-        return;
-      }
       const c = line && line.speaker ? chars[line.speaker] : null;
       const col = line ? color(c ? c.id : null) : "transparent";
       const span = h("span", { class: "q", title: "Click to play from here",
