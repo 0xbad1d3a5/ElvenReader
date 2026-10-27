@@ -613,3 +613,57 @@ def test_unmarked_end_of_a_pov_section_is_found_exactly():
     book = {"chapters": [{"title": "One", "paragraphs": paras, "quotes": []}]}
     runs = dz.tense_runs(book)
     assert runs == [(0, 0, "past"), (0, 20, "present"), (0, 44, "past")]
+
+
+# ---------------------------------------------------------------- quoted terms are not dialogue
+
+
+def test_quoted_terms_inside_a_sentence_are_mentions_not_speech():
+    Q, E = "\u201c", "\u201d"
+
+    def m(text):
+        s = text.index(Q)
+        return dz.is_mention(text, s, text.index(E, s) + 1)
+
+    assert m(f"I remembered that mao was Chinese for {Q}cat.{E} Perhaps")
+    assert m(f"Because of all the {Q}inspections{E} we\u2019d been conducting")
+    assert m(f"his pet Java sparrow is {Q}OP.{E} He told me")
+    assert m(f"I\u2019d heard them say something about {Q}ink,{E} but I hadn\u2019t")
+    assert not m(f"{Q}Call me Nick.{E}")  # starts the paragraph
+    assert not m(f"The man tensed. {Q}Where did you hear that name?{E}")  # after a full stop
+    assert not m(f"Alice considered a little, and then said {Q}The fourth.{E}")  # speech verb, no comma
+    assert not m(f"the March Hare went {Q}Sh! sh!{E} and the Dormouse")  # exclamation inside
+    assert not m(f"then, saying to herself {Q}This is Bill,{E} she gave one sharp kick")  # verb to someone
+    assert not m(f"he said softly {Q}Go home{E} and left")
+    assert not m(f"singing in its sleep {Q}Twinkle, twinkle, twinkle{E}")  # inner commas
+
+
+def test_mentions_are_narration_and_corrections_still_win():
+    Q, E = "\u201c", "\u201d"
+    paras = [f"{Q}Hello,{E} said Bob.", f"Mao is Chinese for {Q}cat.{E} I knew that."]
+    ch = {"title": "One", "paragraphs": paras, "quotes": []}
+    for pi, t in enumerate(paras):
+        ch["quotes"] += [[f"q{pi}", pi, s, e] for s, e in dz.quote_regions(t)]
+    book = {"chapters": [ch]}
+    chunk = dz.make_chunks(book)[0]
+
+    class FakeLlm:  # the model gets the term wrong
+        async def complete(self, session, system, user, schema, max_tokens=0, **kw):
+            return {"narrator": "Sasaki", "speakers": [],
+                    "quotes": [{"id": "1", "speaker": "Bob", "delivery": "neutral"},
+                               {"id": "2", "speaker": "Sasaki", "delivery": "neutral"}]}
+
+    script = {"characters": {}, "lines": {}, "corrections": {}}
+    result, local = asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, chunk))
+    dz.apply_chunk_result(script, result, local)
+    assert script["lines"]["q1"] == {"speaker": None, "delivery": None, "mention": True}
+    assert script["lines"]["q0"]["speaker"] == dz.find_character(script, "Bob")
+    pub = dz.ScriptStore.public(script)["lines"]
+    assert pub["q1"]["mention"] and "mention" not in pub["q0"]
+
+    # books analysed before: mark_mentions fixes them; a reader's correction still wins
+    script["lines"]["q1"] = {"speaker": dz.find_character(script, "Sasaki"), "delivery": None}
+    assert dz.mark_mentions(book, script) == 1 and script["lines"]["q1"]["speaker"] is None
+    script["corrections"]["q1"] = {"speaker": dz.find_character(script, "Bob")}
+    pub = dz.ScriptStore.public(script)["lines"]
+    assert pub["q1"]["speaker"] == dz.find_character(script, "Bob") and "mention" not in pub["q1"]

@@ -135,6 +135,10 @@ object Dramatization {
         }
         val line = script.lines[qid] ?: return null
         val character = script.character(line.speaker)
+            // Quotations given to the narrator (quoted terms, signs) are read like the narration around them.
+            ?: script.character(script.narratorAt(u.chapter, u.paragraph))?.let { narrator ->
+                return narrator.voice?.let { Voicing(voice = it, delivery = null, speaker = narrator.name) }
+            }
         return Voicing(voice = character?.voice, delivery = line.delivery, speaker = character?.name)
     }
 

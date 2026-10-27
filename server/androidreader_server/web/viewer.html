@@ -43,6 +43,7 @@
   .tag { font-size:12px; border-radius:10px; padding:0 7px; margin:0 3px; white-space:nowrap; vertical-align:1px; cursor:pointer; color:var(--fg); border:1px solid var(--line); }
   .tag i { color:var(--muted); }
   .tag.fix::after { content:" \270E"; }
+  .mention { text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
   .player { position:fixed; bottom:0; left:300px; right:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   dialog { border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); min-width:380px; max-width:560px; }
   dialog label { display:block; margin:8px 0 2px; font-size:13px; color:var(--muted); }
@@ -586,12 +587,26 @@ async function bookView(id) {
         return;
       }
       const line = lines[piece.qid];
+      if (line && line.mention && !line.speaker) {
+        // A quoted term inside the narration ("Chinese for “cat.”"): read and shown as narration.
+        const narrator = chars[narratorAt(ci, pi)];
+        const span = h("span", { class: "nar mention", title: "Quoted term, read as narration. Double-click to change." },
+          ...highlight(piece.text));
+        const idx = units.length;
+        units.push({ text: piece.text, voice: narrator ? narrator.voice : null, delivery: null, el: span, ci, pi, qid: piece.qid });
+        span.addEventListener("click", () => playFrom(idx));
+        span.addEventListener("dblclick", (e) => { e.stopPropagation(); editLine(piece.qid, piece.text); });
+        p.append(span);
+        return;
+      }
       const c = line && line.speaker ? chars[line.speaker] : null;
       const col = line ? color(c ? c.id : null) : "transparent";
       const span = h("span", { class: "q", title: "Click to play from here",
         style: { background: line ? col + "22" : "transparent", boxShadow: `inset 0 -2px 0 ${col}` } }, ...highlight(piece.text));
       const idx = units.length;
-      units.push({ text: piece.text, voice: c ? c.voice : null, delivery: line ? line.delivery : null, el: span, ci, pi, qid: piece.qid });
+      // Quotations given to the narrator (signs, titles) are read in the narration's voice.
+      const nv = line && !c ? chars[narratorAt(ci, pi)] : null;
+      units.push({ text: piece.text, voice: c ? c.voice : nv ? nv.voice : null, delivery: line ? line.delivery : null, el: span, ci, pi, qid: piece.qid });
       span.addEventListener("click", () => playFrom(idx));
       p.append(span);
       // One tag per speaker turn: skip it when the next piece continues the same quotation ("Yes," he said, "I will.").

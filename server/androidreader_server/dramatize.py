@@ -90,6 +90,39 @@ def is_pov_marker(text: str) -> bool:
     return t[:1] in "([<\u3010\u300c" or t[-1:] not in ".!?\u2026\u201d\"'\u2019"
 
 
+_MENTION_SPEECH = re.compile(
+    r"\b(?:said|says|say|saying|asked|asks|replied|replies|answered|cried|cries|shouted|shouts|whispered|muttered|"
+    r"murmured|exclaimed|added|went|go|goes|sang|sing|sings|singing|called|calls|yelled|screamed|began|continued|"
+    r"repeated|remarked|uttered|read|reads|wrote|tell|told)(?:\s+to\s+\w+|\s+\w+ly)?$", re.IGNORECASE)
+
+
+def is_mention(text: str, start: int, end: int) -> bool:
+    """A word or phrase in quotation marks inside a sentence (scare quotes, a term, a name: 'Chinese for
+    "cat."', 'all the "inspections" we did'), not dialogue. It directly follows a word, is short, has no
+    inner punctuation, and is not introduced by a speech verb (old-style 'then said "The fourth."')."""
+    before = text[:start].rstrip()
+    if not before or not before[-1].isalnum():
+        return False
+    inner = text[start:end].strip("\u201c\u201d\"\u2018\u2019\u00ab\u00bb\u300c\u300d ").rstrip(".,")
+    if not inner or len(inner.split()) > 6 or re.search(r"[,!?;:\u2014\u2013\u2026]|\.\S", inner):
+        return False
+    return not _MENTION_SPEECH.search(before)
+
+
+def mark_mentions(book: dict, script: dict) -> int:
+    """Backstop for analysed books: quoted terms ("cat.", "inspections") are narration. Corrections still win."""
+    n = 0
+    for ch in book.get("chapters", []):
+        for qid, p, s, e in ch.get("quotes", []):
+            if is_mention(ch["paragraphs"][int(p)], int(s), int(e)):
+                line = script["lines"].get(qid) or {}
+                if line.get("speaker") is not None or not line.get("mention"):
+                    n += 1
+                script["lines"][qid] = {"speaker": None, "delivery": None, "mention": True}
+    script["mentions_v"] = 1
+    return n
+
+
 def make_chunks(book: dict, max_words: int = 600, runs: list[tuple[int, int, str]] | None = None) -> list[Chunk]:
     """Chunks of about `max_words` with quotations; `runs` (from mixed_tense_runs) adds tense breaks."""
     switches = {(c, p): t for c, p, t in runs or []}
@@ -191,7 +224,7 @@ def slug(name: str) -> str:
 
 SYSTEM_PROMPT = """You label dialogue in novels for a multi-voice audiobook.
 For every numbered quotation [n] in the passage, decide:
-- speaker: who says it, as one name without parentheses. Use the exact roster name for known characters, even when the passage calls them by a nickname or title the roster lists under "also called". If a new character speaks, use the name the text uses for them (e.g. "the Dormouse", "Mrs. Long"); if they are known by a real name and a nickname, give the real name and put the nickname in their aliases. If an unnamed person speaks, describe them briefly ("a footman"). A character's quoted thoughts ("..." thought Alice) belong to that character. Use "NARRATOR" only for quotations nobody speaks or thinks (titles, signs, written notes, quoted words or phrases).
+- speaker: who says it, as one name without parentheses. Use the exact roster name for known characters, even when the passage calls them by a nickname or title the roster lists under "also called". If a new character speaks, use the name the text uses for them (e.g. "the Dormouse", "Mrs. Long"); if they are known by a real name and a nickname, give the real name and put the nickname in their aliases. If an unnamed person speaks, describe them briefly ("a footman"). A character's quoted thoughts ("..." thought Alice) belong to that character. Use "NARRATOR" only for quotations nobody speaks or thinks aloud at that moment: titles, signs, written notes, and words or phrases set in quotation marks inside a sentence (a term, a nickname, scare quotes: the so-called "experts"; what she calls "fun"; French for "dog."; his "plan" failed). Such quoted terms are part of the narration and are NARRATOR even in first-person passages and even when the text says who coined the word.
 - delivery: how an actor should perform the line, 1-4 lowercase words such as "shouting, urgent", "whispering", "sarcastic", "tearful", "excited", "nervous", "cold, angry", "teasing", "calm". Use "neutral" when nothing special is called for. Base it on speech verbs and adverbs near the quote ("she shrieked", "he said softly"), punctuation and context.
 Rules: in a back-and-forth conversation without speech tags, speakers usually alternate. A number appearing twice marks one quotation interrupted by narration ("Yes," [3] he said, [3] "I will."): label it once. Never change the text; label each number once, in order, giving the first two or three words of its quotation in "starts" so you keep your place. If several characters speak together, give the main one.
 First-person narration: when the story is told by "I", every line the narrator speaks ("...," I said / I asked / I replied, or "I" answering in a conversation) belongs to the narrating character, so give that character's name (never "I", and never another character). Work out who "I" is from the text and the narrator given for the previous passage; chapter titles such as "(Mary's POV)" mean that character narrates. Report the narrator in "narrator" (their name, or "third person" if the passage is not told by "I").
@@ -398,6 +431,8 @@ class ScriptStore:
         lines = {}
         for qid, line in script.get("lines", {}).items():
             lines[qid] = {"speaker": line.get("speaker"), "delivery": line.get("delivery"), "corrected": False}
+            if line.get("mention") and line.get("speaker") is None:
+                lines[qid]["mention"] = True  # a quoted term inside narration, not dialogue
         for qid, fix in script.get("corrections", {}).items():
             base = lines.get(qid, {"speaker": None, "delivery": None})
             lines[qid] = {
@@ -826,6 +861,8 @@ def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) 
         speaker = resolve_speaker(script, q.get("speaker", ""), narrator)
         for qid in qids:
             script["lines"][qid] = {"speaker": speaker, "delivery": delivery}
+            if q.get("mention"):
+                script["lines"][qid]["mention"] = True
             n += 1
     return n
 
@@ -1035,6 +1072,13 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
             raise
         result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget * 3,
                                     **extra)
+    # Backstop for the prompt rule: a quoted term inside a sentence is narration.
+    paras = book["chapters"][chunk.chapter]["paragraphs"]
+    spans = {q[0]: q for q in chunk.quotes}
+    for q in result.get("quotes", []):
+        ids = local.get(str(q.get("id"))) or []
+        if ids and all(is_mention(paras[spans[i][1]], spans[i][2], spans[i][3]) for i in ids):
+            q.update(speaker=NARRATOR, delivery="neutral", mention=True)
     return result, local
 
 
@@ -1542,12 +1586,16 @@ async def get_script(request: web.Request) -> web.Response:
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     s = store.script(book_id)
-    if s.get("status") == "done" and "narration" not in s:  # analysed before narration existed
+    if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1):
         async with store.lock(book_id):
             s = store.script(book_id)
             book = store.book(book_id)
-            reconcile_narrators(book, s)
-            refresh_narration(store, book_id, s)
+            if "narration" not in s:  # analysed before narration existed
+                reconcile_narrators(book, s)
+                refresh_narration(store, book_id, s)
+            if s.get("mentions_v") != 1:  # analysed before quoted terms were told apart from dialogue
+                n = mark_mentions(book, s)
+                logger.info("%s: %d quoted terms given back to the narration", book_id, n)
             store.save_script(book_id, s)
     return web.json_response(with_voice_versions(request.app, ScriptStore.public(s)))
 

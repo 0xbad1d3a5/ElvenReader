@@ -334,6 +334,17 @@ character from run to run, with either setting.
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
 `"gpu"` and `"cpu"` force one or the other.
 
+**Quoted terms are narration.** Words in quotation marks inside a sentence (*Chinese for “cat.”*,
+*all the “inspections” we did*, *labelled “DRINK ME,”*) are not dialogue. The prompt says so
+explicitly. In first-person books the model used to give them to the narrating character: 11–13
+of 18 right in *Sasaki and Peeps* v10, 16–17 with the new wording. A rule backs it up: a short
+quote straight after a word, with no punctuation inside and no speech verb before it ("then said
+“The fourth.”" stays dialogue). Such quotes are read in the narration's voice and shown as plain text
+(dotted underline) in the viewer; double-click one to give it to a speaker. Books analysed earlier
+are fixed when the server opens them. Quotations given to the narrator (signs, notes) are also
+read in the narration's voice, so in first-person passages they no longer switch to a different
+voice mid-sentence.
+
 **First-person books.** Many novels (and most light novels) are told by "I". The model reports
 each passage's narrator, the next passage is told who "I" was, and a point-of-view heading such as
 *(The Neighbor's POV)* starts a new passage with an explicit "the narrator changes here". The
