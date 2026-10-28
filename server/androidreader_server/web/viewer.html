@@ -33,6 +33,10 @@
   .char .sw { width:12px; height:12px; border-radius:3px; flex:none; }
   .char .nm { flex:1; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .char button { padding:1px 6px; font-size:12px; }
+  .char select.role { padding:0 2px; font-size:11.5px; width:4.6em; }
+  .char select.role.mine { border-color:var(--accent); color:var(--accent); }
+  details.tier > summary { cursor:pointer; font-size:12.5px; font-weight:600; color:var(--muted); margin:8px 0 2px; }
+  .q.dim { opacity:.35; background:none !important; box-shadow:none !important; }
   main { overflow:auto; padding:20px 40px 120px; }
   main .text { max-width:780px; margin:auto; font-size:17px; line-height:1.75; }
   .text h2 { font-size:22px; } .text h4 { margin:26px 0 6px; color:var(--muted); font-size:13px; }
@@ -207,7 +211,7 @@ function playUrl(url) { if (url) { sharedPlayer.pause(); sharedPlayer.src = url;
 async function playPath(path) { playUrl(await authBlobUrl(path)); }
 const usedByText = (v, limit = 8) => {
   if (!v.used_by.length) return "nobody";
-  const names = v.used_by.map(u => u.default ? u.name : `${u.name} (${u.title || u.book})`);
+  const names = v.used_by.map(u => u.default ? u.name : `${u.name} (${[u.role, u.title || u.book].filter(Boolean).join(", ")})`);
   return names.length > limit ? names.slice(0, limit).join(", ") + ` and ${names.length - limit} more` : names.join(", ");
 };
 
@@ -448,6 +452,7 @@ async function bookView(id) {
     id, book: null, script: null, voices: [], engines: [], chapter: 0, filterChar: "", search: "",
     narrator: localStorage.getItem("narrator:" + id) || "", engine: localStorage.getItem("engine:" + id) || "",
     units: [], playing: -1, audio: new Audio(), fetches: new Map(), session: null, pictures: {},
+    tierHi: localStorage.getItem("tierHi") || "",
   };
   const app = $("#app");
   app.replaceChildren(h("p", { style: { padding: "20px" } }, "Loading\u2026"));
@@ -482,12 +487,20 @@ async function bookView(id) {
       h("h1", {}, st.book.title), h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
       h("a", { href: "/books/voices" }, "Voices"),
       h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),
-      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); } })),
+      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); } }),
+      h("select", { id: "tierHi", title: "Colour only the lines of these characters",
+        onchange: (e) => { st.tierHi = e.target.value; localStorage.setItem("tierHi", st.tierHi); renderText(); } },
+        h("option", { value: "" }, "Highlight everyone"), h("option", { value: "main" }, "Highlight main only"),
+        h("option", { value: "main,supporting" }, "Highlight main + supporting"))),
     h("div", { class: "layout" },
       h("aside", {},
         h("h3", {}, "Chapters"), h("div", { id: "chapters" }),
         h("h3", {}, "Cast"), h("p", { class: "small muted" }, "Click a name to see all their lines."), h("div", { id: "cast" }),
         h("p", {}, h("button", { onclick: castVoices }, "Create missing voices")),
+        h("p", {}, h("button", { title: "Supporting characters who share a pooled voice get a designed voice of their own",
+          onclick: () => castVoices({ own_voices_for: ["supporting"] }) }, "Give supporting characters their own voices")),
+        h("p", {}, h("button", { title: "Ask the LLM to sort the cast into main, supporting and extras (your choices are kept)",
+          onclick: sortCast, id: "sortBtn" }, "Sort cast into tiers")),
         h("p", {}, h("button", { title: "Label every line again using the dossiers as they are now (after your edits)",
           onclick: relabel }, "Re-label lines with the dossiers")),
         h("p", { class: "small muted", id: "seriesInfo" })),
@@ -513,8 +526,37 @@ async function bookView(id) {
     }));
   }
 
+  const TIERS = [["main", "Main"], ["supporting", "Supporting"], ["extra", "Extras"], ["", "Not sorted yet"]];
+  const tierOf = (c) => c && TIERS.some(([k]) => k && k === c.role) ? c.role : "";
+  const castOpen = { main: true, supporting: true, extra: false, "": true };
+
+  function roleSelect(c) {
+    const sel = h("select", { class: "role" + (c.role_user ? " mine" : ""),
+      title: (c.role_user ? "Your choice" : `Automatic (${c.role_source || "rules"})`) + (c.role_note ? ": " + c.role_note : "")
+        + (c.role_flag ? `\n\u26A0 ${c.role_flag}` : "") + "\nChange the tier",
+      onchange: async (e) => {
+        await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, { role: e.target.value || null }); await reloadScript();
+      } },
+      h("option", { value: "" }, "auto"), h("option", { value: "main" }, "main"),
+      h("option", { value: "supporting" }, "supp."), h("option", { value: "extra" }, "extra"));
+    sel.value = c.role_user || "";
+    return sel;
+  }
+
   function renderCast() {
-    $("#cast").replaceChildren(...st.script.characters.map(c => h("div", { class: "char" },
+    const groups = TIERS.map(([key, label]) => {
+      const members = st.script.characters.filter(c => tierOf(c) === key);
+      if (!members.length) return null;
+      const d = h("details", { class: "tier" }, h("summary", {}, `${label} (${members.length})`), ...members.map(castRow));
+      d.open = castOpen[key];
+      d.addEventListener("toggle", () => { castOpen[key] = d.open; });
+      return d;
+    });
+    $("#cast").replaceChildren(...nonNull(groups));
+  }
+
+  function castRow(c) {
+    return h("div", { class: "char" },
       h("span", { class: "sw", style: { background: color(c.id) } }),
       h("span", { class: "nm", title: [c.name, ...(c.aliases || [])].join(" / ") + (c.description ? "\n" + c.description : ""),
         onclick: () => { st.filterChar = st.filterChar === c.id ? "" : c.id; $("#charFilter").value = st.filterChar; renderText(); } },
@@ -524,8 +566,24 @@ async function bookView(id) {
         book: st.id, character: c.id, characterName: c.name,
         onChange: async () => { flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); },
       }) }, "\uD83C\uDF99") : null,
+      roleSelect(c),
+      c.role_flag && !c.role_user ? h("span", { title: c.role_flag, class: "small" }, "\u26A0") : null,
       h("button", { title: "Character dossier: what the book says about them", onclick: () => editDossier(c) }, "\uD83D\uDCC7"),
-      h("button", { title: "Rename, merge or change voice", onclick: () => editCharacter(c) }, "\u270E"))));
+      h("button", { title: "Rename, merge or change voice", onclick: () => editCharacter(c) }, "\u270E"));
+  }
+
+  async function sortCast() {
+    const btn = $("#sortBtn");
+    try { await api("POST", `/api/books/${st.id}/roles`, {}); } catch (e) { alert(e.message); return; }
+    btn.disabled = true; btn.textContent = "Sorting the cast\u2026";
+    const poll = async () => {
+      st.script = await get(`/api/books/${st.id}/script`);
+      if ((st.script.roles_state || {}).running) { setTimeout(poll, 3000); return; }
+      btn.disabled = false; btn.textContent = "Sort cast into tiers";
+      if ((st.script.roles_state || {}).error) alert("Sorting failed: " + st.script.roles_state.error);
+      renderAll();
+    };
+    poll();
   }
 
   function renderSelectors() {
@@ -533,6 +591,7 @@ async function bookView(id) {
     cf.replaceChildren(h("option", { value: "" }, "All speakers"), h("option", { value: "__narrator__" }, "Quotes given to the narrator"),
       ...st.script.characters.map(c => h("option", { value: c.id }, `${c.name} (${c.lines})`)));
     cf.value = st.filterChar;
+    $("#tierHi").value = st.tierHi;
     const nv = $("#narrator");
     nv.replaceChildren(h("option", { value: "" }, "Server default (" + voiceName(st.defaultVoice) + ")"),
       ...st.voices.filter(v => v.source !== "character").map(v => h("option", { value: v.id }, v.name)));
@@ -605,7 +664,8 @@ async function bookView(id) {
       const line = lines[piece.qid];
       const c = line && line.speaker ? chars[line.speaker] : null;
       const col = line ? color(c ? c.id : null) : "transparent";
-      const span = h("span", { class: "q", title: "Click to play from here",
+      const dim = st.tierHi && line && !st.tierHi.split(",").includes(c ? tierOf(c) : "main");
+      const span = h("span", { class: "q" + (dim ? " dim" : ""), title: "Click to play from here",
         style: { background: line ? col + "22" : "transparent", boxShadow: `inset 0 -2px 0 ${col}` } }, ...highlight(piece.text));
       const idx = units.length;
       // Quotations given to the narrator (signs, titles) are read in the narration's voice.
@@ -831,6 +891,9 @@ async function bookView(id) {
     const revisions = (model.revisions || []).map(r => h("li", { class: "small" }, r.note));
     dialog(`${c.name} \u2014 dossier`, [
       h("p", { class: "small muted" }, "From reading the whole book. Your edits win over the model's and are used when lines are re-labelled and voices designed."),
+      h("p", { class: "small" }, "Tier: ", h("b", {}, (TIERS.find(([k]) => k === tierOf(c)) || TIERS[3])[1]),
+        c.role_user ? " (your choice)" : c.role_source ? ` (${c.role_source})` : "", c.role_note ? " \u2014 " + c.role_note : "",
+        c.role_flag ? h("span", { class: "muted" }, ` \u26A0 ${c.role_flag}`) : null, " ", roleSelect(c)),
       h("label", {}, "Also called (comma separated)"), aliases, ...fields,
       facts.length ? h("div", {}, h("h4", {}, "Evidence"), h("ul", {}, ...facts)) : null,
       revisions.length ? h("div", {}, h("h4", {}, "Changed its mind"), h("ul", {}, ...revisions)) : null,
@@ -870,8 +933,9 @@ async function bookView(id) {
       } }, "Change"));
   }
 
-  async function castVoices() {
-    try { await api("POST", `/api/books/${st.id}/cast`, {}); } catch (e) { alert(e.message); return; }
+  async function castVoices(body = {}) {
+    if (body instanceof Event) body = {};
+    try { await api("POST", `/api/books/${st.id}/cast`, body); } catch (e) { alert(e.message); return; }
     const poll = async () => {
       st.script = await get(`/api/books/${st.id}/script`);
       renderStatus();

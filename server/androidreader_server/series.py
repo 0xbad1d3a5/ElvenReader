@@ -95,9 +95,23 @@ def seed(app: web.Application, book_id: str, script: dict) -> int:
             c["voice"] = entry["voice"]
         if entry.get("description") and not c.get("description"):
             c["description"] = entry["description"]
+        if entry.get("role"):  # a floor: the volume's own read can raise the tier, not lower it
+            c["role_series"] = entry["role"]
+            c.setdefault("role", entry["role"])
+        if entry.get("role_user") and not c.get("role_user"):
+            c["role_user"] = c["role"] = entry["role_user"]
         c["from_series"] = name
         n += 1
     return n
+
+
+def _higher(new: str | None, old: str | None, user: bool = False) -> str | None:
+    """The series' tier for a character: the reader's choice, otherwise the highest tier seen so far."""
+    from .roles import RANK
+
+    if user or old not in RANK:
+        return new if new in RANK else old
+    return new if new in RANK and RANK[new] > RANK[old] else old
 
 
 def remember(app: web.Application, book_id: str, only: str | None = None) -> str:
@@ -122,7 +136,7 @@ def remember(app: web.Application, book_id: str, only: str | None = None) -> str
     for cid, c in s["characters"].items():
         if only and cid != only:
             continue
-        if not only and lines.get(cid, 0) < MIN_LINES and not c.get("user"):
+        if not only and lines.get(cid, 0) < MIN_LINES and not c.get("user") and c.get("role") != "main":
             continue
         key = by_name.get(norm_name(c["name"])) or next(
             (by_name[norm_name(a)] for a in c.get("aliases", []) if norm_name(a) in by_name), cid)
@@ -138,8 +152,16 @@ def remember(app: web.Application, book_id: str, only: str | None = None) -> str
             "dossier": dossier or old.get("dossier", {}),
             "dossier_user": {**old.get("dossier_user", {}), **(c.get("dossier_user") or {})},
             "voice": c.get("voice") or old.get("voice"),
+            # Tiers from other volumes are a floor; this volume's own earlier tier is simply replaced.
+            "role": _higher(c.get("role_user") or c.get("role_auto") or c.get("role"),
+                            old.get("role") if others else None, user=bool(c.get("role_user"))),
+            "role_user": c.get("role_user"),
             "books": sorted(set(old.get("books", [])) | {book_id}),
         }
+        if not series["characters"][key]["role"]:
+            series["characters"][key].pop("role")
+        if not series["characters"][key]["role_user"]:
+            series["characters"][key].pop("role_user")
     app[SERIES_KEY].save(series)
     return name
 

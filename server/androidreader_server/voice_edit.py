@@ -138,7 +138,8 @@ def voice_usage(app: web.Application) -> dict[str, list[dict]]:
             for cid, c in store.script(book_id).get("characters", {}).items():
                 if c.get("voice"):
                     out.setdefault(c["voice"], []).append(
-                        {"book": book_id, "title": title, "character": cid, "name": c.get("name", cid)})
+                        {"book": book_id, "title": title, "character": cid, "name": c.get("name", cid),
+                         "role": c.get("role")})
     default = app[CONFIG_KEY].default_voice
     if default:
         out.setdefault(default, []).append({"default": True, "name": "Default reader voice"})

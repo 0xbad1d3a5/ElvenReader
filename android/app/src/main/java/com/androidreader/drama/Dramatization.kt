@@ -33,6 +33,8 @@ data class Character(
     val description: String,
     val voice: String?,
     val lines: Int,
+    /** "main", "supporting", "extra", or null when the server has not sorted the cast. */
+    val role: String? = null,
 )
 
 data class Line(val speaker: String?, val delivery: String?, val corrected: Boolean)
@@ -85,6 +87,7 @@ data class BookScript(
                         description = c.optString("description"),
                         voice = c.optStringOrNull("voice"),
                         lines = c.optInt("lines"),
+                        role = c.optStringOrNull("role"),
                     )
                 },
                 lines = lines.keys().asSequence().associateWith { k ->

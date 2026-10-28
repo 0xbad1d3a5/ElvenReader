@@ -190,7 +190,18 @@ fun CastScreen(bookId: String, onBack: () -> Unit) {
                     busy?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                 }
             }
-            items(script?.characters?.sortedByDescending { it.lines } ?: emptyList(), key = { it.id }) { c ->
+            // Grouped like the PC viewer: main, supporting, extras (by lines within each).
+            val tiers = listOf("main" to "Main", "supporting" to "Supporting", "extra" to "Extras", null to "Not sorted yet")
+            val chars = script?.characters ?: emptyList()
+            for ((tier, label) in tiers) {
+                val members = chars.filter { c -> if (tier == null) c.role !in setOf("main", "supporting", "extra") else c.role == tier }
+                    .sortedByDescending { it.lines }
+                if (members.isEmpty()) continue
+                item(key = "tier-$label") {
+                    Text("$label (${members.size})", style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp))
+                }
+                items(members, key = { it.id }) { c ->
                 ListItem(
                     headlineContent = { Text(c.name) },
                     supportingContent = {
@@ -200,6 +211,7 @@ fun CastScreen(bookId: String, onBack: () -> Unit) {
                     modifier = Modifier.clickable { selected = c },
                 )
                 HorizontalDivider()
+                }
             }
         }
     }

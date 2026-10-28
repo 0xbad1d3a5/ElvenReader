@@ -97,6 +97,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
 | `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
 | `voice_design_engine` | `qwen3tts` | Creates character voices. |
+| `cast_supporting_voices` | `12` | How many supporting characters (most lines first) get a designed voice of their own; main characters and narrators always do, extras share pool voices. |
 
 Environment overrides: `ANDROIDREADER_PORT`, `ANDROIDREADER_HOST`, `ANDROIDREADER_TOKEN`,
 `ANDROIDREADER_DATA`, `ANDROIDREADER_MODELS`. Every request is logged with its engine, audio
@@ -217,11 +218,44 @@ the quotations it found (with stable IDs) to the PC, which analyses it in the ba
 3. **Roster pass:** gender, apparent age (how old they look and sound, not their true age),
    accent, temperament and a voice description per main character, from their lines and the
    narration's descriptions of them.
-4. **Cast:** *Cast → Create voices* designs a voice for each main character (Qwen3-TTS
-   VoiceDesign) and locks it as a cloned reference so it stays consistent; minor characters share
-   a small pool of voices by gender and age. Any character can be renamed, merged with an alias
-   (*Lizzy* = *Elizabeth*) or given any voice.
+4. **Cast:** after the lines, the LLM sorts the characters into three tiers (see *Character
+   tiers* below): **main**, **supporting** and **extras**. *Cast → Create voices* designs a voice
+   (Qwen3-TTS VoiceDesign) for every main character and narrator and for up to
+   `cast_supporting_voices` (12) supporting characters, most lines first. Each designed voice is
+   locked as a cloned reference so it stays consistent. Extras share a small pool of voices by
+   gender and age. Any character can be renamed, merged with an alias (*Lizzy* = *Elizabeth*),
+   moved to another tier or given any voice.
 5. Long-press a quotation → **Change speaker or delivery**. Corrections always win over the model.
+
+**Character tiers.**
+* **Main:** the protagonists and core recurring cast, plus anyone who narrates.
+* **Supporting:** recurring, named characters with a real presence.
+* **Extras:** walk-ons, meaning anyone unnamed ("a prisoner") or a named character seen in only
+  one chapter.
+
+The model gets per-character evidence: line count and share, chapters where they speak or are
+mentioned, first and last appearance, named or not, narrating, and the description. Rules back
+it up:
+* A narrator is always main.
+* An unnamed character is an extra unless they speak at least 5% of the lines.
+* Nobody with at least 5% of the lines is an extra.
+* An answer far from the line counts is flagged (⚠ in the viewer).
+
+Your choice always wins. The series memory keeps tiers: a character who was main in an earlier
+volume stays at least main in the next one, and your choices carry over.
+
+Books analysed before tiers existed get rule-based tiers when opened; *Sort cast into tiers*
+(viewer) or `POST /api/books/{id}/roles` asks the LLM, in about 45 seconds, without re-labelling.
+On *Sasaki and Peeps* v10:
+* **Main:** Sasaki, Yingling, Futarishizuka, Captain Mason, Suiran, Hoshizaki, Type Twelve,
+  Peeps and the Neighbor.
+* **Supporting:** Akutsu, Prince Lewis, Lady Elsa, Abaddon, Count Müller, Miss Inukai and
+  Magical Pink.
+* **Extras:** the prisoner, robber, guard, driver and other walk-ons, plus Nick, Mr. Joseph and
+  Michael, who speak in only one chapter.
+
+Two runs agreed except on Magical Pink (supporting or extra). The labelling prompt already lists
+the roster by line count, so it was not changed.
 
 Lines are voiced as soon as their chunk is analysed. Delivery is applied by engines that support
 it (Fish S2 Pro: inline tag; IndexTTS: emotion; OmniVoice: laughter/sigh only); others read the
@@ -487,7 +521,12 @@ The viewer has:
 * **Book:** chapters in reading order, with the book's illustrations (click one to open it full
   size); quotations coloured by speaker with the speaker's name and
   delivery (*shouting, urgent*); ✎ marks your corrections.
-* **Cast panel:** characters with aliases, line counts and voices; ▶ plays the voice sample. Click a
+* **Cast panel:** characters grouped as **Main / Supporting / Extras** (Extras folded), with
+  aliases, line counts and voices; ▶ plays the voice sample. Each character has a tier dropdown
+  (*auto* or your choice; hover for the model's reason). *Highlight main only* (or *main +
+  supporting*) dims everyone else's lines. *Give supporting characters their own voices* replaces
+  their shared pool voices. *Sort cast into tiers* asks the LLM again. Tiers also appear in the
+  dossier (📇) and in the Voices page's *Used by* lists. Click a
   name to list all of that character's lines across the book (or use the speaker filter, which
   also offers *quotes given to the narrator*); search finds text.
 * **Playback:** click any line or narration to play from there through the chapter with each
@@ -560,7 +599,8 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |
 | `GET /api/books/{id}/pictures` · `GET`/`PUT /api/books/{id}/picture?path=` | The book's pictures the server has and still needs · one picture (by its path in the EPUB; only pictures the book's text refers to). The phone and `process_book.py` upload them for the viewer. |
 | `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`, `reanalyze`, optional base64 `cover`), dramatization status and lines. |
-| `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice/`dossier`/`aliases`, create character voices. |
+| `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice/`dossier`/`aliases`/`role` (`main`, `supporting`, `extra`; `null` = automatic), create character voices (`{"own_voices_for": ["supporting"]}` also replaces those tiers' pool voices). |
+| `POST /api/books/{id}/roles` | Sort the cast into tiers with the LLM (no re-labelling); progress in the script's `roles_state`. |
 | `POST /api/books/{id}/characters/{id}/voice-from-dossier` · `POST /api/books/{id}/analyze` `{relabel\|reanalyze}` | New voice from the dossier · label lines again (keep dossiers) or analyse from scratch (user edits kept). |
 | `GET /api/series` · `POST /api/books/{id}/series` `{series?}` | Series casts · set a book's series and store its cast there. |
 | `GET /pair` · `GET /` · `GET /books[/{id}]` | Pairing page (token in the URL fragment) · QR codes for pairing and the viewer (PC only) · book viewer (any address; asks for the token unless opened on the PC). |

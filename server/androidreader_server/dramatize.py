@@ -501,6 +501,8 @@ class ScriptStore:
             "lines": lines,
             # [chapter, first paragraph, character id or None]: who narrates from there on.
             "narration": script.get("narration", []),
+            # Sorting the cast into tiers: {"running": true} / {"done": true, ...} / {"error": "..."}.
+            "roles_state": script.get("roles_state"),
         }
 
 
@@ -1448,14 +1450,26 @@ class Analyzer:
             self.store.save_script(book_id, s)
         s = self.store.script(book_id)
         await self._gpu(lambda: describe_cast(self.llm, session, book, s))
+        from . import roles
+
+        s["narration"] = compute_narration(book, s)  # so narrators count as main
+        try:
+            await self._gpu(lambda: roles.classify(self.llm, session, book, s))
+        except LlmError as exc:
+            logger.warning("sorting the cast failed (%s); using the line counts", exc)
+            roles.apply_rules(book, s)
         if self.llm.running_gpu:
             await self.llm.stop()  # give the GPU back to TTS
         async with self.store.lock(book_id):
             fresh = self.store.script(book_id)
             for cid, c in s["characters"].items():
                 if cid in fresh["characters"]:
-                    for k in ("gender", "age", "accent", "temperament", "appearance", "description"):
+                    for k in ("gender", "age", "accent", "temperament", "appearance", "description",
+                              "role_auto", "role_source", "role_note", "role_flag"):
                         fresh["characters"][cid][k] = c.get(k, fresh["characters"][cid].get(k))
+                    f = fresh["characters"][cid]
+                    f["role"] = f.get("role_user") if f.get("role_user") in roles.ROLES else f.get("role_auto")
+            fresh["roles_state"] = s.get("roles_state")
             fresh.update(status="done", progress=1.0,
                          detail=f"{len(fresh['lines'])} lines in {time.perf_counter() - t0:.0f}s")
             fresh.setdefault("stats", {})["seconds"] = round(time.perf_counter() - t0, 1)
@@ -1541,21 +1555,40 @@ def character_description(c: dict) -> str:
     return ", ".join(p for p in parts if p and p != "unknown") or "an adult speaker with a natural voice"
 
 
-async def cast_voices(app: web.Application, book_id: str, engine: str, main_lines: int = 5) -> dict:
-    """Design voices for main characters without one; minor ones get pool voices."""
-    from .app import VOICES_KEY, design_voice
+def own_voice_plan(s: dict, supporting_budget: int, main_lines: int = 5) -> set[str]:
+    """Who gets a designed voice of their own: main characters and narrators always, supporting characters
+    (most lines first) while the budget lasts, extras never. Books without tiers: anyone with
+    `main_lines` lines or more."""
+    public = ScriptStore.public(s)
+    lines_by = {c["id"]: c["lines"] for c in public["characters"]}
+    narrators = {who for _, _, who in s.get("narration", []) if who}
+    own = set()
+    supporting = sorted((cid for cid, c in s["characters"].items() if c.get("role") == "supporting"), key=lambda k: -lines_by.get(k, 0))
+    budget = {cid for cid in supporting[:max(0, supporting_budget)] if lines_by.get(cid, 0) > 0}
+    for cid, c in s["characters"].items():
+        role = c.get("role")
+        if cid in narrators or role == "main" or cid in budget or (not role and lines_by.get(cid, 0) >= main_lines):
+            own.add(cid)
+    return own
+
+
+async def cast_voices(app: web.Application, book_id: str, engine: str, main_lines: int = 5,
+                      upgrade_roles: set[str] | None = None) -> dict:
+    """Design voices for characters without one (see own_voice_plan); the others get pool voices.
+    `upgrade_roles` also gives characters of those tiers who share a pool voice one of their own."""
+    from .app import CONFIG_KEY, VOICES_KEY, design_voice
 
     store: ScriptStore = app[DRAMA_STORE_KEY]
     voices = app[VOICES_KEY]
     s = store.script(book_id)
-    public = ScriptStore.public(s)
-    lines_by = {c["id"]: c["lines"] for c in public["characters"]}
-    narrators = {who for _, _, who in s.get("narration", []) if who}
+    own = own_voice_plan(s, app[CONFIG_KEY].cast_supporting_voices, main_lines)
     created = []
     for cid, c in s["characters"].items():
-        if c.get("voice") and voices.get(c["voice"]):
+        pooled = (c.get("voice") or "").startswith("pool-")
+        upgrade = bool(upgrade_roles) and c.get("role") in upgrade_roles and pooled
+        if c.get("voice") and voices.get(c["voice"]) and not upgrade:
             continue
-        if lines_by.get(cid, 0) >= main_lines or cid in narrators:
+        if cid in own or upgrade:
             vid = f"ch-{book_id[:8]}-{cid}"[:64]
             v = voices.get(vid) or await design_voice(
                 app, engine, character_description(c), c["name"], source="character", voice_id=vid,
@@ -1573,8 +1606,9 @@ async def cast_voices(app: web.Application, book_id: str, engine: str, main_line
     async with store.lock(book_id):
         fresh = store.script(book_id)
         for cid, c in s["characters"].items():
-            if cid in fresh["characters"] and not fresh["characters"][cid].get("voice"):
-                fresh["characters"][cid]["voice"] = c.get("voice")
+            f = fresh["characters"].get(cid)
+            if f is not None and (not f.get("voice") or (f["voice"].startswith("pool-") and c.get("voice", "").startswith("ch-"))):
+                f["voice"] = c.get("voice")
         store.save_script(book_id, fresh)
     return {"created": created}
 
@@ -1786,7 +1820,8 @@ async def get_script(request: web.Request) -> web.Response:
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     s = store.script(book_id)
-    if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1):
+    if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
+                                      or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))):
         async with store.lock(book_id):
             s = store.script(book_id)
             book = store.book(book_id)
@@ -1796,6 +1831,10 @@ async def get_script(request: web.Request) -> web.Response:
             if s.get("mentions_v") != 1:  # analysed before quoted terms were told apart from dialogue
                 n = mark_mentions(book, s)
                 logger.info("%s: %d quoted terms given back to the narration", book_id, n)
+            if not any(c.get("role") for c in s["characters"].values()):  # analysed before tiers existed
+                from . import roles
+
+                roles.apply_rules(book, s)
             store.save_script(book_id, s)
     return web.json_response(with_voice_versions(request.app, ScriptStore.public(s)))
 
@@ -1883,6 +1922,10 @@ async def patch_character(request: web.Request) -> web.Response:
                 c["description"] = effective(c)["voice"]
         if isinstance(body.get("aliases"), list):
             c["aliases"] = [a.strip() for a in body["aliases"] if isinstance(a, str) and a.strip()]
+        if "role" in body:
+            from .roles import set_user_role
+
+            set_user_role(c, body["role"])
         c["user"] = True
         target = body.get("merge_into")
         if target and target in s["characters"] and target != cid:
@@ -1939,6 +1982,8 @@ async def cast(request: web.Request) -> web.Response:
     store = request.app[DRAMA_STORE_KEY]
     body = await request.json() if request.can_read_body else {}
     engine = (body or {}).get("engine") or request.app[CONFIG_KEY_REF].voice_design_engine
+    # {"own_voices_for": ["supporting"]}: those tiers' characters that share a pool voice get their own.
+    upgrade = {r for r in (body or {}).get("own_voices_for") or [] if r in ("main", "supporting", "extra")}
     async with store.lock(book_id):
         s = store.script(book_id)
         if s.get("status") == "casting":
@@ -1953,7 +1998,7 @@ async def cast(request: web.Request) -> web.Response:
         from .engines.manager import EngineError
 
         try:
-            result = await cast_voices(request.app, book_id, engine)
+            result = await cast_voices(request.app, book_id, engine, upgrade_roles=upgrade or None)
             detail = f"{len(result['created'])} voices created"
             from .series import remember
 
@@ -2021,3 +2066,6 @@ def setup(app: web.Application) -> None:
     r.add_patch("/api/books/{book}/lines/{line}", patch_line)
     r.add_patch("/api/books/{book}/characters/{character}", patch_character)
     r.add_post("/api/books/{book}/cast", cast)
+    from .roles import classify_route
+
+    r.add_post("/api/books/{book}/roles", classify_route)

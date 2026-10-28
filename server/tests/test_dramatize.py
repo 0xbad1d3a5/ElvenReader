@@ -92,6 +92,11 @@ async def drama_client(aiohttp_client, tmp_path, monkeypatch):
     VoiceStore(tmp_path / "voices").add("Narrator", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="nar")
 
     async def fake_complete(self, session, system, user, schema, max_tokens=2048, **kw):
+        item = (schema["properties"].get("characters") or {}).get("items", {}).get("properties", {})
+        if "role" in item:  # the tier question
+            roles = {"Alice": ("main", "the heroine"), "Tom": ("extra", "one scene")}
+            return {"characters": [{"name": n, "role": roles.get(n, ("extra", ""))[0], "reason": roles.get(n, ("", "?"))[1]}
+                                   for n in item["name"]["enum"]]}
         if "quotes" in schema["properties"]:
             ids = schema["properties"]["quotes"]["items"]["properties"]["id"]["enum"]
             names = {"1": "Alice", "2": "Alice", "3": "Tom", "4": "NARRATOR"}
@@ -732,3 +737,105 @@ def test_later_passages_may_revise_earlier_lines_but_never_corrections():
     assert "[R1]" not in seen[-1][0]  # q0 is now Nick, q1 Sasaki: nothing unnamed left
     asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, later))
     assert "revisions" not in seen[-1][1]["properties"]
+
+
+# ---------------------------------------------------------------- character tiers (main / supporting / extra)
+
+
+def test_tiers_follow_the_model_within_guard_rails_and_the_reader_wins():
+    from androidreader_server import roles
+
+    ev = {"name": "X", "lines": 10, "share": 0.002, "chapters_with_lines": 1, "chapters_mentioned": 1,
+          "first": 1, "last": 1, "named": True, "narrates": False, "chapters": 10}
+    c = {"name": "X"}
+    roles.settle(c, ev, "supporting", "recurring")
+    assert (c["role"], c["role_auto"], c["role_source"], c["role_note"]) == ("supporting", "supporting", "llm", "recurring")
+    roles.settle(c, {**ev, "share": 0.06}, "extra")  # never an extra with 5% of the lines
+    assert c["role"] == "supporting" and "6%" in c["role_note"]
+    roles.settle(c, {**ev, "narrates": True}, "supporting")  # narrators are main
+    assert c["role"] == "main"
+    roles.settle(c, {**ev, "lines": 1, "share": 0.09}, "extra")  # far from the counts: flagged
+    assert c["role"] == "supporting" and c["role_flag"] == "the line counts suggest main"
+    roles.settle(c, {**ev, "named": False}, "supporting")  # unnamed walk-ons are extras
+    assert c["role"] == "extra" and "unnamed" in c["role_note"]
+    roles.settle(c, ev, None)  # no answer: the rules
+    assert c["role"] == "extra" and c["role_source"] == "rule" and "role_flag" not in c
+    c["role_series"] = "main"  # the series keeps a main character main
+    roles.settle(c, ev, "extra")
+    assert c["role"] == "main"
+    roles.set_user_role(c, "extra")  # ...unless the reader says otherwise
+    roles.settle(c, ev, "main")
+    assert c["role"] == "extra" and c["role_auto"] == "main"
+    roles.set_user_role(c, None)
+    assert c["role"] == "main" and "role_user" not in c
+    assert roles.rule_role({**ev, "share": 0.1}) == "main" and roles.rule_role({**ev, "named": False}) == "extra"
+    assert roles.rule_role({**ev, "chapters_with_lines": 2}) == "supporting"
+
+
+def test_casting_plan_by_tier():
+    s = {"characters": {"a": {"name": "A", "role": "main"}, "b": {"name": "B", "role": "supporting"},
+                        "c": {"name": "C", "role": "supporting"}, "d": {"name": "D", "role": "extra"},
+                        "e": {"name": "E"}, "n": {"name": "N", "role": "extra"}},
+         "lines": {**{f"b{i}": {"speaker": "b"} for i in range(3)}, "c1": {"speaker": "c"},
+                   **{f"d{i}": {"speaker": "d"} for i in range(9)}, **{f"e{i}": {"speaker": "e"} for i in range(5)}},
+         "narration": [[0, 0, "n"]]}
+    assert dz.own_voice_plan(s, 1) == {"a", "b", "e", "n"}  # supporting by lines within budget; untiered by count
+    assert dz.own_voice_plan(s, 5) == {"a", "b", "c", "e", "n"}  # extras never, however many lines
+
+
+async def test_tiers_from_analysis_override_series_and_bulk_voices(drama_client):
+    from androidreader_server import series as sr
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    c = drama_client
+    app = c.server.app
+    await c.post("/api/books/vol1", json={**book_payload(), "title": "Tea Saga, Vol. 1", "analyze": True}, headers=AUTH)
+    s = await wait_done(c, "vol1")
+    tiers = {ch["id"]: (ch["role"], ch["role_source"]) for ch in s["characters"]}
+    # the model says extra, but Tom speaks a third of this tiny book's lines: never an extra then
+    assert tiers == {"alice": ("main", "llm"), "tom": ("supporting", "llm")}
+    # the reader's tier wins and survives a re-analysis
+    r = await c.patch("/api/books/vol1/characters/tom", json={"role": "extra"}, headers=AUTH)
+    assert next(ch for ch in (await r.json())["characters"] if ch["id"] == "tom")["role"] == "extra"
+    await c.post("/api/books/vol1/analyze", json={"relabel": True}, headers=AUTH)
+    s = await wait_done(c, "vol1")
+    tom = next(ch for ch in s["characters"] if ch["id"] == "tom")
+    assert (tom["role"], tom["role_user"], tom["role_auto"]) == ("extra", "extra", "supporting")
+    # sorting the cast on its own (no re-labelling) writes the tiers to the series
+    r = await c.post("/api/books/vol1/roles", headers=AUTH)
+    assert r.status == 202
+    for _ in range(100):
+        s = await (await c.get("/api/books/vol1/script", headers=AUTH)).json()
+        if not (s.get("roles_state") or {}).get("running"):
+            break
+        await asyncio.sleep(0.05)
+    assert s["roles_state"].get("done"), s.get("roles_state")
+    assert next(ch for ch in s["characters"] if ch["id"] == "tom")["role"] == "extra"
+    # the series remembers: Alice stays main, Tom keeps the reader's tier
+    entry = (await (await c.get("/api/series", headers=AUTH)).json())["series"][0]["characters"]
+    assert entry["alice"]["role"] == "main" and entry["tom"]["role_user"] == "extra"
+    store = app[DRAMA_STORE_KEY]
+    store.save_book("vol2", {**book_payload(), "title": "Tea Saga, Vol. 2"})
+    s2 = store.script("vol2")
+    sr.seed(app, "vol2", s2)
+    assert s2["characters"]["alice"]["role_series"] == "main" and s2["characters"]["tom"]["role"] == "extra"
+    # bulk "own voices" for supporting characters; tiers on the Voices page
+    await c.patch("/api/books/vol1/characters/tom", json={"role": "supporting"}, headers=AUTH)
+    s1 = store.script("vol1")
+    s1["characters"]["tom"]["voice"] = "pool-male-child"
+    store.save_script("vol1", s1)
+    await c.post("/api/books/vol1/cast", json={"own_voices_for": ["supporting"]}, headers=AUTH)
+    s = await wait_done(c, "vol1")
+    assert next(ch for ch in s["characters"] if ch["id"] == "tom")["voice"].startswith("ch-")
+    v = await (await c.get(f"/api/voices/{next(ch for ch in s['characters'] if ch['id'] == 'alice')['voice']}?details=1",
+                           headers=AUTH)).json()
+    assert any(u.get("role") == "main" for u in v.get("used_by", [])), v
+
+
+def test_series_tier_floor_comes_from_other_volumes_only():
+    from androidreader_server.series import _higher
+
+    assert _higher("extra", "main") == "main"  # main in an earlier volume stays main
+    assert _higher("main", "supporting") == "main"
+    assert _higher("extra", None) == "extra"  # this volume re-sorted: just replaced
+    assert _higher("extra", "main", user=True) == "extra"  # the reader's choice wins

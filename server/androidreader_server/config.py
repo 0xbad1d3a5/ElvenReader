@@ -94,6 +94,9 @@ class ServerConfig:
     llm_reasoning_budget: int = -1
     # Engine used to create character voices from a description.
     voice_design_engine: str = "qwen3tts"
+    # Casting: main characters and narrators always get a designed voice of their own, supporting
+    # characters (most lines first) up to this many, extras share pooled voices.
+    cast_supporting_voices: int = 12
     # Whisper fills in the transcript of new reference audio: the engine venv that has
     # openai-whisper installed, and the model file under <models_dir>.
     whisper_venv: str = "indextts"
