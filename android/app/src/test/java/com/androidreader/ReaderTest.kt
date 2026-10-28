@@ -312,6 +312,17 @@ class EpubParserTest {
 
 class BookScriptTest {
     @Test
+    fun descriptiveNamesAreShownCapitalised() {
+        val d = { n: String -> com.androidreader.drama.displayName(n) }
+        assertEquals("Prisoner", d("a prisoner"))
+        assertEquals("Tattoo Artist", d("the tattoo artist"))
+        assertEquals("Man in the Hat", d("man in the hat"))
+        assertEquals("The Neighbor", d("the Neighbor"))
+        assertEquals("Type Twelve", d("Type Twelve"))
+        assertEquals("Mr. Akutsu", d("Mr. Akutsu"))
+    }
+
+    @Test
     fun narratorFollowsSectionsInReadingOrder() {
         val script = com.androidreader.drama.BookScript.fromJson(org.json.JSONObject(
             """{"status":"done","characters":[],"lines":{},"narration":[[0,0,"sasaki"],[1,90,"neighbor"],[2,0,null]]}""",

@@ -37,6 +37,20 @@ data class Character(
     val role: String? = null,
 )
 
+/**
+ * How a character's name is shown: "a prisoner" -> "Prisoner", "the tattoo artist" -> "Tattoo Artist";
+ * names with deliberate casing ("Type Twelve", "Mr. Akutsu") are unchanged. The server stores names this
+ * way already; this covers scripts cached before it did.
+ */
+fun displayName(name: String): String {
+    val n = name.trim().replace(Regex("\\s+"), " ")
+    if (n.isEmpty() || !n[0].isLetter() || n[0].isUpperCase()) return n
+    val rest = n.replaceFirst(Regex("^(?i)(?:a|an|the)\\s+"), "")
+    if (rest.any { it.isUpperCase() }) return n.replaceFirstChar { it.uppercase() }
+    val small = setOf("of", "in", "on", "at", "to", "and", "or", "the", "a", "an", "for", "with", "from", "by")
+    return rest.split(" ").mapIndexed { i, w -> if (i > 0 && w in small) w else w.replaceFirstChar { it.uppercase() } }.joinToString(" ")
+}
+
 data class Line(val speaker: String?, val delivery: String?, val corrected: Boolean)
 
 /** The server's analysis of a book: who says each quotation and how. */

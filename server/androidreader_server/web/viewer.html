@@ -29,13 +29,35 @@
   aside h3 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:16px 0 6px; }
   .chap { display:block; width:100%; text-align:left; border:0; border-radius:4px; padding:3px 6px; background:none; }
   .chap.on { background:var(--accent); color:#fff; } .chap .cnt { float:right; font-size:12px; opacity:.7; }
-  .char { display:flex; align-items:center; gap:6px; padding:4px 2px; border-bottom:1px solid var(--line); }
-  .char .sw { width:12px; height:12px; border-radius:3px; flex:none; }
-  .char .nm { flex:1; cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .char button { padding:1px 6px; font-size:12px; }
-  .char select.role { padding:0 2px; font-size:11.5px; width:4.6em; }
-  .char select.role.mine { border-color:var(--accent); color:var(--accent); }
-  details.tier > summary { cursor:pointer; font-size:12.5px; font-weight:600; color:var(--muted); margin:8px 0 2px; }
+  .char { display:flex; align-items:center; gap:8px; padding:3px 6px; border-radius:6px; cursor:pointer; min-height:28px; }
+  .char:hover { background:var(--line); } .char.on { box-shadow:inset 0 0 0 1px var(--accent); }
+  .char .sw { width:9px; height:9px; border-radius:50%; flex:none; }
+  .char .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .char .cnt { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+  .char .gap { width:22px; flex:none; }
+  .iconbtn { border:0; background:none; padding:2px 5px; color:var(--muted); line-height:1; border-radius:5px; flex:none; }
+  .iconbtn:hover { color:var(--accent); background:var(--line); }
+  .casthead { display:flex; align-items:center; gap:6px; margin:16px 0 6px; } .casthead h3 { margin:0; flex:1; }
+  #castSearch { width:100%; margin-bottom:4px; }
+  details.tier > summary { cursor:pointer; font-size:12.5px; font-weight:600; color:var(--muted); margin:10px 0 2px; list-style-position:inside; }
+  .menu { position:fixed; z-index:50; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:4px;
+    min-width:250px; max-width:92vw; box-shadow:0 8px 24px #0005; }
+  .menu button { display:block; width:100%; text-align:left; border:0; background:none; padding:6px 10px; border-radius:5px; }
+  .menu button:hover { background:var(--line); } .menu hr { border:0; border-top:1px solid var(--line); margin:4px 0; }
+  .menu .lbl { font-size:12px; color:var(--muted); padding:4px 10px 0; }
+  dialog.drawer { margin:0 0 0 auto; height:100vh; max-height:100vh; width:min(460px,100vw); max-width:100vw; min-width:0;
+    border-radius:0; border:0; border-left:1px solid var(--line); padding:0; }
+  .drawer .dh { position:sticky; top:0; z-index:2; background:var(--card); display:flex; align-items:center; gap:8px;
+    padding:12px 16px; border-bottom:1px solid var(--line); }
+  .drawer .dh h2 { margin:0; font-size:18px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .drawer .dh .sw { width:12px; height:12px; border-radius:50%; flex:none; }
+  .drawer section { padding:10px 16px 14px; border-bottom:1px solid var(--line); }
+  .drawer section h4 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .drawer .rowx { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .drawer .rowx select { width:auto; flex:1; min-width:0; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; padding:4px 12px; background:var(--card); }
+  .seg button + button { border-left:1px solid var(--line); } .seg button.on { background:var(--accent); color:#fff; }
   .q.dim { opacity:.35; background:none !important; box-shadow:none !important; }
   main { overflow:auto; padding:20px 40px 120px; }
   main .text { max-width:780px; margin:auto; font-size:17px; line-height:1.75; }
@@ -65,12 +87,24 @@
   .line input[type=number] { width:6.5em; }
   .banner { background:var(--hl); border-radius:8px; padding:8px 12px; margin:8px 0; }
   table.vt { border-collapse:collapse; width:100%; } table.vt td, table.vt th { border-bottom:1px solid var(--line); padding:6px; text-align:left; vertical-align:top; }
+  .narrowonly { display:none; }
+  @media (max-width: 760px) {
+    .narrowonly { display:inline-block; }
+    header { gap:8px; padding:8px 10px; } header h1 { font-size:15px; } #status, header .grow { display:none; }
+    header #search, header #charFilter { flex:1 1 140px; min-width:0; }
+    .layout { grid-template-columns:1fr; height:auto; }
+    aside { display:none; border-right:0; border-bottom:1px solid var(--line); padding-bottom:16px; }
+    aside.open { display:block; }
+    main { padding:16px 16px 160px; overflow:visible; min-width:0; } body { overflow-x:hidden; } main .text { font-size:16px; }
+    .player { left:0; }
+  }
 </style>
 </head>
 <body>
 <div id="app"></div>
 <dialog id="dlg"></dialog>
 <dialog id="vdlg" class="wide"></dialog>
+<dialog id="cdlg" class="drawer"></dialog>
 <script>
 "use strict";
 const EMBEDDED_TOKEN = __TOKEN__;  // only filled in for requests from the PC itself
@@ -484,25 +518,19 @@ async function bookView(id) {
   app.replaceChildren(
     h("header", {},
       h("a", { href: "/books" }, "\u2190 Books"),
+      h("button", { class: "iconbtn narrowonly", title: "Chapters and cast", onclick: () => $("aside").classList.toggle("open") }, "\u2630"),
       h("h1", {}, st.book.title), h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
       h("a", { href: "/books/voices" }, "Voices"),
       h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),
-      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); } }),
-      h("select", { id: "tierHi", title: "Colour only the lines of these characters",
-        onchange: (e) => { st.tierHi = e.target.value; localStorage.setItem("tierHi", st.tierHi); renderText(); } },
-        h("option", { value: "" }, "Highlight everyone"), h("option", { value: "main" }, "Highlight main only"),
-        h("option", { value: "main,supporting" }, "Highlight main + supporting"))),
+      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); renderCast(); } })),
     h("div", { class: "layout" },
       h("aside", {},
         h("h3", {}, "Chapters"), h("div", { id: "chapters" }),
-        h("h3", {}, "Cast"), h("p", { class: "small muted" }, "Click a name to see all their lines."), h("div", { id: "cast" }),
-        h("p", {}, h("button", { onclick: castVoices }, "Create missing voices")),
-        h("p", {}, h("button", { title: "Supporting characters who share a pooled voice get a designed voice of their own",
-          onclick: () => castVoices({ own_voices_for: ["supporting"] }) }, "Give supporting characters their own voices")),
-        h("p", {}, h("button", { title: "Ask the LLM to sort the cast into main, supporting and extras (your choices are kept)",
-          onclick: sortCast, id: "sortBtn" }, "Sort cast into tiers")),
-        h("p", {}, h("button", { title: "Label every line again using the dossiers as they are now (after your edits)",
-          onclick: relabel }, "Re-label lines with the dossiers")),
+        h("div", { class: "casthead" }, h("h3", {}, "Cast"), h("span", { class: "small muted", id: "castBusy" }),
+          h("button", { class: "iconbtn", title: "Cast actions", onclick: (e) => bookMenu(e.currentTarget) }, "\u22EF")),
+        h("input", { id: "castSearch", type: "search", placeholder: "Find a character\u2026",
+          oninput: (e) => { st.castQuery = e.target.value.trim().toLowerCase(); renderCast(); } }),
+        h("div", { id: "cast" }),
         h("p", { class: "small muted", id: "seriesInfo" })),
       h("main", {}, h("div", { class: "text", id: "text" }))),
     h("div", { class: "player" },
@@ -530,68 +558,78 @@ async function bookView(id) {
   const tierOf = (c) => c && TIERS.some(([k]) => k && k === c.role) ? c.role : "";
   const castOpen = { main: true, supporting: true, extra: false, "": true };
 
-  function roleSelect(c) {
-    const sel = h("select", { class: "role" + (c.role_user ? " mine" : ""),
-      title: (c.role_user ? "Your choice" : `Automatic (${c.role_source || "rules"})`) + (c.role_note ? ": " + c.role_note : "")
-        + (c.role_flag ? `\n\u26A0 ${c.role_flag}` : "") + "\nChange the tier",
-      onchange: async (e) => {
-        await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, { role: e.target.value || null }); await reloadScript();
-      } },
-      h("option", { value: "" }, "auto"), h("option", { value: "main" }, "main"),
-      h("option", { value: "supporting" }, "supp."), h("option", { value: "extra" }, "extra"));
-    sel.value = c.role_user || "";
-    return sel;
-  }
-
   function renderCast() {
+    const q = st.castQuery || "";
+    const hit = (c) => !q || [c.name, ...(c.aliases || [])].some(n => n.toLowerCase().includes(q));
     const groups = TIERS.map(([key, label]) => {
-      const members = st.script.characters.filter(c => tierOf(c) === key);
+      const all = st.script.characters.filter(c => tierOf(c) === key);
+      const members = all.filter(hit);
       if (!members.length) return null;
-      const d = h("details", { class: "tier" }, h("summary", {}, `${label} (${members.length})`), ...members.map(castRow));
-      d.open = castOpen[key];
-      d.addEventListener("toggle", () => { castOpen[key] = d.open; });
+      const d = h("details", { class: "tier" }, h("summary", {}, `${label} (${all.length})`), ...members.map(castRow));
+      d.open = q ? true : castOpen[key];
+      d.addEventListener("toggle", () => { if (!q) castOpen[key] = d.open; });
       return d;
     });
-    $("#cast").replaceChildren(...nonNull(groups));
+    const list = nonNull(groups);
+    $("#cast").replaceChildren(...(list.length ? list : [h("p", { class: "small muted" }, q ? "Nobody matches." : "No characters yet.")]));
   }
 
   function castRow(c) {
-    return h("div", { class: "char" },
+    return h("div", { class: "char" + (st.filterChar === c.id ? " on" : ""), onclick: () => openCharacter(c.id),
+        title: [c.name, ...(c.aliases || [])].join(" / ") + "\nClick for details" },
       h("span", { class: "sw", style: { background: color(c.id) } }),
-      h("span", { class: "nm", title: [c.name, ...(c.aliases || [])].join(" / ") + (c.description ? "\n" + c.description : ""),
-        onclick: () => { st.filterChar = st.filterChar === c.id ? "" : c.id; $("#charFilter").value = st.filterChar; renderText(); } },
-        c.name, h("span", { class: "muted small" }, ` ${c.lines}`)),
-      c.voice ? h("button", { title: "Voice sample: " + voiceName(c.voice), onclick: () => playSample(c.voice) }, "\u25B6") : h("span", { class: "muted small" }, "no voice"),
-      c.voice ? h("button", { title: "Edit voice", onclick: () => openVoiceEditor(c.voice, {
-        book: st.id, character: c.id, characterName: c.name,
-        onChange: async () => { flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); },
-      }) }, "\uD83C\uDF99") : null,
-      roleSelect(c),
-      c.role_flag && !c.role_user ? h("span", { title: c.role_flag, class: "small" }, "\u26A0") : null,
-      h("button", { title: "Character dossier: what the book says about them", onclick: () => editDossier(c) }, "\uD83D\uDCC7"),
-      h("button", { title: "Rename, merge or change voice", onclick: () => editCharacter(c) }, "\u270E"));
+      h("span", { class: "nm" }, c.name), h("span", { class: "cnt" }, c.lines),
+      c.voice ? h("button", { class: "iconbtn", title: "Play voice sample: " + voiceName(c.voice),
+        onclick: (e) => { e.stopPropagation(); playSample(c.voice); } }, "\u25B6") : h("span", { class: "gap", title: "No voice yet" }));
+  }
+
+  /* A small pop-up menu below `anchor`: items are {text, run, title, on}, "-" or {label}. */
+  function popMenu(anchor, items) {
+    document.querySelectorAll(".menu").forEach(m => m.remove());
+    const m = h("div", { class: "menu", role: "menu" }, ...items.map(it => it === "-" ? h("hr")
+      : it.label ? h("div", { class: "lbl" }, it.label)
+      : h("button", { type: "button", title: it.title || "", onclick: () => { m.remove(); it.run(); } },
+          it.on === undefined ? "" : (it.on ? "\u2713 " : "\u2003 "), it.text)));
+    (anchor.closest("dialog") || document.body).append(m);
+    const r = anchor.getBoundingClientRect(), w = m.offsetWidth;
+    m.style.top = Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8) + "px";
+    m.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + "px";
+    const off = (e) => { if (!m.contains(e.target)) { m.remove(); document.removeEventListener("mousedown", off, true); } };
+    setTimeout(() => document.addEventListener("mousedown", off, true));
+  }
+
+  function bookMenu(anchor) {
+    const hi = (value, text) => ({ text, on: st.tierHi === value,
+      run: () => { st.tierHi = value; localStorage.setItem("tierHi", value); renderText(); } });
+    popMenu(anchor, [
+      { text: "Sort cast into tiers", title: "Ask the LLM to sort the cast into main, supporting and extras (your choices are kept)", run: sortCast },
+      { text: "Create missing voices", run: () => castVoices() },
+      { text: "Give supporting characters their own voices", title: "Supporting characters who share a pooled voice get a designed voice of their own",
+        run: () => castVoices({ own_voices_for: ["supporting"] }) },
+      { text: "Re-label lines with the profiles\u2026", title: "Label every line again using the character profiles as they are now", run: relabel },
+      "-", { label: "Highlight lines of" },
+      hi("", "Everyone"), hi("main", "Main characters only"), hi("main,supporting", "Main + supporting"),
+    ]);
   }
 
   async function sortCast() {
-    const btn = $("#sortBtn");
+    const busy = $("#castBusy");
     try { await api("POST", `/api/books/${st.id}/roles`, {}); } catch (e) { alert(e.message); return; }
-    btn.disabled = true; btn.textContent = "Sorting the cast\u2026";
+    busy.textContent = "sorting\u2026";
     const poll = async () => {
       st.script = await get(`/api/books/${st.id}/script`);
       if ((st.script.roles_state || {}).running) { setTimeout(poll, 3000); return; }
-      btn.disabled = false; btn.textContent = "Sort cast into tiers";
+      busy.textContent = "";
       if ((st.script.roles_state || {}).error) alert("Sorting failed: " + st.script.roles_state.error);
       renderAll();
     };
     poll();
   }
-
   function renderSelectors() {
     const cf = $("#charFilter");
     cf.replaceChildren(h("option", { value: "" }, "All speakers"), h("option", { value: "__narrator__" }, "Quotes given to the narrator"),
       ...st.script.characters.map(c => h("option", { value: c.id }, `${c.name} (${c.lines})`)));
     cf.value = st.filterChar;
-    $("#tierHi").value = st.tierHi;
     const nv = $("#narrator");
     nv.replaceChildren(h("option", { value: "" }, "Server default (" + voiceName(st.defaultVoice) + ")"),
       ...st.voices.filter(v => v.source !== "character").map(v => h("option", { value: v.id }, v.name)));
@@ -844,25 +882,6 @@ async function bookView(id) {
     });
   }
 
-  function editCharacter(c) {
-    const name = h("input", { value: c.name });
-    const voice = h("select", {}, h("option", { value: "" }, "No voice (narrator's)"),
-      ...st.voices.map(v => h("option", { value: v.id }, v.name + (v.source === "character" ? " (character)" : ""))));
-    voice.value = c.voice || "";
-    const merge = h("select", {}, h("option", { value: "" }, "Nobody else"),
-      ...st.script.characters.filter(o => o.id !== c.id).map(o => h("option", { value: o.id }, o.name)));
-    dialog(c.name, [
-      c.aliases && c.aliases.length ? h("p", { class: "small muted" }, "Also called: " + c.aliases.join(", ")) : null,
-      c.description ? h("p", { class: "small" }, c.description) : null,
-      h("label", {}, "Name"), name, h("label", {}, "Voice"), voice, h("label", {}, "Same person as\u2026 (merge)"), merge,
-    ], async () => {
-      const body = { name: name.value.trim(), voice: voice.value || null };
-      if (merge.value) body.merge_into = merge.value;
-      await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, body);
-      await reloadScript();
-    });
-  }
-
   const DOSSIER_FIELDS = [
     ["gender", "Gender", ["", "male", "female", "unknown"]],
     ["apparent_age", "Apparent age (what a listener should hear)", ["", "child", "teen", "young adult", "adult", "middle-aged", "elderly", "unknown"]],
@@ -872,48 +891,92 @@ async function bookView(id) {
     ["voice", "Voice description (for designing their voice)"],
   ];
 
-  function editDossier(c) {
-    const model = c.dossier || {}, mine = c.dossier_user || {};
-    const inputs = {};
-    const fields = DOSSIER_FIELDS.map(([key, label, options]) => {
-      const value = mine[key] ?? model[key] ?? "";
-      const el = options
-        ? h("select", {}, ...options.map(o => h("option", { value: o }, o || "\u2014")))
-        : h(key === "voice" ? "textarea" : "input", { rows: key === "voice" ? 3 : undefined, style: { width: "100%" } });
-      el.value = value;
-      inputs[key] = el;
-      return [h("label", {}, label, mine[key] != null ? h("span", { class: "small", style: { color: "var(--accent)" } }, " \u270E edited") : null), el];
-    }).flat();
-    const aliases = h("input", { value: (c.aliases || []).join(", ") });
-    const facts = (model.facts || []).map(f => h("li", { class: "small" }, f.fact, " \u2014 ",
-      h("i", {}, "\u201c" + (f.quote || "") + "\u201d"), " ",
-      Array.isArray(f.at) ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); $("#dlg").close(); gotoChapter(f.at[0]); } }, `ch ${f.at[0] + 1}`) : null));
-    const revisions = (model.revisions || []).map(r => h("li", { class: "small" }, r.note));
-    dialog(`${c.name} \u2014 dossier`, [
-      h("p", { class: "small muted" }, "From reading the whole book. Your edits win over the model's and are used when lines are re-labelled and voices designed."),
-      h("p", { class: "small" }, "Tier: ", h("b", {}, (TIERS.find(([k]) => k === tierOf(c)) || TIERS[3])[1]),
-        c.role_user ? " (your choice)" : c.role_source ? ` (${c.role_source})` : "", c.role_note ? " \u2014 " + c.role_note : "",
-        c.role_flag ? h("span", { class: "muted" }, ` \u26A0 ${c.role_flag}`) : null, " ", roleSelect(c)),
-      h("label", {}, "Also called (comma separated)"), aliases, ...fields,
-      facts.length ? h("div", {}, h("h4", {}, "Evidence"), h("ul", {}, ...facts)) : null,
-      revisions.length ? h("div", {}, h("h4", {}, "Changed its mind"), h("ul", {}, ...revisions)) : null,
-      h("p", {}, h("button", { type: "button", onclick: async (e) => {
-        e.target.disabled = true; e.target.textContent = "Designing\u2026 (about 20 s)";
+  /* Everything about one character, in a side drawer: tier, voice, profile, lines, and rarer actions under ⋯. */
+  function openCharacter(cid) {
+    const d = $("#cdlg");
+    const patch = async (body) => {
+      try { await api("PATCH", `/api/books/${st.id}/characters/${cid}`, body); } catch (e) { alert(e.message); return; }
+      await reloadScript(); render();
+    };
+    const section = (title, ...kids) => h("section", {}, h("h4", {}, title), ...nonNull(kids));
+    function render() {
+      const c = charById()[cid];
+      if (!c) { d.close(); return; }
+      const tier = tierOf(c), model = c.dossier || {}, mine = c.dossier_user || {};
+      const seg = h("div", { class: "seg" }, ...[["main", "Main"], ["supporting", "Supporting"], ["extra", "Extra"]].map(([k, label]) =>
+        h("button", { type: "button", class: tier === k ? "on" : "", onclick: () => patch({ role: k }) }, label)));
+      const why = [c.role_user ? "Your choice." : c.role ? `Automatic (${c.role_source || "rules"})${c.role_note ? ": " + c.role_note : "."}` : "Not sorted yet.",
+        c.role_flag ? ` \u26A0 ${c.role_flag}.` : ""].join("");
+      const voiceSel = h("select", { title: "Change voice", onchange: (e) => patch({ voice: e.target.value || null }) },
+        h("option", { value: "" }, "No voice (narrator's)"),
+        ...st.voices.map(v => h("option", { value: v.id }, v.name + (v.source === "character" ? " (character)" : ""))));
+      voiceSel.value = c.voice || "";
+      const inputs = {};
+      const fields = DOSSIER_FIELDS.map(([key, label, options]) => {
+        const el = options ? h("select", {}, ...options.map(o => h("option", { value: o }, o || "\u2014")))
+          : h(key === "voice" ? "textarea" : "input", { rows: key === "voice" ? 3 : undefined, style: { width: "100%" } });
+        el.value = mine[key] ?? model[key] ?? "";
+        inputs[key] = el;
+        return [h("label", {}, label, mine[key] != null ? h("span", { class: "small", style: { color: "var(--accent)" } }, " \u270E edited") : null), el];
+      }).flat();
+      const aliases = h("input", { value: (c.aliases || []).join(", ") });
+      const saveProfile = async () => patch({ dossier: Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])),
+        aliases: aliases.value.split(",").map(a => a.trim()).filter(Boolean) });
+      const facts = (model.facts || []).map(f => h("li", { class: "small" }, f.fact, " \u2014 ", h("i", {}, "\u201c" + (f.quote || "") + "\u201d"), " ",
+        Array.isArray(f.at) ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); d.close(); gotoChapter(f.at[0]); } }, `ch ${f.at[0] + 1}`) : null));
+      const revisions = (model.revisions || []).map(r => h("li", { class: "small" }, r.note));
+      const design = h("button", { type: "button", onclick: async () => {
+        design.disabled = true; design.textContent = "Designing\u2026 (about 20 s)";
         try {
-          await save();
-          await api("POST", `/api/books/${st.id}/characters/${c.id}/voice-from-dossier`, {});
-          flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); $("#dlg").close();
-        } catch (err) { alert(err.message); e.target.disabled = false; e.target.textContent = "Design a new voice from this dossier"; }
-      } }, "Design a new voice from this dossier")),
-    ], save);
-    async function save() {
-      const dossier = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
-      const body = { dossier, aliases: aliases.value.split(",").map(a => a.trim()).filter(Boolean) };
-      await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, body);
-      await reloadScript();
+          await saveProfile();
+          await api("POST", `/api/books/${st.id}/characters/${cid}/voice-from-dossier`, {});
+          flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); render();
+        } catch (err) { alert(err.message); design.disabled = false; design.textContent = "Design voice from profile"; }
+      } }, "Design voice from profile");
+      d.replaceChildren(
+        h("div", { class: "dh" }, h("span", { class: "sw", style: { background: color(cid) } }), h("h2", { title: c.name }, c.name),
+          h("button", { class: "iconbtn", title: "More", onclick: (e) => popMenu(e.currentTarget, [
+            { text: "Rename\u2026", run: () => { const n = prompt("Name", c.name); if (n && n.trim() && n.trim() !== c.name) patch({ name: n.trim() }); } },
+            { text: "Same person as\u2026 (merge)", run: () => merge(c) },
+            { text: "Re-label lines with the profiles\u2026", run: relabel },
+          ]) }, "\u22EF"),
+          h("button", { class: "iconbtn", title: "Close", onclick: () => d.close() }, "\u2715")),
+        section("Overview",
+          h("div", { class: "small muted" }, `${c.lines} lines` + (c.aliases && c.aliases.length ? " \u00b7 also called " + c.aliases.join(", ") : "")),
+          h("div", { class: "rowx" }, seg, c.role_user ? h("button", { type: "button", class: "iconbtn small", title: "Let the model decide again",
+            onclick: () => patch({ role: null }) }, "use automatic") : null),
+          h("div", { class: "small muted" }, why)),
+        section("Voice",
+          h("div", { class: "rowx" },
+            c.voice ? h("button", { class: "iconbtn", title: "Play voice sample", onclick: () => playSample(c.voice) }, "\u25B6") : null,
+            voiceSel,
+            c.voice ? h("button", { type: "button", onclick: () => openVoiceEditor(c.voice, { book: st.id, character: cid, characterName: c.name,
+              onChange: async () => { flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); render(); } }) }, "Edit voice\u2026") : null),
+          c.description ? h("div", { class: "small muted" }, c.description) : null),
+        section("Profile",
+          h("p", { class: "small muted", style: { marginTop: 0 } }, "What the book says about them. Your edits win over the model's and are used when lines are re-labelled and voices designed."),
+          h("label", {}, "Also called (comma separated)"), aliases, ...fields,
+          facts.length ? h("details", {}, h("summary", { class: "small" }, `Evidence (${facts.length})`), h("ul", {}, ...facts)) : null,
+          revisions.length ? h("details", {}, h("summary", { class: "small" }, "Changed its mind"), h("ul", {}, ...revisions)) : null,
+          h("div", { class: "rowx" }, h("button", { type: "button", class: "primary", onclick: saveProfile }, "Save profile"), design)),
+        section("Lines",
+          h("button", { type: "button", onclick: () => {
+            st.filterChar = cid; $("#charFilter").value = cid; renderText(); renderCast(); d.close(); $("aside").classList.remove("open");
+          } }, "Show this character's lines")));
     }
+    d.onclick = (e) => { if (e.target === d) d.close(); };  // click outside the drawer
+    render();
+    if (!d.open) d.showModal();
   }
 
+  function merge(c) {
+    const sel = h("select", {}, ...st.script.characters.filter(o => o.id !== c.id).map(o => h("option", { value: o.id }, o.name)));
+    dialog(`${c.name} is the same person as\u2026`, [h("p", { class: "small muted" }, "Their lines move over and the name becomes an alias."), sel],
+      async () => {
+        await api("PATCH", `/api/books/${st.id}/characters/${c.id}`, { merge_into: sel.value });
+        $("#cdlg").close(); await reloadScript();
+      });
+  }
   async function relabel() {
     if (!confirm("Label every line again with the current dossiers? Your line corrections are kept. This takes the second half of a normal analysis (about 45 minutes for a long novel).")) return;
     try { st.script = (await api("POST", `/api/books/${st.id}/analyze`, { relabel: true })).data; } catch (e) { alert(e.message); return; }

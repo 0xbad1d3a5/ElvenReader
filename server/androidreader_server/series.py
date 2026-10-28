@@ -43,7 +43,12 @@ class SeriesStore:
     def get(self, name: str) -> dict:
         p = self.path(name)
         if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
+            from .dramatize import normalize_names
+
+            normalize_names(data)  # older entries may hold "a prisoner"
+            data.pop("names_v", None)
+            return data
         return {"name": name, "books": {}, "characters": {}}
 
     def save(self, data: dict) -> None:
@@ -101,6 +106,8 @@ def seed(app: web.Application, book_id: str, script: dict) -> int:
         if entry.get("role_user") and not c.get("role_user"):
             c["role_user"] = c["role"] = entry["role_user"]
         c["from_series"] = name
+        if entry.get("unnamed"):
+            c["unnamed"] = True
         n += 1
     return n
 
@@ -145,6 +152,7 @@ def remember(app: web.Application, book_id: str, only: str | None = None) -> str
         dossier = {k: v for k, v in (c.get("dossier") or {}).items() if k not in ("facts", "revisions")}
         series["characters"][key] = {
             "name": c["name"],
+            **({"unnamed": True} if c.get("unnamed") else {}),
             "aliases": sorted((set(old.get("aliases", [])) if others else set()) | set(c.get("aliases", []))),
             "gender": c.get("gender", "unknown"),
             "age": c.get("age", "unknown"),

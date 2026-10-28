@@ -723,7 +723,7 @@ def test_later_passages_may_revise_earlier_lines_but_never_corrections():
 
     result, local = asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, later, revise=12))
     user, schema = seen[-1]
-    assert "[R1] a prisoner: \u201cWho are you?\u201d" in user and "[R2] Sasaki" in user
+    assert "[R1] Prisoner: \u201cWho are you?\u201d" in user and "[R2] Sasaki" in user
     assert "Where from" not in user.split(dz.REVISE_NOTE)[1]  # corrected lines are not offered
     assert schema["properties"]["revisions"]["items"]["properties"]["id"]["enum"] == ["R1", "R2"]
     dz.apply_chunk_result(script, result, local)
@@ -839,3 +839,60 @@ def test_series_tier_floor_comes_from_other_volumes_only():
     assert _higher("main", "supporting") == "main"
     assert _higher("extra", None) == "extra"  # this volume re-sorted: just replaced
     assert _higher("extra", "main", user=True) == "extra"  # the reader's choice wins
+
+
+def test_descriptive_names_are_shown_capitalised_and_still_match():
+    assert dz.normalize_character_name("a prisoner") == ("Prisoner", True)
+    assert dz.normalize_character_name("the tattoo artist") == ("Tattoo Artist", True)
+    assert dz.normalize_character_name("crowd") == ("Crowd", True)
+    assert dz.normalize_character_name("man in the hat") == ("Man in the Hat", True)
+    assert dz.normalize_character_name("the Neighbor") == ("The Neighbor", False)
+    for kept in ("Type Twelve", "Mr. Akutsu", "Magical Pink", "TV Announcer"):
+        assert dz.normalize_character_name(kept) == (kept, False)
+    script = {"characters": {}, "lines": {}}
+    cid = dz.ensure_character(script, "a prisoner")
+    c = script["characters"][cid]
+    assert (c["name"], c["aliases"], c["unnamed"]) == ("Prisoner", ["a prisoner"], True)
+    assert dz.find_character(script, "a prisoner") == cid == dz.find_character(script, "the prisoner")
+    # books analysed earlier are migrated; the tier evidence still sees an unnamed walk-on
+    old = {"characters": {"guard": {"name": "a guard", "aliases": []}, "akutsu": {"name": "Mr. Akutsu", "aliases": []}},
+           "lines": {}}
+    assert dz.normalize_names(old) == 1
+    assert old["characters"]["guard"] == {"name": "Guard", "aliases": ["a guard"], "unnamed": True}
+    assert old["characters"]["akutsu"]["name"] == "Mr. Akutsu" and "unnamed" not in old["characters"]["akutsu"]
+    from androidreader_server import roles
+
+    ev = roles.evidence({"chapters": []}, {**old, "characters": old["characters"]})
+    assert ev["guard"]["named"] is False and ev["akutsu"]["named"] is True
+
+
+def test_model_names_are_normalised_on_the_analysis_path():
+    script = {"characters": {}, "lines": {}}
+    local = {"1": ["a"], "2": ["b"], "3": ["c"], "4": ["d"]}
+    dz.apply_chunk_result(script, {
+        "narrator": "third person",
+        "speakers": [{"name": "a prisoner", "aliases": [], "gender": "male", "age": "adult"},
+                     {"name": "the tattoo artist", "aliases": [], "gender": "male", "age": "adult"}],
+        "quotes": [{"id": "1", "speaker": "a prisoner", "delivery": "neutral"},
+                   {"id": "2", "speaker": "the tattoo artist", "delivery": "neutral"},
+                   {"id": "3", "speaker": "crowd", "delivery": "shouting"},
+                   {"id": "4", "speaker": "the prisoner", "delivery": "neutral"}]}, local)
+    names = {cid: c["name"] for cid, c in script["characters"].items()}
+    assert sorted(names.values()) == ["Crowd", "Prisoner", "Tattoo Artist"]
+    assert script["lines"]["a"]["speaker"] == script["lines"]["d"]["speaker"]  # still matched by description
+    assert all(c["unnamed"] for c in script["characters"].values())
+
+
+async def test_names_the_reader_types_are_kept_exactly(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    r = await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "the butler", "delivery": ""}, headers=AUTH)
+    s = await r.json()
+    assert s["characters"][[ch["id"] for ch in s["characters"]].index(s["lines"]["c0p2q11"]["speaker"])]["name"] == "the butler"
+    r = await c.patch("/api/books/book1/characters/tom", json={"name": "tom the piper's son"}, headers=AUTH)
+    assert any(ch["name"] == "tom the piper's son" for ch in (await r.json())["characters"])
+    s = c.server.app[dz.DRAMA_STORE_KEY].script("book1")
+    s.pop("names_v", None)  # the one-time migration leaves reader-typed names alone
+    dz.normalize_names(s)
+    assert {"the butler", "tom the piper's son"} <= {ch["name"] for ch in s["characters"].values()}

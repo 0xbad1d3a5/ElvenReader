@@ -49,7 +49,8 @@ def evidence(book: dict, script: dict) -> dict[str, dict]:
     chapters = [" ".join(ch.get("paragraphs", [])) for ch in book.get("chapters", [])]
     out = {}
     for c in public["characters"]:
-        names = [n for n in [c["name"], *c.get("aliases", [])] if n and not is_placeholder(n) and len(n) > 2]
+        unnamed = bool(c.get("unnamed")) or is_placeholder(c["name"])
+        names = [] if unnamed else [n for n in [c["name"], *c.get("aliases", [])] if n and not is_placeholder(n) and len(n) > 2]
         pattern = re.compile(r"\b(?:" + "|".join(re.escape(n) for n in names) + r")\b") if names else None
         mentioned = {i for i, text in enumerate(chapters) if pattern and pattern.search(text)}
         with_lines = spoke.get(c["id"], set())
@@ -58,7 +59,7 @@ def evidence(book: dict, script: dict) -> dict[str, dict]:
             "chapters_with_lines": len(with_lines), "chapters_mentioned": len(mentioned | with_lines),
             "first": min(with_lines | mentioned) + 1 if with_lines | mentioned else None,
             "last": max(with_lines | mentioned) + 1 if with_lines | mentioned else None,
-            "named": not is_placeholder(c["name"]), "narrates": c["id"] in narrating,
+            "named": not unnamed, "narrates": c["id"] in narrating,
             "chapters": len(chapters),
         }
     return out

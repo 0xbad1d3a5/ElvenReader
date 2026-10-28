@@ -203,7 +203,7 @@ fun CastScreen(bookId: String, onBack: () -> Unit) {
                 }
                 items(members, key = { it.id }) { c ->
                 ListItem(
-                    headlineContent = { Text(c.name) },
+                    headlineContent = { Text(com.androidreader.drama.displayName(c.name)) },
                     supportingContent = {
                         Text(listOf("${c.lines} lines", c.gender, c.age, c.description, voices.firstOrNull { it.id == c.voice }?.name?.let { "voice: $it" })
                             .filter { !it.isNullOrBlank() }.joinToString(" \u00b7 "))
@@ -222,7 +222,7 @@ fun CastScreen(bookId: String, onBack: () -> Unit) {
         var mergeInto by remember(c.id) { mutableStateOf<String?>(null) }
         AlertDialog(
             onDismissRequest = { selected = null },
-            title = { Text(c.name) },
+            title = { Text(com.androidreader.drama.displayName(c.name)) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())

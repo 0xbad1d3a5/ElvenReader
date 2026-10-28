@@ -475,10 +475,10 @@ excerpts, 161 quotations; `scripts\eval_dossier.py`):
 | + dossier, gpt-oss-20b, high reasoning | 64/102 = 62.7% | 51/59 = 86.4% | 17/24 | 68 min |
 | Qwen3-30B-A3B-Thinking-2507 / Qwen3.5-35B-A3B | not completed | | | ~2 h (3–3.5 min per passage) |
 
-Dossiers you edit yourself are still useful. In the viewer (📇 on a character) you can set the
+Dossiers you edit yourself are still useful. In the viewer (a character's panel, *Profile*) you can set the
 apparent age, form, speech style and other fields. Your fields always win, are used to design the
-character's voice (*Design a new voice from this dossier*) and, once any character has edits, are
-given to the model when you *Re-label lines with the dossiers*. Edits also go into the series
+character's voice (*Design voice from profile*) and, once any character has edits, are
+given to the model when you *Re-label lines with the profiles*. Edits also go into the series
 memory.
 
 ## 8. Process a book on the PC
@@ -521,27 +521,37 @@ The viewer has:
 * **Book:** chapters in reading order, with the book's illustrations (click one to open it full
   size); quotations coloured by speaker with the speaker's name and
   delivery (*shouting, urgent*); ✎ marks your corrections.
-* **Cast panel:** characters grouped as **Main / Supporting / Extras** (Extras folded), with
-  aliases, line counts and voices; ▶ plays the voice sample. Each character has a tier dropdown
-  (*auto* or your choice; hover for the model's reason). *Highlight main only* (or *main +
-  supporting*) dims everyone else's lines. *Give supporting characters their own voices* replaces
-  their shared pool voices. *Sort cast into tiers* asks the LLM again. Tiers also appear in the
-  dossier (📇) and in the Voices page's *Used by* lists. Click a
-  name to list all of that character's lines across the book (or use the speaker filter, which
-  also offers *quotes given to the narrator*); search finds text.
+* **Cast panel:** characters grouped as **Main / Supporting / Extras** (Extras folded), each row
+  just a colour dot, the name, the line count and ▶ (voice sample). Type in *Find a character* to
+  filter. Click a character to open its panel:
+  * **Overview:** aliases and the tier (*Main / Supporting / Extra*; *use automatic* hands it back
+    to the model, whose reason is shown).
+  * **Voice:** play, change, or *Edit voice…*.
+  * **Profile:** what the book says about them, editable, and *Design voice from profile*.
+  * **Lines:** *Show this character's lines*.
+  * **⋯:** rename, merge into another character, re-label lines with the profiles.
+
+  The ⋯ next to *Cast* holds the book's cast actions:
+  * *Sort cast into tiers*
+  * *Create missing voices*
+  * *Give supporting characters their own voices* (replaces their shared pool voices)
+  * *Re-label lines with the profiles*
+  * *Highlight lines of* everyone / main / main + supporting (dims everyone else's lines)
+
+  Tiers also appear in the Voices page's *Used by* lists. Unnamed speakers are shown as names
+  ("Prisoner", "Tattoo Artist"), as the model's "a prisoner" is stored; names you type are kept
+  exactly. The speaker filter (top) also offers *quotes given to the narrator*; search finds text.
+  On a narrow screen (phone), ☰ shows the chapters and the cast.
 * **Playback:** click any line or narration to play from there through the chapter with each
   speaker's voice and delivery, using the chosen narrator voice and model. Audio comes from the
   same server cache as the phone.
-* **Editing:** click a speaker tag to change the speaker or delivery; ✎ on a character renames it,
-  merges it into another (aliases) or changes its voice; 📇 opens its dossier (see *Character
-  dossiers*); *Create missing voices* runs the cast; *Re-label lines with the dossiers* labels the
-  lines again (your corrections are kept). The book's series is shown under the cast and can be changed.
-  Changes go through the same API as the app; the phone picks them up the next time you open
-  the book (sentences it had already prepared are re-synthesized).
+* **Editing:** click a speaker tag to change the speaker or delivery. The book's series is shown
+  under the cast and can be changed. Changes go through the same API as the app; the phone picks
+  them up the next time you open the book (sentences it had already prepared are re-synthesized).
 
 ## 10. Voice editor
 
-Edit any voice by hand in the viewer: 🎙 next to a character in a book's cast panel, or **Voices**
+Edit any voice by hand in the viewer: *Edit voice…* in a character's panel, or **Voices**
 (http://127.0.0.1:3950/books/voices, linked from every viewer page). The Voices page lists every
 voice, including imported VoiceStudio voices, pool voices and character voices, with who uses it.
 

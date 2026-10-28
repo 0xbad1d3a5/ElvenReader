@@ -763,8 +763,48 @@ def find_character(script: dict, name: str) -> str | None:
     return None
 
 
+_ARTICLE = re.compile(r"^(?:a|an|the)\s+", re.IGNORECASE)
+_SMALL_WORDS = {"of", "in", "on", "at", "to", "and", "or", "the", "a", "an", "for", "with", "from", "by"}
+
+
+def normalize_character_name(name: str) -> tuple[str, bool]:
+    """How a character's name is shown, and whether it is a description rather than a name:
+    "a prisoner" -> ("Prisoner", True), "the tattoo artist" -> ("Tattoo Artist", True),
+    "the Neighbor" -> ("The Neighbor", False); deliberate casing ("Type Twelve", "Mr. Akutsu") is kept."""
+    n = " ".join((name or "").split())
+    if not n or not n[:1].isalpha() or n[:1].isupper():
+        return n, False
+    rest = _ARTICLE.sub("", n)
+    if any(ch.isupper() for ch in rest):  # "the Neighbor", "a Starsage": a name after all
+        return n[:1].upper() + n[1:], False
+    words = rest.split(" ")
+    return " ".join(w if i and w in _SMALL_WORDS else w[:1].upper() + w[1:] for i, w in enumerate(words)), True
+
+
+def normalize_names(script: dict) -> int:
+    """Shows descriptive names as names ("a prisoner" -> "Prisoner", flagged unnamed); the old form stays an
+    alias, so matching and the series memory still find them."""
+    n = 0
+    for c in script.get("characters", {}).values():
+        if c.get("name_user"):
+            continue
+        shown, unnamed = normalize_character_name(c.get("name", ""))
+        if unnamed:
+            c["unnamed"] = True
+        if shown and shown != c.get("name"):
+            aliases = c.setdefault("aliases", [])
+            if c["name"] not in aliases:
+                aliases.append(c["name"])
+            c["name"] = shown
+            n += 1
+    script["names_v"] = 1
+    return n
+
+
 def ensure_character(script: dict, name: str, gender: str = "unknown", age: str = "unknown",
-                     aliases: list[str] | tuple = ()) -> str | None:
+                     aliases: list[str] | tuple = (), exact: bool = False) -> str | None:
+    """The one place characters are created. Names from the model go through normalize_character_name
+    ("a prisoner" -> "Prisoner"); `exact` keeps a name the reader typed as it is."""
     if not name or name.strip().upper() == NARRATOR:
         return None
     cid = find_character(script, name)
@@ -778,8 +818,12 @@ def ensure_character(script: dict, name: str, gender: str = "unknown", age: str 
         base, n = cid, 2
         while cid in script["characters"]:
             cid, n = f"{base}-{n}", n + 1
-        script["characters"][cid] = {"name": name.strip(), "aliases": [], "gender": gender, "age": age,
+        shown, unnamed = (" ".join(name.split()), False) if exact else normalize_character_name(name)
+        script["characters"][cid] = {"name": shown, "aliases": [name.strip()] if shown != name.strip() else [],
+                                     "gender": gender, "age": age,
                                      "accent": "", "temperament": "", "description": "", "voice": None}
+        if unnamed:
+            script["characters"][cid]["unnamed"] = True
     c = script["characters"][cid]
     for alias in [name, *aliases]:
         alias = alias.strip()
@@ -1093,7 +1137,7 @@ def revisable_lines(script: dict, book: dict, chunk: Chunk, n: int, unnamed_only
             continue
         sp = line.get("speaker")
         name = script["characters"].get(sp, {}).get("name", NARRATOR) if sp else NARRATOR
-        if unnamed_only and not is_placeholder(name):
+        if unnamed_only and not (is_placeholder(name) or script["characters"].get(sp, {}).get("unnamed")):
             continue
         out.append((qid, name, ch["paragraphs"][int(p)][int(s):int(e)]))
     return out[-n:] if n else []
@@ -1821,7 +1865,8 @@ async def get_script(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=400)
     s = store.script(book_id)
     if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
-                                      or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))):
+                                      or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))
+                                      or s.get("names_v") != 1):
         async with store.lock(book_id):
             s = store.script(book_id)
             book = store.book(book_id)
@@ -1831,6 +1876,8 @@ async def get_script(request: web.Request) -> web.Response:
             if s.get("mentions_v") != 1:  # analysed before quoted terms were told apart from dialogue
                 n = mark_mentions(book, s)
                 logger.info("%s: %d quoted terms given back to the narration", book_id, n)
+            if s.get("names_v") != 1:  # "a prisoner" -> "Prisoner"
+                normalize_names(s)
             if not any(c.get("role") for c in s["characters"].values()):  # analysed before tiers existed
                 from . import roles
 
@@ -1881,7 +1928,9 @@ async def patch_line(request: web.Request) -> web.Response:
         if "speaker" in body:
             sp = body["speaker"]
             if sp and sp not in s["characters"]:
-                sp = ensure_character(s, str(sp))
+                sp = ensure_character(s, str(sp), exact=True)  # typed by the reader: kept as typed
+                if sp in s["characters"] and s["characters"][sp]["name"] == " ".join(str(body["speaker"]).split()):
+                    s["characters"][sp]["name_user"] = True
             fix["speaker"] = sp or None
         if "delivery" in body:
             fix["delivery"] = (body.get("delivery") or "").strip() or None
@@ -1903,6 +1952,7 @@ async def patch_character(request: web.Request) -> web.Response:
         if body.get("name") and body["name"] != c["name"]:
             c.setdefault("aliases", []).append(c["name"])
             c["name"] = body["name"]
+            c["name_user"] = True  # typed by the reader: never re-cased
         if "voice" in body:
             c["voice"] = body["voice"] or None
         if isinstance(body.get("dossier"), dict):
