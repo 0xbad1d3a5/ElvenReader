@@ -9,9 +9,14 @@ import org.jsoup.parser.Parser
 import java.io.File
 import java.util.zip.ZipFile
 
-data class Paragraph(val text: String, val heading: Boolean = false)
+/** A paragraph of text; [images] are the pictures (zip paths in the EPUB) shown just before it. */
+data class Paragraph(val text: String, val heading: Boolean = false, val images: List<String> = emptyList())
 
-data class Chapter(val title: String, val paragraphs: List<Paragraph>)
+/** [endImages]: pictures after the chapter's last paragraph. */
+data class Chapter(val title: String, val paragraphs: List<Paragraph>, val endImages: List<String> = emptyList())
+
+/** One XHTML file: its paragraphs (pictures attached to the paragraph after them) and pictures after the last one. */
+class ParsedDocument(val paragraphs: List<Paragraph>, val trailingImages: List<String>)
 
 data class EpubBook(
     val title: String,
@@ -26,7 +31,7 @@ class EpubException(message: String) : Exception(message)
 /** Reads an EPUB 2/3 file into plain paragraphs per chapter of its table of contents. */
 object EpubParser {
     /** Bumped when parsing changes how a book is split; books parsed earlier are re-parsed. */
-    const val VERSION = 2
+    const val VERSION = 3 // 3: pictures (text and paragraph numbering unchanged from 2)
 
     /**
      * Where [position] (in a book split as [old]) is in the same text split as [new]: the books have
@@ -87,24 +92,38 @@ object EpubParser {
         // table of contents points to start a chapter; the others continue the one before them.
         val tocStarts = toc.keys.toSet()
         val groupByToc = tocStarts.size >= 2
+        // Pictures waiting for the next paragraph; true = they belong to the chapter before it (shown at its
+        // end if a new chapter starts first). Picture-only pages never become chapters, so numbering is stable.
+        val carry = mutableListOf<Pair<String, Boolean>>()
+        fun withImages(paras: List<Paragraph>, images: List<String>) =
+            if (images.isEmpty()) paras else listOf(paras[0].copy(images = images + paras[0].images)) + paras.drop(1)
         for (ref in opf.select("spine > itemref")) {
             if (ref.attr("linear") == "no") continue
             val item = manifest[ref.attr("idref")] ?: continue
             if (!item.type.contains("html")) continue
             val html = readText(item.href) ?: continue
-            val paragraphs = extractParagraphs(html)
-            if (paragraphs.isEmpty()) continue
-            if (groupByToc && item.href !in tocStarts && chapters.isNotEmpty()) {
-                val last = chapters.removeAt(chapters.size - 1)
-                chapters += last.copy(paragraphs = last.paragraphs + paragraphs)
+            val doc = extractDocument(html, item.href)
+            val continues = groupByToc && item.href !in tocStarts && chapters.isNotEmpty()
+            if (doc.paragraphs.isEmpty()) {
+                carry += doc.trailingImages.map { it to continues }
                 continue
             }
-            val chapterTitle = toc[item.href]
-                ?: paragraphs.firstOrNull { it.heading }?.text?.take(80)
-                ?: "Section ${chapters.size + 1}"
-            chapters += Chapter(chapterTitle, paragraphs)
+            if (continues) {
+                val last = chapters.removeAt(chapters.size - 1)
+                chapters += last.copy(paragraphs = last.paragraphs + withImages(doc.paragraphs, carry.map { it.first }))
+            } else {
+                val before = carry.filter { it.second }.map { it.first }
+                if (before.isNotEmpty()) chapters[chapters.size - 1] = chapters.last().let { it.copy(endImages = it.endImages + before) }
+                val chapterTitle = toc[item.href]
+                    ?: doc.paragraphs.firstOrNull { it.heading }?.text?.take(80)
+                    ?: "Section ${chapters.size + 1}"
+                chapters += Chapter(chapterTitle, withImages(doc.paragraphs, carry.filterNot { it.second }.map { it.first }))
+            }
+            carry.clear()
+            carry += doc.trailingImages.map { it to true }
         }
         if (chapters.isEmpty()) throw EpubException("No readable text in this EPUB")
+        if (carry.isNotEmpty()) chapters[chapters.size - 1] = chapters.last().let { it.copy(endImages = it.endImages + carry.map { c -> c.first }) }
         EpubBook(title.trim(), author.trim(), language?.trim(), cover, chapters)
     }
 
@@ -170,12 +189,14 @@ object EpubParser {
     }
 
     /** Block-level text of an XHTML document, one entry per paragraph or heading. */
-    fun extractParagraphs(html: String): List<Paragraph> {
-        val doc = Jsoup.parse(html)
-        val body = doc.body() ?: return emptyList()
-        val out = mutableListOf<Paragraph>()
-        walk(body, out)
-        return out
+    fun extractParagraphs(html: String): List<Paragraph> = extractDocument(html).paragraphs
+
+    /** Paragraphs plus pictures (`<img>`, `<svg><image>`), resolved against [base], the file's zip path. */
+    fun extractDocument(html: String, base: String = ""): ParsedDocument {
+        val body = Jsoup.parse(html).body() ?: return ParsedDocument(emptyList(), emptyList())
+        val walker = Walker(base)
+        walker.walk(body)
+        return ParsedDocument(walker.out, walker.pending)
     }
 
     private fun isBlock(el: Element) = el.tagName().lowercase() in BLOCKS
@@ -191,47 +212,69 @@ object EpubParser {
         return false
     }
 
-    private fun walk(el: Element, out: MutableList<Paragraph>) {
-        if (skip(el)) return
-        val hasBlockChild = el.children().any { isBlock(it) && !skip(it) }
-        if (!hasBlockChild) {
-            emit(inlineText(el), el.tagName().lowercase() in HEADINGS, out)
-            return
+    private class Walker(val base: String) {
+        val out = mutableListOf<Paragraph>()
+        val pending = mutableListOf<String>()
+
+        private fun picture(el: Element) {
+            val refs = when (el.tagName().lowercase()) {
+                "img" -> listOf(el.attr("src"))
+                "svg" -> el.select("image").map { it.attr("xlink:href").ifBlank { it.attr("href") } }
+                else -> emptyList()
+            }
+            for (ref in refs) if (ref.isNotBlank() && !ref.startsWith("data:")) pending += if (base.isEmpty()) ref else resolve(base, ref)
         }
-        // Mixed content: text runs between block children become their own paragraphs.
-        val run = StringBuilder()
-        for (node in el.childNodes()) {
-            if (node is Element && isBlock(node)) {
-                emit(run.toString(), false, out)
-                run.clear()
-                walk(node, out)
-            } else {
-                run.append(nodeText(node))
+
+        fun walk(el: Element) {
+            picture(el)
+            if (skip(el)) return
+            val hasBlockChild = el.children().any { isBlock(it) && !skip(it) }
+            if (!hasBlockChild) {
+                emit(inlineText(el), el.tagName().lowercase() in HEADINGS)
+                return
+            }
+            // Mixed content: text runs between block children become their own paragraphs.
+            val run = StringBuilder()
+            for (node in el.childNodes()) {
+                if (node is Element && isBlock(node)) {
+                    emit(run.toString(), false)
+                    run.clear()
+                    walk(node)
+                } else {
+                    run.append(nodeText(node))
+                }
+            }
+            emit(run.toString(), false)
+        }
+
+        private fun inlineText(el: Element): String {
+            val sb = StringBuilder()
+            for (node in el.childNodes()) sb.append(nodeText(node))
+            return sb.toString()
+        }
+
+        private fun nodeText(node: Node): String = when (node) {
+            is TextNode -> node.wholeText
+            is Element -> {
+                picture(node)
+                when {
+                    skip(node) -> ""
+                    node.tagName().equals("br", true) -> " "
+                    node.tagName().equals("img", true) -> ""
+                    else -> inlineText(node)
+                }
+            }
+            else -> ""
+        }
+
+        /** A text paragraph takes the pictures seen since the previous one; picture-only blocks emit nothing. */
+        private fun emit(raw: String, heading: Boolean) {
+            val text = clean(raw)
+            if (text.any { it.isLetterOrDigit() }) {
+                out += Paragraph(text, heading, pending.toList())
+                pending.clear()
             }
         }
-        emit(run.toString(), false, out)
-    }
-
-    private fun inlineText(el: Element): String {
-        val sb = StringBuilder()
-        for (node in el.childNodes()) sb.append(nodeText(node))
-        return sb.toString()
-    }
-
-    private fun nodeText(node: Node): String = when (node) {
-        is TextNode -> node.wholeText
-        is Element -> when {
-            skip(node) -> ""
-            node.tagName().equals("br", true) -> " "
-            node.tagName().equals("img", true) -> ""
-            else -> inlineText(node)
-        }
-        else -> ""
-    }
-
-    private fun emit(raw: String, heading: Boolean, out: MutableList<Paragraph>) {
-        val text = clean(raw)
-        if (text.any { it.isLetterOrDigit() }) out += Paragraph(text, heading)
     }
 
     /** Collapses whitespace and removes soft hyphens / zero-width characters. */

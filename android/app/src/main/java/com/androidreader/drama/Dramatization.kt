@@ -162,9 +162,36 @@ object Dramatization {
                 if (current == null || current.status == "none" || current.status == "error") {
                     client.postJson("/api/books/$bookId", bookPayload(bookId).put("analyze", true), slow = true)
                 }
+                runCatching { syncPictures(bookId) } // only the PC viewer needs them
                 follow(bookId)
             }.onFailure { e ->
                 put(bookId, (script(bookId) ?: BookScript()).copy(status = "error", detail = e.message ?: "upload failed"))
+            }
+        }
+    }
+
+    /**
+     * Gives the server the book's pictures, for the PC viewer: their paths travel with the text (re-sent if
+     * the server has an older copy without them), then the server says which files it still needs.
+     */
+    private fun syncPictures(bookId: String) {
+        val library = Library.get(appContext)
+        val content = library.content(bookId)
+        val paths = content.chapters.flatMap { c -> c.paragraphs.flatMap { it.images } + c.endImages }
+        if (paths.isEmpty()) return
+        val client = ServerClient.get(appContext)
+        var list = client.getJson("/api/books/$bookId/pictures")
+        if ((list.optJSONArray("have")?.length() ?: 0) + (list.optJSONArray("need")?.length() ?: 0) == 0) {
+            client.postJson("/api/books/$bookId", bookPayload(bookId), slow = true)
+            list = client.getJson("/api/books/$bookId/pictures")
+        }
+        val need = list.optJSONArray("need") ?: return
+        if (need.length() == 0) return
+        java.util.zip.ZipFile(library.epubFile(bookId)).use { zip ->
+            for (i in 0 until need.length()) {
+                val path = need.getString(i)
+                val bytes = zip.getEntry(path)?.let { e -> zip.getInputStream(e).use { it.readBytes() } } ?: continue
+                client.putBytes("/api/books/$bookId/picture?path=" + java.net.URLEncoder.encode(path, "UTF-8"), bytes)
             }
         }
     }

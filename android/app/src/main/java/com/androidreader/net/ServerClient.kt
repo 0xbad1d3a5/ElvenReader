@@ -174,6 +174,8 @@ class ServerClient private constructor(private val context: Context) {
     fun patchJson(path: String, json: JSONObject): JSONObject =
         call(apiHttp, path, json.toString().toRequestBody(JSON), "PATCH")
     fun delete(path: String): JSONObject = call(apiHttp, path, null, "DELETE")
+    fun putBytes(path: String, bytes: ByteArray): JSONObject =
+        call(slowHttp, path, bytes.toRequestBody("application/octet-stream".toMediaType()), "PUT")
 
     /**
      * `POST /api/tts`: the response body is raw PCM16LE mono at `X-Sample-Rate`.

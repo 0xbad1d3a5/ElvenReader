@@ -23,7 +23,9 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,6 +56,30 @@ class Server:
                 return e.code, json.loads(e.read() or b"{}")
             except ValueError:
                 return e.code, {}
+
+
+    def put_bytes(self, path: str, data: bytes, timeout: float = 120) -> int:
+        req = urllib.request.Request(self.base + path, data=data, method="PUT")
+        req.add_header("Authorization", f"Bearer {self.token}")
+        req.add_header("Content-Type", "application/octet-stream")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+
+def upload_pictures(server: Server, book_id: str, epub: Path) -> None:
+    """The book's illustrations, for the viewer (the server only takes pictures the text refers to)."""
+    status, have = server.call("GET", f"/api/books/{book_id}/pictures")
+    need = have.get("need", []) if status == 200 else []
+    if not need:
+        return
+    with zipfile.ZipFile(epub) as z:
+        names = set(z.namelist())
+        sent = sum(server.put_bytes(f"/api/books/{book_id}/picture?path={urllib.parse.quote(p)}", z.read(p)) == 200
+                   for p in need if p in names)
+    print(f"Uploaded {sent} of {len(need)} pictures", flush=True)
 
 
 def java_home() -> str | None:
@@ -165,6 +191,7 @@ def main() -> None:
     status, s = server.call("POST", f"/api/books/{book_id}", {**payload, "analyze": not already}, timeout=600)
     if status != 200:
         sys.exit(f"upload failed ({status}): {s}")
+    upload_pictures(server, book_id, args.epub)
     t_analysis = time.time()
     s = wait(server, book_id, {"queued", "running"}, "analysis")
     if s["status"] != "done":

@@ -667,3 +667,25 @@ def test_mentions_are_narration_and_corrections_still_win():
     script["corrections"]["q1"] = {"speaker": dz.find_character(script, "Bob")}
     pub = dz.ScriptStore.public(script)["lines"]
     assert pub["q1"]["speaker"] == dz.find_character(script, "Bob") and "mention" not in pub["q1"]
+
+
+async def test_book_pictures_are_listed_uploaded_and_served(drama_client):
+    c = drama_client
+    payload = book_payload()
+    payload["chapters"][0]["images"] = {"1": ["OEBPS/images/p1.jpg"]}
+    payload["chapters"][0]["end_images"] = ["OEBPS/images/end.png", "OEBPS/images/p1.jpg"]
+    assert (await c.post("/api/books/book1", json=payload, headers=AUTH)).status == 200
+    assert dz.picture_refs((await (await c.get("/api/books/book1", headers=AUTH)).json())) == \
+        ["OEBPS/images/p1.jpg", "OEBPS/images/end.png"]
+    lst = await (await c.get("/api/books/book1/pictures", headers=AUTH)).json()
+    assert lst == {"have": [], "need": ["OEBPS/images/p1.jpg", "OEBPS/images/end.png"]}
+    q = "/api/books/book1/picture?path=OEBPS%2Fimages%2Fp1.jpg"
+    assert (await c.get(q, headers=AUTH)).status == 404  # not uploaded yet
+    assert (await c.put(q, data=b"\xff\xd8jpeg", headers=AUTH)).status == 200
+    r = await c.get(q, headers=AUTH)
+    assert r.status == 200 and r.headers["Content-Type"] == "image/jpeg" and await r.read() == b"\xff\xd8jpeg"
+    assert (await c.get(q)).status == 401  # token needed
+    # only pictures the book refers to, no path tricks
+    assert (await c.put("/api/books/book1/picture?path=..%2F..%2Fconfig.json", data=b"x", headers=AUTH)).status == 404
+    lst = await (await c.get("/api/books/book1/pictures", headers=AUTH)).json()
+    assert lst == {"have": ["OEBPS/images/p1.jpg"], "need": ["OEBPS/images/end.png"]}

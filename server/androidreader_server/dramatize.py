@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -355,6 +356,20 @@ def book_summary(book: dict) -> dict:
     }
 
 
+PICTURE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif",
+                 ".webp": "image/webp", ".bmp": "image/bmp"}
+
+
+def picture_refs(book: dict) -> list[str]:
+    """Every picture the book shows (zip paths in its EPUB), in reading order."""
+    out: list[str] = []
+    for ch in book.get("chapters", []):
+        for _, paths in sorted((ch.get("images") or {}).items(), key=lambda kv: int(kv[0])):
+            out += paths
+        out += ch.get("end_images") or []
+    return list(dict.fromkeys(out))
+
+
 class ScriptStore:
     """data/books/<id>/{book.json, script.json}."""
 
@@ -405,6 +420,13 @@ class ScriptStore:
     def cover(self, book_id: str) -> Path | None:
         p = self.dir(book_id) / "cover.jpg"
         return p if p.exists() else None
+
+    def picture_file(self, book_id: str, path: str) -> Path | None:
+        """Where a picture of the book (its zip path in the EPUB) is stored; None for unsupported types."""
+        ext = Path(path).suffix.lower()
+        if ext not in PICTURE_TYPES:
+            return None
+        return self.dir(book_id) / "pictures" / (hashlib.sha1(path.encode("utf-8")).hexdigest()[:20] + ext)
 
     def book(self, book_id: str) -> dict | None:
         p = self.dir(book_id) / "book.json"
@@ -1480,6 +1502,63 @@ async def get_book(request: web.Request) -> web.Response:
     return web.json_response(book)
 
 
+async def list_pictures(request: web.Request) -> web.Response:
+    """The book's pictures the server has (`have`) and still needs uploaded (`need`)."""
+    store = request.app[DRAMA_STORE_KEY]
+    try:
+        book = store.book(request.match_info["book"])
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if book is None:
+        return web.json_response({"error": "book not uploaded"}, status=404)
+    have, need = [], []
+    for path in picture_refs(book):
+        f = store.picture_file(request.match_info["book"], path)
+        if f is not None:
+            (have if f.exists() else need).append(path)
+    return web.json_response({"have": have, "need": need})
+
+
+async def _picture_target(request: web.Request) -> tuple[Path | None, web.Response | None]:
+    store = request.app[DRAMA_STORE_KEY]
+    path = request.query.get("path", "")
+    try:
+        book = store.book(request.match_info["book"])
+    except ValueError as exc:
+        return None, web.json_response({"error": str(exc)}, status=400)
+    if book is None or path not in picture_refs(book):
+        return None, web.json_response({"error": "not a picture of this book"}, status=404)
+    f = store.picture_file(request.match_info["book"], path)
+    if f is None:
+        return None, web.json_response({"error": "unsupported picture type"}, status=415)
+    return f, None
+
+
+async def put_picture(request: web.Request) -> web.Response:
+    """PUT /api/books/{book}/picture?path=<zip path>: the picture's bytes, as in the EPUB."""
+    f, err = await _picture_target(request)
+    if err is not None:
+        return err
+    data = await request.read()
+    if not data:
+        return web.json_response({"error": "empty body"}, status=400)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(f.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(f)
+    return web.json_response({"ok": True, "bytes": len(data)})
+
+
+async def get_picture(request: web.Request) -> web.StreamResponse:
+    f, err = await _picture_target(request)
+    if err is not None:
+        return err
+    if not f.exists():
+        return web.json_response({"error": "not uploaded yet"}, status=404)
+    # A path always holds the same picture, so browsers may keep it.
+    return web.FileResponse(f, headers={"Content-Type": PICTURE_TYPES[f.suffix], "Cache-Control": "private, max-age=86400"})
+
+
 async def get_cover(request: web.Request) -> web.StreamResponse:
     try:
         path = request.app[DRAMA_STORE_KEY].cover(request.match_info["book"])
@@ -1812,6 +1891,9 @@ def setup(app: web.Application) -> None:
     series.setup(app)
     r.add_get("/api/books/{book}", get_book)
     r.add_get("/api/books/{book}/cover", get_cover)
+    r.add_get("/api/books/{book}/pictures", list_pictures)
+    r.add_get("/api/books/{book}/picture", get_picture)
+    r.add_put("/api/books/{book}/picture", put_picture)
     r.add_post("/api/books/{book}", upload_book)
     r.add_get("/api/books/{book}/script", get_script)
     r.add_post("/api/books/{book}/analyze", analyze)

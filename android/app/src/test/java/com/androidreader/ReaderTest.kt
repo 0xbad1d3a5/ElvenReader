@@ -269,6 +269,45 @@ class EpubParserTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun picturesAttachToTheNextParagraphWithoutChangingTheText() {
+        val dir = createTempDir()
+        try {
+            val file = File(dir, "pics.epub")
+            ZipOutputStream(file.outputStream()).use { zip ->
+                fun put(name: String, text: String) {
+                    zip.putNextEntry(ZipEntry(name)); zip.write(text.toByteArray()); zip.closeEntry()
+                }
+                put("META-INF/container.xml", """<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>""")
+                put("OEBPS/content.opf", """<package><metadata><dc:title>Pics</dc:title></metadata><manifest>
+                    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+                    <item id="i0" href="text/insert0.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="a" href="text/a.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="i1" href="text/insert1.xhtml" media-type="application/xhtml+xml"/>
+                    <item id="b" href="text/b.xhtml" media-type="application/xhtml+xml"/></manifest>
+                    <spine><itemref idref="i0"/><itemref idref="a"/><itemref idref="i1"/><itemref idref="b"/></spine></package>""")
+                put("OEBPS/nav.xhtml", """<html><body><nav epub:type="toc"><ol><li><a href="text/a.xhtml">One</a></li>
+                    <li><a href="text/b.xhtml">Two</a></li></ol></nav></body></html>""")
+                // a colour page before the first chapter, an <svg><image> insert page at a chapter's end
+                put("OEBPS/text/insert0.xhtml", """<html><body><div><img src="../images/color.jpg"/></div></body></html>""")
+                put("OEBPS/text/a.xhtml", """<html><body><p>First.</p><p class="pic"><img src="../images/mid.png" alt=""/></p>
+                    <p>Second.</p></body></html>""")
+                put("OEBPS/text/insert1.xhtml", """<html><body><svg xmlns:xlink="http://www.w3.org/1999/xlink">
+                    <image xlink:href="../images/end.jpg"/></svg></body></html>""")
+                put("OEBPS/text/b.xhtml", "<html><body><p>Third.</p></body></html>")
+            }
+            val book = EpubParser.parse(file)
+            assertEquals(listOf("One", "Two"), book.chapters.map { it.title })
+            assertEquals(listOf("First.", "Second."), book.chapters[0].paragraphs.map { it.text })
+            assertEquals(listOf("OEBPS/images/color.jpg"), book.chapters[0].paragraphs[0].images)
+            assertEquals(listOf("OEBPS/images/mid.png"), book.chapters[0].paragraphs[1].images)
+            assertEquals(listOf("OEBPS/images/end.jpg"), book.chapters[0].endImages)
+            assertEquals(emptyList<String>(), book.chapters[1].paragraphs[0].images)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }
 
 class BookScriptTest {

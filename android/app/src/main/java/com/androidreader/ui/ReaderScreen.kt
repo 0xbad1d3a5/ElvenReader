@@ -62,6 +62,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
@@ -127,12 +128,15 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit, onPronunciations: () -> Uni
     val current = if (active && hub.chapter == chapter) utterances.getOrNull(hub.index) else null
     val colors = pageColors(theme)
     val listState = rememberLazyListState()
+    // List rows: the title, then each paragraph preceded by its pictures, then the chapter's last pictures.
+    val rows = remember(book, chapter) { readerRows(book.chapters[chapter]) }
+    val rowOfParagraph = remember(rows) { rows.withIndex().filter { it.value.paragraph >= 0 }.associate { it.value.paragraph to it.index } }
 
     // Follow the voice: keep the paragraph being read on screen.
     LaunchedEffect(current?.paragraph, chapter) {
         val p = current?.paragraph ?: return@LaunchedEffect
         val visible = listState.layoutInfo.visibleItemsInfo
-        val target = p + 1 // item 0 is the chapter title
+        val target = rowOfParagraph[p] ?: return@LaunchedEffect
         if (visible.none { it.index == target } || visible.lastOrNull()?.index == target) {
             listState.animateScrollToItem(target, -200)
         }
@@ -167,10 +171,17 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit, onPronunciations: () -> Uni
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy((fontSp * 0.6f).dp),
         ) {
-            item {
-                Text(book.chapters[chapter].title, color = colors.text, fontSize = (fontSp * 1.3f).sp, fontWeight = FontWeight.Bold)
-            }
-            itemsIndexed(book.chapters[chapter].paragraphs) { p, para ->
+            itemsIndexed(rows) { _, row ->
+                if (row.picture != null) {
+                    BookPicture(bookId, row.picture)
+                    return@itemsIndexed
+                }
+                if (row.paragraph < 0) {
+                    Text(book.chapters[chapter].title, color = colors.text, fontSize = (fontSp * 1.3f).sp, fontWeight = FontWeight.Bold)
+                    return@itemsIndexed
+                }
+                val p = row.paragraph
+                val para = book.chapters[chapter].paragraphs[p]
                 val inPara = remember(utterances, p) { utterances.filter { it.paragraph == p } }
                 ParagraphText(
                     text = para.text,
@@ -257,6 +268,50 @@ fun ReaderScreen(bookId: String, onBack: () -> Unit, onPronunciations: () -> Uni
         )
     }
     DramaUi.LineEditorHost(bookId)
+}
+
+/** One row of the reader's list: the chapter title (paragraph -1), a paragraph, or a picture. */
+private data class ReaderRow(val paragraph: Int, val picture: String? = null)
+
+private fun readerRows(chapter: com.androidreader.epub.Chapter): List<ReaderRow> {
+    val rows = mutableListOf(ReaderRow(-1))
+    chapter.paragraphs.forEachIndexed { p, para ->
+        para.images.forEach { rows += ReaderRow(-1, it) }
+        rows += ReaderRow(p)
+    }
+    chapter.endImages.forEach { rows += ReaderRow(-1, it) }
+    return rows
+}
+
+/** An illustration from the EPUB, full width; tap to see it on its own. Tiny ornaments are not shown. */
+@Composable
+private fun BookPicture(bookId: String, path: String) {
+    val context = LocalContext.current
+    val widthPx = with(androidx.compose.ui.platform.LocalDensity.current) {
+        androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.roundToPx()
+    }
+    val bitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(null, bookId, path, widthPx) {
+        value = withContext(Dispatchers.IO) { Library.get(context).picture(bookId, path, widthPx) }
+    }
+    var zoom by remember { mutableStateOf(false) }
+    val image = bitmap?.asImageBitmap() ?: return
+    androidx.compose.foundation.Image(
+        image,
+        contentDescription = "Illustration",
+        contentScale = androidx.compose.ui.layout.ContentScale.FillWidth,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).clickable { zoom = true },
+    )
+    if (zoom) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { zoom = false },
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(Modifier.fillMaxSize().background(Color.Black).clickable { zoom = false }, contentAlignment = Alignment.Center) {
+                androidx.compose.foundation.Image(image, "Illustration", modifier = Modifier.fillMaxSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+            }
+        }
+    }
 }
 
 @Composable

@@ -24,7 +24,13 @@ object BookPayload {
                     quotes.put(JSONArray().put("c${ci}p${pi}q${r.start}").put(pi).put(r.start).put(r.end))
                 }
             }
-            arr.put(JSONObject().put("title", chapter.title).put("paragraphs", paragraphs).put("quotes", quotes))
+            val chapterJson = JSONObject().put("title", chapter.title).put("paragraphs", paragraphs).put("quotes", quotes)
+            // Pictures (zip paths in the EPUB) shown before a paragraph, and after the last one.
+            val images = JSONObject()
+            chapter.paragraphs.forEachIndexed { pi, p -> if (p.images.isNotEmpty()) images.put(pi.toString(), JSONArray(p.images)) }
+            if (images.length() > 0) chapterJson.put("images", images)
+            if (chapter.endImages.isNotEmpty()) chapterJson.put("end_images", JSONArray(chapter.endImages))
+            arr.put(chapterJson)
         }
         return JSONObject()
             .put("title", title)

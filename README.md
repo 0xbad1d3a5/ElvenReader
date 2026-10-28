@@ -173,6 +173,10 @@ test connection**. *Settings* also holds the default model, voice and sentence p
   own table of contents: when a publisher splits a chapter into several files (often at every
   illustration), the files are joined back into one chapter. Books imported with an older version
   are re-split the next time you open them, and your place is kept.
+* **Pictures:** illustrations appear where they are in the book, full width; tap one to see it
+  on its own. Tiny ornaments (scene-break flourishes) are left out. They are not read aloud and
+  don't change the text, so analyses and positions are unaffected. Books imported earlier get
+  their pictures the next time you open them.
 * **Controls:** play/pause, previous/next sentence and chapter, also from the lock screen,
   notification and Bluetooth headsets. Unplugging headphones pauses; calls pause reading.
 * **Reading options** (sliders icon): text size, theme (light/sepia/dark), speed (pitch is kept),
@@ -442,7 +446,8 @@ every book, script and audio request needs the token, like the app's.
 The viewer has:
 
 * **Library:** every analysed book with its cover, word count, analysis progress and cast status.
-* **Book:** chapters in reading order; quotations coloured by speaker with the speaker's name and
+* **Book:** chapters in reading order, with the book's illustrations (click one to open it full
+  size); quotations coloured by speaker with the speaker's name and
   delivery (*shouting, urgent*); ✎ marks your corrections.
 * **Cast panel:** characters with aliases, line counts and voices; ▶ plays the voice sample. Click a
   name to list all of that character's lines across the book (or use the speaker filter, which
@@ -515,6 +520,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |
+| `GET /api/books/{id}/pictures` · `GET`/`PUT /api/books/{id}/picture?path=` | The book's pictures the server has and still needs · one picture (by its path in the EPUB; only pictures the book's text refers to). The phone and `process_book.py` upload them for the viewer. |
 | `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`, `reanalyze`, optional base64 `cover`), dramatization status and lines. |
 | `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice/`dossier`/`aliases`, create character voices. |
 | `POST /api/books/{id}/characters/{id}/voice-from-dossier` · `POST /api/books/{id}/analyze` `{relabel\|reanalyze}` | New voice from the dossier · label lines again (keep dossiers) or analyse from scratch (user edits kept). |

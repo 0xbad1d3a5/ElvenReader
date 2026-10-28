@@ -44,6 +44,8 @@
   .tag i { color:var(--muted); }
   .tag.fix::after { content:" \270E"; }
   .mention { text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+  figure.pic { margin: 1.2em 0; text-align: center; }
+  img.pic { max-width: 100%; max-height: 85vh; cursor: zoom-in; border-radius: 4px; }
   .player { position:fixed; bottom:0; left:300px; right:0; background:var(--card); border-top:1px solid var(--line); padding:8px 16px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   dialog { border:1px solid var(--line); border-radius:10px; background:var(--card); color:var(--fg); min-width:380px; max-width:560px; }
   dialog label { display:block; margin:8px 0 2px; font-size:13px; color:var(--muted); }
@@ -445,7 +447,7 @@ async function bookView(id) {
   const st = {
     id, book: null, script: null, voices: [], engines: [], chapter: 0, filterChar: "", search: "",
     narrator: localStorage.getItem("narrator:" + id) || "", engine: localStorage.getItem("engine:" + id) || "",
-    units: [], playing: -1, audio: new Audio(), fetches: new Map(), session: null,
+    units: [], playing: -1, audio: new Audio(), fetches: new Map(), session: null, pictures: {},
   };
   const app = $("#app");
   app.replaceChildren(h("p", { style: { padding: "20px" } }, "Loading\u2026"));
@@ -637,6 +639,20 @@ async function bookView(id) {
     return true;
   }
 
+  /* An illustration from the book (fetched with the token, so it is an object URL); click to open it full size. */
+  function picture(path) {
+    const img = h("img", { class: "pic", alt: "Illustration" });
+    const fig = h("figure", { class: "pic" }, img);
+    const cached = st.pictures[path];
+    (cached || (st.pictures[path] = authBlobUrl(`/api/books/${id}/picture?path=${encodeURIComponent(path)}`))).then(url => {
+      if (!url) { fig.remove(); return; }
+      img.onload = () => { if (img.naturalWidth < 64 || img.naturalHeight < 64) fig.remove(); };  // ornaments
+      img.src = url;
+      img.onclick = () => window.open(url, "_blank");
+    });
+    return fig;
+  }
+
   function renderText() {
     stopPlayback();
     const text = $("#text"), units = [];
@@ -663,7 +679,10 @@ async function bookView(id) {
         return h("p", { class: "small muted" }, c ? h("span", {}, "Narrated by ", h("b", { style: { color: color(c.id) } }, c.name),
           c.voice ? ` (${voiceName(c.voice)})` : " (no voice yet)") : "Narrated in the book's narrator voice");
       };
-      text.replaceChildren(...nonNull([h("h2", {}, ch.title), ...ch.paragraphs.flatMap((_, pi) => [marker(pi), renderParagraph(st.chapter, pi, units)]),
+      const pics = (paths) => (paths || []).map(picture);
+      text.replaceChildren(...nonNull([h("h2", {}, ch.title),
+        ...ch.paragraphs.flatMap((_, pi) => [marker(pi), ...pics((ch.images || {})[pi]), renderParagraph(st.chapter, pi, units)]),
+        ...pics(ch.end_images),
         st.chapter + 1 < st.book.chapters.length
           ? h("p", {}, h("button", { onclick: () => gotoChapter(st.chapter + 1) }, "Next: " + st.book.chapters[st.chapter + 1].title)) : null]));
     }

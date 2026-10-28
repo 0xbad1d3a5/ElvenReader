@@ -132,6 +132,7 @@ class Library private constructor(context: Context) {
 
     private fun dir(id: String) = File(root, id)
     fun coverFile(id: String) = File(dir(id), "cover.jpg")
+    fun epubFile(id: String) = File(dir(id), "book.epub")
 
     private fun loadAll(): List<BookMeta> = (root.listFiles() ?: emptyArray()).mapNotNull { d ->
         runCatching { BookMeta.fromJson(JSONObject(File(d, "meta.json").readText())) }.getOrNull()
@@ -175,6 +176,33 @@ class Library private constructor(context: Context) {
         }
     }
 
+    private val pictures = object : android.util.LruCache<String, Bitmap>(48 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap) = value.byteCount
+    }
+
+    /**
+     * A picture from the book's EPUB, scaled down to about [maxWidth] pixels wide; null if it is missing,
+     * unreadable, or tiny (ornaments and inline glyphs are left out).
+     */
+    fun picture(id: String, path: String, maxWidth: Int): Bitmap? {
+        val key = "$id/$path/$maxWidth"
+        pictures.get(key)?.let { return it }
+        val bytes = runCatching {
+            java.util.zip.ZipFile(File(dir(id), "book.epub")).use { zip ->
+                zip.getEntry(path)?.let { e -> zip.getInputStream(e).use { it.readBytes() } }
+            }
+        }.getOrNull() ?: return null
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        if (opts.outWidth < MIN_PICTURE_PX || opts.outHeight < MIN_PICTURE_PX) return null
+        var sample = 1
+        while (opts.outWidth / (sample * 2) >= maxWidth) sample *= 2
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+            ?: return null
+        pictures.put(key, bmp)
+        return bmp
+    }
+
     fun delete(id: String) {
         dir(id).deleteRecursively()
         _books.value = _books.value.filter { it.id != id }
@@ -193,8 +221,8 @@ class Library private constructor(context: Context) {
                 val ps = c.getJSONArray("p")
                 Chapter(c.getString("title"), (0 until ps.length()).map { k ->
                     val p = ps.getJSONArray(k)
-                    Paragraph(p.getString(0), p.optInt(1) == 1)
-                })
+                    Paragraph(p.getString(0), p.optInt(1) == 1, strings(p.optJSONArray(2)))
+                }, strings(c.optJSONArray("end")))
             }
         }
         val epub = File(dir(id), "book.epub")
@@ -212,6 +240,7 @@ class Library private constructor(context: Context) {
     }
 
     companion object {
+        private const val MIN_PICTURE_PX = 64
         @Volatile private var instance: Library? = null
         fun get(context: Context): Library = instance ?: synchronized(this) {
             instance ?: Library(context.applicationContext).also { instance = it }
@@ -221,14 +250,22 @@ class Library private constructor(context: Context) {
             val arr = JSONArray()
             for (c in chapters) {
                 val ps = JSONArray()
-                c.paragraphs.forEach { ps.put(JSONArray().put(it.text).put(if (it.heading) 1 else 0)) }
-                arr.put(JSONObject().put("title", c.title).put("p", ps))
+                c.paragraphs.forEach { p ->
+                    val row = JSONArray().put(p.text).put(if (p.heading) 1 else 0)
+                    if (p.images.isNotEmpty()) row.put(JSONArray(p.images))
+                    ps.put(row)
+                }
+                val ch = JSONObject().put("title", c.title).put("p", ps)
+                if (c.endImages.isNotEmpty()) ch.put("end", JSONArray(c.endImages))
+                arr.put(ch)
             }
             file.writeText(
                 JSONObject().put("title", title).put("author", author).put("language", language ?: JSONObject.NULL)
                     .put("parser", EpubParser.VERSION).put("chapters", arr).toString(),
             )
         }
+
+        private fun strings(arr: JSONArray?): List<String> = if (arr == null) emptyList() else (0 until arr.length()).map { arr.getString(it) }
 
         private fun saveCover(bytes: ByteArray, dest: File) {
             val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
