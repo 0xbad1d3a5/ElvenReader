@@ -896,3 +896,25 @@ async def test_names_the_reader_types_are_kept_exactly(drama_client):
     s.pop("names_v", None)  # the one-time migration leaves reader-typed names alone
     dz.normalize_names(s)
     assert {"the butler", "tom the piper's son"} <= {ch["name"] for ch in s["characters"].values()}
+
+
+async def test_characters_are_described_by_their_own_voice(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    # a voice chosen later replaces the stale description
+    r = await c.patch("/api/voices/nar", json={"description": "A calm, warm storyteller's voice."}, headers=AUTH)
+    assert r.status == 200
+    r = await c.patch("/api/books/book1/characters/alice", json={"voice": "nar"}, headers=AUTH)
+    alice = next(ch for ch in (await r.json())["characters"] if ch["id"] == "alice")
+    assert alice["description"] == "A calm, warm storyteller's voice."
+    # editing that voice later updates everyone it voices
+    await c.patch("/api/voices/nar", json={"description": "A young girl's voice, old-fashioned and teasing."}, headers=AUTH)
+    s = await (await c.get("/api/books/book1/script", headers=AUTH)).json()
+    assert next(ch for ch in s["characters"] if ch["id"] == "alice")["description"].startswith("A young girl's voice")
+    # shared pool voices don't overwrite a character's own description
+    pool = {"name": "x", "voice": "pool-male-adult", "description": "A gruff old sailor."}
+
+    class V:
+        description, instruct = "An adult man with an ordinary voice.", ""
+    assert dz.follow_voice(pool, {"pool-male-adult": V()}) is False and pool["description"] == "A gruff old sailor."

@@ -526,10 +526,10 @@ The viewer has:
   filter. Click a character to open its panel:
   * **Overview:** aliases and the tier (*Main / Supporting / Extra*; *use automatic* hands it back
     to the model, whose reason is shown).
-  * **Voice:** play, change, or *Edit voice…*.
-  * **Profile:** what the book says about them, editable, and *Design voice from profile*.
+  * **Voice:** play, change, or *Edit voice…*; shows the assigned voice's own description (a character with a voice of its own takes that voice's description whenever the voice is chosen or edited).
+  * **Profile (for voice design)**, folded: what the book says about them, editable, and *Design voice from profile*. It is used to design the voice and for later volumes in the series; it doesn't change who-said-what.
   * **Lines:** *Show this character's lines*.
-  * **⋯:** rename, merge into another character, re-label lines with the profiles.
+  * **⋯:** rename, or merge into another character.
 
   The ⋯ next to *Cast* holds the book's cast actions:
   * *Sort cast into tiers*

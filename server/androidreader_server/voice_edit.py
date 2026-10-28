@@ -173,7 +173,14 @@ async def voice_patch(request: web.Request) -> web.Response:
         voice = request.app[VOICES_KEY].update(voice.id, **body)
     except ValueError as exc:
         return _json_error(400, str(exc))
+    await _characters_follow(request.app, voice.id)
     return web.json_response(details(request.app, voice))
+
+
+async def _characters_follow(app: web.Application, voice_id: str) -> None:
+    from .dramatize import sync_voice_descriptions
+
+    await sync_voice_descriptions(app, voice_id)
 
 
 async def _read_audio_form(request: web.Request) -> tuple[bytes | None, dict[str, str]]:
@@ -255,6 +262,7 @@ async def voice_duplicate(request: web.Request) -> web.Response:
             s = store.script(book)
             s["characters"][character]["voice"] = copy.id
             store.save_script(book, s)
+        await _characters_follow(request.app, copy.id)
     return web.json_response(details(request.app, copy), status=201)
 
 
@@ -332,6 +340,7 @@ async def voice_select_candidate(request: web.Request) -> web.Response:
     voice = request.app[VOICES_KEY].replace_audio(
         voice.id, path.with_suffix(".wav").read_bytes(), meta["text"], instruct=meta["description"],
         description=meta["description"], seed=meta["seed"])
+    await _characters_follow(request.app, voice.id)
     for p in _candidates_dir(request.app).glob("*.json"):
         try:
             if json.loads(p.read_text(encoding="utf-8")).get("voice") in made_for:

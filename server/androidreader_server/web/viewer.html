@@ -55,6 +55,7 @@
   .drawer section h4 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
   .drawer .rowx { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
   .drawer .rowx select { width:auto; flex:1; min-width:0; }
+  .drawer details.profile > summary { cursor:pointer; list-style-position:inside; }
   .seg { display:inline-flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
   .seg button { border:0; border-radius:0; padding:4px 12px; background:var(--card); }
   .seg button + button { border-left:1px solid var(--line); } .seg button.on { background:var(--accent); color:#fff; }
@@ -938,7 +939,6 @@ async function bookView(id) {
           h("button", { class: "iconbtn", title: "More", onclick: (e) => popMenu(e.currentTarget, [
             { text: "Rename\u2026", run: () => { const n = prompt("Name", c.name); if (n && n.trim() && n.trim() !== c.name) patch({ name: n.trim() }); } },
             { text: "Same person as\u2026 (merge)", run: () => merge(c) },
-            { text: "Re-label lines with the profiles\u2026", run: relabel },
           ]) }, "\u22EF"),
           h("button", { class: "iconbtn", title: "Close", onclick: () => d.close() }, "\u2715")),
         section("Overview",
@@ -952,13 +952,19 @@ async function bookView(id) {
             voiceSel,
             c.voice ? h("button", { type: "button", onclick: () => openVoiceEditor(c.voice, { book: st.id, character: cid, characterName: c.name,
               onChange: async () => { flushAudio(); st.voices = (await get("/api/voices?all=1")).voices; await reloadScript(); render(); } }) }, "Edit voice\u2026") : null),
-          c.description ? h("div", { class: "small muted" }, c.description) : null),
-        section("Profile",
-          h("p", { class: "small muted", style: { marginTop: 0 } }, "What the book says about them. Your edits win over the model's and are used when lines are re-labelled and voices designed."),
+          (() => {
+            const v = st.voices.find(x => x.id === c.voice);
+            const text = v && (v.description || v.instruct);
+            return text ? h("div", { class: "small muted" }, text, (c.voice || "").startsWith("pool-") ? " (shared by several minor characters)" : "") : null;
+          })()),
+        h("section", {}, h("details", { class: "profile", open: st.profileOpen || undefined,
+            ontoggle: (e) => { st.profileOpen = e.target.open; } },
+          h("summary", {}, h("h4", { style: { display: "inline" } }, "Profile (for voice design)")),
+          h("p", { class: "small muted" }, "Used to design this character's voice and for later volumes in the series. Doesn't change who-said-what."),
           h("label", {}, "Also called (comma separated)"), aliases, ...fields,
           facts.length ? h("details", {}, h("summary", { class: "small" }, `Evidence (${facts.length})`), h("ul", {}, ...facts)) : null,
           revisions.length ? h("details", {}, h("summary", { class: "small" }, "Changed its mind"), h("ul", {}, ...revisions)) : null,
-          h("div", { class: "rowx" }, h("button", { type: "button", class: "primary", onclick: saveProfile }, "Save profile"), design)),
+          h("div", { class: "rowx" }, h("button", { type: "button", class: "primary", onclick: saveProfile }, "Save profile"), design))),
         section("Lines",
           h("button", { type: "button", onclick: () => {
             st.filterChar = cid; $("#charFilter").value = cid; renderText(); renderCast(); d.close(); $("aside").classList.remove("open");

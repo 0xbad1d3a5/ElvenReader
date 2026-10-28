@@ -1585,6 +1585,35 @@ def pool_key(gender: str, age: str) -> tuple[str, str]:
     return (g, "adult")
 
 
+def follow_voice(c: dict, voices) -> bool:
+    """A character with a voice of its own is described by that voice (what it was designed from or last
+    edited to), so a voice chosen or redesigned later doesn't leave a stale description behind. Shared pool
+    voices say nothing about the character."""
+    vid = c.get("voice") or ""
+    v = voices.get(vid) if vid and not vid.startswith("pool-") else None
+    text = ((v.description or v.instruct) if v else "").strip()
+    if text and text != c.get("description"):
+        c["description"] = text
+        return True
+    return False
+
+
+async def sync_voice_descriptions(app: web.Application, voice_id: str) -> None:
+    """After a voice is edited: every character it voices (in any book) takes its new description."""
+    from .app import VOICES_KEY
+
+    store = app.get(DRAMA_STORE_KEY)
+    if store is None:
+        return
+    voices = app[VOICES_KEY]
+    for book_id in store.ids():
+        async with store.lock(book_id):
+            s = store.script(book_id)
+            changed = [follow_voice(c, voices) for c in s["characters"].values() if c.get("voice") == voice_id]
+            if any(changed):
+                store.save_script(book_id, s)
+
+
 def character_description(c: dict) -> str:
     user_voice = (c.get("dossier_user") or {}).get("voice")
     if user_voice:
@@ -1866,7 +1895,7 @@ async def get_script(request: web.Request) -> web.Response:
     s = store.script(book_id)
     if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
                                       or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))
-                                      or s.get("names_v") != 1):
+                                      or s.get("names_v") != 1 or s.get("voice_desc_v") != 1):
         async with store.lock(book_id):
             s = store.script(book_id)
             book = store.book(book_id)
@@ -1878,6 +1907,12 @@ async def get_script(request: web.Request) -> web.Response:
                 logger.info("%s: %d quoted terms given back to the narration", book_id, n)
             if s.get("names_v") != 1:  # "a prisoner" -> "Prisoner"
                 normalize_names(s)
+            if s.get("voice_desc_v") != 1:  # descriptions left behind by voices chosen or redesigned later
+                from .app import VOICES_KEY
+
+                for c in s["characters"].values():
+                    follow_voice(c, request.app[VOICES_KEY])
+                s["voice_desc_v"] = 1
             if not any(c.get("role") for c in s["characters"].values()):  # analysed before tiers existed
                 from . import roles
 
@@ -1954,7 +1989,10 @@ async def patch_character(request: web.Request) -> web.Response:
             c["name"] = body["name"]
             c["name_user"] = True  # typed by the reader: never re-cased
         if "voice" in body:
+            from .app import VOICES_KEY
+
             c["voice"] = body["voice"] or None
+            follow_voice(c, request.app[VOICES_KEY])
         if isinstance(body.get("dossier"), dict):
             from .dossier import FIELDS, effective, sync_character
 
