@@ -689,3 +689,46 @@ async def test_book_pictures_are_listed_uploaded_and_served(drama_client):
     assert (await c.put("/api/books/book1/picture?path=..%2F..%2Fconfig.json", data=b"x", headers=AUTH)).status == 404
     lst = await (await c.get("/api/books/book1/pictures", headers=AUTH)).json()
     assert lst == {"have": ["OEBPS/images/p1.jpg"], "need": ["OEBPS/images/end.png"]}
+
+
+def test_later_passages_may_revise_earlier_lines_but_never_corrections():
+    Q, E = "\u201c", "\u201d"
+    paras = [f"{Q}Who are you?{E} the man asked.", f"{Q}Nobody,{E} I said.", f"{Q}Where from?{E}",
+             f"{Q}I go by Nick here,{E} said the man."]
+    ch = {"title": "One", "paragraphs": paras, "quotes": []}
+    for pi, t in enumerate(paras):
+        ch["quotes"] += [[f"q{pi}", pi, s, e] for s, e in dz.quote_regions(t)]
+    book = {"chapters": [ch]}
+    later = dz.Chunk("c0k1", 0, [3], [tuple(ch["quotes"][3])])
+    script = {"characters": {}, "lines": {}, "corrections": {}, "narrator": "Sasaki"}
+    prisoner, me = dz.ensure_character(script, "a prisoner"), dz.ensure_character(script, "Sasaki")
+    script["lines"] = {"q0": {"speaker": prisoner, "delivery": None}, "q1": {"speaker": me, "delivery": None},
+                       "q2": {"speaker": prisoner, "delivery": None}}
+    script["corrections"] = {"q2": {"speaker": prisoner}}  # the reader decided this one
+    seen = []
+
+    class FakeLlm:
+        async def complete(self, session, system, user, schema, max_tokens=0, **kw):
+            seen.append((user, schema))
+            return {"narrator": "Sasaki", "speakers": [{"name": "Nick", "aliases": [], "gender": "male", "age": "adult"}],
+                    "quotes": [{"id": "1", "speaker": "Nick", "delivery": "neutral"}],
+                    "revisions": [{"id": "R1", "starts": "Who are you", "speaker": "Nick", "reason": "he gives his name: 'I go by Nick'"},
+                                  {"id": "R2", "starts": "I go by", "speaker": "Nick", "reason": "aimed at the wrong line"},
+                                  {"id": "R2", "starts": "Nobody", "speaker": "Sasaki", "reason": "unchanged"}]}
+
+    result, local = asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, later, revise=12))
+    user, schema = seen[-1]
+    assert "[R1] a prisoner: \u201cWho are you?\u201d" in user and "[R2] Sasaki" in user
+    assert "Where from" not in user.split(dz.REVISE_NOTE)[1]  # corrected lines are not offered
+    assert schema["properties"]["revisions"]["items"]["properties"]["id"]["enum"] == ["R1", "R2"]
+    dz.apply_chunk_result(script, result, local)
+    nick = dz.find_character(script, "Nick")
+    assert script["lines"]["q0"]["speaker"] == nick and script["lines"]["q0"]["revised"]
+    assert script["lines"]["q1"]["speaker"] == me and "revised" not in script["lines"]["q1"]
+    assert script["revisions"] == [{"id": "q0", "from": prisoner, "to": nick, "reason": "he gives his name: 'I go by Nick'"}]
+    assert dz.ScriptStore.public(script)["lines"]["q0"]["revised"]
+    # unnamed-only: Sasaki's line is not offered; off by default: no revisions in the schema
+    asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, later, revise=12, revise_unnamed=True))
+    assert "[R1]" not in seen[-1][0]  # q0 is now Nick, q1 Sasaki: nothing unnamed left
+    asyncio.run(dz.label_chunk(FakeLlm(), None, book, script, later))
+    assert "revisions" not in seen[-1][1]["properties"]

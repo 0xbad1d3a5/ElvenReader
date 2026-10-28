@@ -334,6 +334,44 @@ Twelve of the remaining 19 misses come from one chunk at the start of a chapter,
 preceding text to use: there the then-unnamed Nick comes out as "a prisoner", "Nick" or another
 character from run to run, with either setting.
 
+**Letting later passages revise earlier lines (tried, not used).** A reader often only works out
+who said something a page later, for example when the "prisoner" introduces himself as Nick. With
+`"llm_label_revise_window": K`, each labelling call also sees the chapter's last K labelled lines
+([R1], [R2]…, never the reader's corrections) and may revise them, giving the evidence. Revisions
+are logged in the script and flagged as `revised` on the line. Three guards apply. A revision must
+echo the line's first words, so it can't land on the wrong line. Its reason must quote the passage,
+or rest on an accepted revision ("same as R1"). `llm_label_revise_unnamed` limits it to lines given
+to unnamed speakers ("a prisoner"). Measured on the gold-chunk harness (three runs each; time vs
+the default):
+
+| Variant | *Sasaki* (mean of 3) | Classics | Revisions in 3 runs: fixed / broke | Time |
+|---|---|---|---|---|
+| Default (600 words before, 12 recent lines) | 152.0/161 = 94.4% | 180/182 | — | 1.0× |
+| Revise the last 12 lines | 153.0 = 95.0% | 180/182 | 0 / 2 (8 changed nothing) | 1.15× |
+| Revise the last 30 lines | 149.7 = 93.0% | 180/182 | 0 / 0 (1 made) | 1.15× |
+| Revise the last 60 lines | 150.3 = 93.4% | 180/182 | 0 / 5, plus 7 wrong on unscored lines | 1.6× |
+| Unnamed speakers only (last 60) | 151.3 = 94.0% | 180/182 | 0 / 0, but 12 wrong on unscored lines | 1.05× |
+| Revise 30, Qwen3.5 thinking (1,024 tokens; 1 run) | 153 = 95.0% | 180/182 | none made | 2.1× |
+
+The gold chunks start from an empty cast, where the Nick lines come out right anyway (12/12 in
+every run), so they can't show the case this is for. A separate probe reproduces the whole-book
+run: the prison chapter's first three chunks re-labelled with the full cast and earlier chapters
+in place, three runs each (`scripts\eval_reasoning.py --nick-probe 3 ...`):
+
+| Variant | Nick's 12 lines before he gives his name |
+|---|---|
+| Default, revise 12 or 30 | 0/12 in every run ("a prisoner" or "Mr. Akutsu") |
+| Unnamed speakers only, without the evidence check | **12/12 in all three runs** |
+| Unnamed speakers only, with the evidence check | 1, 12 and 1/12 |
+
+It does fix Nick, but the same mechanism also rewrites other unnamed speakers. In the prison yard,
+six lines of other prisoners' chatter ("Zhang Lee? What's Nick talking about?") were "a prisoner"
+too. In most runs they were revised to Nick, Zhang Lee, the Neighbor or a soldier. Wider windows
+break correct lines (Sasaki's own "Yes. Kenta Nakano." given to a soldier). The evidence check
+removes those mistakes only by also removing most of the Nick fix, because the model can't tell
+which of several people a description such as "a prisoner" means. No variant gained on *Sasaki*,
+so it stays off (`0`). Correcting the Nick lines in the viewer remains the reliable fix.
+
 `"llm_mode": "auto"` (default) runs the LLM on the GPU only after two minutes without speech
 requests and on the CPU otherwise, so analysis never evicts the voice model while you listen.
 `"gpu"` and `"cpu"` force one or the other.

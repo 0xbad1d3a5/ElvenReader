@@ -85,6 +85,11 @@ class ServerConfig:
     # old 0 / 6 on our hardest gold excerpts for ~7% more time (README); 0 / 6 = the old fast pass.
     llm_label_context_words: int = 600
     llm_label_recent_lines: int = 12
+    # Let each labelling call revise up to this many earlier lines of the chapter when the new passage
+    # shows they were wrong (a name revealed later...); 0 = off. _unnamed: only lines given to
+    # unnamed speakers ("a prisoner"). Reader corrections are never revised.
+    llm_label_revise_window: int = 0
+    llm_label_revise_unnamed: bool = False
     # Cap on reasoning tokens per request (llama.cpp --reasoning-budget); -1 = unlimited.
     llm_reasoning_budget: int = -1
     # Engine used to create character voices from a description.

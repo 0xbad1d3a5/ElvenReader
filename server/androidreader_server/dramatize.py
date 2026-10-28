@@ -232,7 +232,26 @@ First-person narration: when the story is told by "I", every line the narrator s
 Also list every character who speaks in this passage with their gender, age group and any other names, titles or nicknames the passage uses for them (aliases)."""
 
 
-def chunk_schema(local_ids: list[str]) -> dict:
+def chunk_schema(local_ids: list[str], revisable: list[str] | None = None) -> dict:
+    schema = _chunk_schema(local_ids)
+    if revisable:
+        # Earlier lines the passage shows were given to the wrong speaker (see label_chunk's revise).
+        schema["properties"]["revisions"] = {
+            "type": "array", "maxItems": len(revisable),
+            "items": {"type": "object",
+                      "properties": {"id": {"type": "string", "enum": revisable},
+                                     # the earlier line's first words: a revision aimed at the wrong line is dropped
+                                     "starts": {"type": "string", "maxLength": 40},
+                                     "speaker": {"type": "string"},
+                                     "reason": {"type": "string", "maxLength": 160}},
+                      "required": ["id", "starts", "speaker", "reason"]},
+        }
+        schema["required"] = ["narrator", "quotes", "revisions", "speakers"]
+        schema["properties"] = {k: schema["properties"][k] for k in ("narrator", "quotes", "revisions", "speakers")}
+    return schema
+
+
+def _chunk_schema(local_ids: list[str]) -> dict:
     return {
         "type": "object",
         "properties": {
@@ -455,6 +474,8 @@ class ScriptStore:
             lines[qid] = {"speaker": line.get("speaker"), "delivery": line.get("delivery"), "corrected": False}
             if line.get("mention") and line.get("speaker") is None:
                 lines[qid]["mention"] = True  # a quoted term inside narration, not dialogue
+            if line.get("revised"):
+                lines[qid]["revised"] = True  # changed by a later passage's evidence
         for qid, fix in script.get("corrections", {}).items():
             base = lines.get(qid, {"speaker": None, "delivery": None})
             lines[qid] = {
@@ -886,6 +907,8 @@ def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) 
             if q.get("mention"):
                 script["lines"][qid]["mention"] = True
             n += 1
+    if result.get("revisions"):
+        apply_revisions(script, result)
     return n
 
 
@@ -1025,10 +1048,92 @@ REVIEW_NOTE = ("A first reading proposed the labels below. Check every one again
                "(keep the right ones). Return the full list.")
 
 
+REVISE_NOTE = ("Earlier lines, already labelled, which you may correct: [R1], [R2]... with the speaker each was "
+               "given. Something in the passage can show that one of them was wrong: a character gives their name "
+               "(so \"a prisoner\" was really that person), a reply shows who asked, or a tag names a speaker the "
+               "earlier text left unclear. Label the passage first; then, only where the passage gives clear evidence, "
+               "list the earlier line in \"revisions\" with its R number, its first two or three words in \"starts\", its "
+               "correct speaker and a reason that quotes, word for word in quotation marks, the words of the passage that "
+               "show it (or \"same as R2\" when it rests on the evidence of another revision). R numbers are not the "
+               "passage's [n] numbers. A description such as \"a prisoner\" can cover several different people: revise "
+               "only the lines the evidence is about. Most of the time \"revisions\" is empty.")
+
+
+def _words(text: str, n: int = 3) -> list[str]:
+    return re.findall(r"[^\W_]+", text.lower())[:n]
+
+
+def _quotes_passage(reason: str, passage: str) -> bool:
+    """The reason quotes at least three consecutive words of the passage."""
+    flat = " ".join(re.findall(r"[^\W_]+", passage.lower()))
+    for quoted in re.findall(r"[\"'\u201c\u2018]([^\"\u201d\u2019]{6,200})[\"'\u201d\u2019]", reason):
+        words = re.findall(r"[^\W_]+", quoted.lower())
+        for i in range(len(words) - 2):
+            if " ".join(words[i:i + 3]) in flat:
+                return True
+    return False
+
+
+def is_placeholder(name: str) -> bool:
+    """An unnamed speaker the model described ("a prisoner", "the girl") rather than named."""
+    return bool(name) and (name[:1].islower() or re.match(r"^(?:a|an|the)\s", name) is not None)
+
+
+def revisable_lines(script: dict, book: dict, chunk: Chunk, n: int, unnamed_only: bool = False) -> list[tuple[str, str, str]]:
+    """The last `n` labelled quotations before this chunk in its chapter, as (quote id, speaker, text); the
+    reader's corrections and quoted terms are never offered for revision."""
+    ch = book["chapters"][chunk.chapter]
+    fixed = script.get("corrections", {})
+    out = []
+    for qid, p, s, e in ch.get("quotes", []):
+        line = script["lines"].get(qid)
+        if int(p) >= chunk.paragraphs[0] or line is None or qid in fixed or line.get("mention"):
+            continue
+        sp = line.get("speaker")
+        name = script["characters"].get(sp, {}).get("name", NARRATOR) if sp else NARRATOR
+        if unnamed_only and not is_placeholder(name):
+            continue
+        out.append((qid, name, ch["paragraphs"][int(p)][int(s):int(e)]))
+    return out[-n:] if n else []
+
+
+def apply_revisions(script: dict, result: dict) -> list[dict]:
+    """Applies the passage's revisions of earlier lines (never the reader's corrections) and logs them."""
+    editable = result.get("_editable") or {}
+    narrator = script.get("narrator", "")
+    done = []
+    accepted: dict[str, str | None] = {}
+    for r in result.get("revisions") or []:
+        qid = editable.get(str(r.get("id")))
+        line = script["lines"].get(qid) if qid else None
+        if line is None or qid in script.get("corrections", {}) or not (r.get("reason") or "").strip():
+            continue
+        said, text = _words(r.get("starts") or "", 2), _words(result.get("_texts", {}).get(qid, ""), 2)
+        if not said or said != text[:len(said)]:
+            continue  # aimed at a different line than its R number
+        new = resolve_speaker(script, r.get("speaker", ""), narrator)
+        reason = r.get("reason") or ""
+        same = re.search(r"same as (R\d+)", reason, re.IGNORECASE)
+        if same:
+            if accepted.get(same.group(1).upper()) != new:
+                continue  # leans on a revision that was not accepted, or names someone else
+        elif not _quotes_passage(reason, result.get("_passage", "")):
+            continue  # no evidence from the passage itself
+        if new == line.get("speaker"):
+            continue
+        accepted[str(r.get("id")).upper()] = new
+        event = {"id": qid, "from": line.get("speaker"), "to": new, "reason": r["reason"].strip()[:160]}
+        script["lines"][qid] = {**line, "speaker": new, "revised": True}
+        script.setdefault("revisions", []).append(event)
+        done.append(event)
+    return done
+
+
 async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk,
                       thinking: bool = False, model: str | None = None, effort: str = "high",
                       context_words: int = 0, recent: int = 6,
-                      proposed: dict[str, str] | None = None) -> tuple[dict, dict[str, str]]:
+                      proposed: dict[str, str] | None = None, revise: int = 0,
+                      revise_unnamed: bool = False) -> tuple[dict, dict[str, str]]:
     """Label one chunk. `context_words` adds the preceding text, `recent` sets how many earlier
     attributions are shown, and `proposed` (number -> speaker) asks the model to review a first pass."""
     text, local = render_chunk(book, chunk)
@@ -1064,6 +1169,15 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         if notes:
             known += f"\n\nNotes on some characters (from the reader):\n{notes}"
     before = preceding_text(book, chunk, context_words) if context_words else ""
+    editable: dict[str, str] = {}
+    revise_block = ""
+    if revise:
+        prior = revisable_lines(script, book, chunk, revise, revise_unnamed)
+        editable = {f"R{i}": qid for i, (qid, _, _) in enumerate(prior, 1)}
+        texts = {qid: text for qid, _, text in prior}
+        if prior:
+            revise_block = (f"{REVISE_NOTE}\n" + "\n".join(f"[R{i}] {name}: {text[:100]}"
+                                                         for i, (_, name, text) in enumerate(prior, 1)) + "\n\n")
     review = ""
     if proposed:
         review = (f"{REVIEW_NOTE}\n" + "\n".join(f"[{n}] {proposed.get(n, '?')}" for n in local) + "\n\n")
@@ -1075,7 +1189,7 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         + (f"Story just before this passage (for context only):\n{before}\n\n" if before else "")
         + f"Most recent lines before this passage:\n{recent_text(script, book, chunk, n=recent)}\n\n"
         f"Passage:\n{text}\n\n"
-        f"{review}"
+        f"{review}{revise_block}"
         f"Label every number from 1 to {len(local)} once."
     )
     # Generous budget: reasoning models (gpt-oss) spend tokens before the JSON, and the
@@ -1086,14 +1200,19 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         extra["model"] = model
     if thinking:
         budget += 8000
+    if editable:
+        budget += 60 * min(len(editable), 8)
+    schema = chunk_schema(list(local), list(editable))
     try:
-        result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget,
-                                    **extra)
+        result = await llm.complete(session, SYSTEM_PROMPT, user, schema, max_tokens=budget, **extra)
     except LlmError as exc:
         if "invalid JSON" not in str(exc):
             raise
-        result = await llm.complete(session, SYSTEM_PROMPT, user, chunk_schema(list(local)), max_tokens=budget * 3,
-                                    **extra)
+        result = await llm.complete(session, SYSTEM_PROMPT, user, schema, max_tokens=budget * 3, **extra)
+    result["_editable"] = editable
+    if editable:
+        result["_texts"] = texts
+        result["_passage"] = text
     # Backstop for the prompt rule: a quoted term inside a sentence is narration.
     paras = book["chapters"][chunk.chapter]["paragraphs"]
     spans = {q[0]: q for q in chunk.quotes}
@@ -1217,7 +1336,9 @@ class Analyzer:
         cfg = self.llm.cfg
         return await self._gpu(lambda: label_chunk(self.llm, session, book, script, chunk, thinking=thinking,
                                                    context_words=cfg.llm_label_context_words,
-                                                   recent=cfg.llm_label_recent_lines))
+                                                   recent=cfg.llm_label_recent_lines,
+                                                   revise=cfg.llm_label_revise_window,
+                                                   revise_unnamed=cfg.llm_label_revise_unnamed))
 
     async def _read_for_dossier(self, session, book: dict, book_id: str) -> None:
         """Pass 1: the reasoning model reads the whole book and builds the character dossier."""
