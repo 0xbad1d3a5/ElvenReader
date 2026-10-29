@@ -1795,7 +1795,7 @@ CAST_TASKS_KEY = web.AppKey("cast_tasks", set)
 
 
 async def list_books(request: web.Request) -> web.Response:
-    from .series import series_name as _series_name
+    from .series import series_name as _series_name, volume_key
 
     store = request.app[DRAMA_STORE_KEY]
     books = []
@@ -1807,6 +1807,8 @@ async def list_books(request: web.Request) -> web.Response:
             **summary,
             "id": book_id,
             "series": summary.get("series") or _series_name(summary.get("title", "")),
+            "series_auto": not summary.get("series"),
+            "volume": volume_key(summary.get("title", "")),
             "status": s.get("status", "none"),
             "progress": s.get("progress", 0.0),
             "detail": s.get("detail", ""),
@@ -2071,6 +2073,7 @@ async def patch_character(request: web.Request) -> web.Response:
             from .app import VOICES_KEY
 
             c["voice"] = body["voice"] or None
+            c["voice_user"] = bool(c["voice"])  # the reader's choice: a series applied later keeps it
             follow_voice(c, request.app[VOICES_KEY])
         if isinstance(body.get("profile"), dict) or isinstance(body.get("dossier"), dict):
             from . import profile

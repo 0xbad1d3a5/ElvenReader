@@ -19,6 +19,13 @@
   header h1 { font-size:17px; margin:0; } header .grow { flex:1; }
   .muted { color:var(--muted); } .small { font-size:12.5px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:18px; padding:18px; }
+  .grid .serieshead { grid-column:1/-1; font-size:15px; margin:6px 0 -8px; display:flex; gap:8px; align-items:baseline; }
+  .grid .serieshead:not(:first-child) { margin-top:14px; }
+  .seriessel { max-width:18em; font-size:12.5px; padding:2px 4px; } dialog .seriessel { max-width:100%; }
+  .serieslist { padding:12px 18px; max-width:900px; }
+  .serieslist .sr { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  .serieslist .sr h3 { margin:0 0 4px; font-size:16px; display:flex; gap:8px; align-items:center; }
+  .serieslist ol { margin:6px 0 0; padding-left:22px; }
   .book { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; color:inherit; }
   .book .cover { aspect-ratio:2/3; background:#8883; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; font-weight:600; }
   .book .cover img { width:100%; height:100%; object-fit:cover; }
@@ -93,6 +100,7 @@
     .narrowonly { display:inline-block; }
     header { gap:8px; padding:8px 10px; } header h1 { font-size:15px; } #status, header .grow { display:none; }
     header #search, header #charFilter { flex:1 1 140px; min-width:0; }
+    #seriesInfo .seriessel { max-width:12em; }
     .layout { grid-template-columns:1fr; height:auto; }
     aside { display:none; border-right:0; border-bottom:1px solid var(--line); padding-bottom:16px; }
     aside.open { display:block; }
@@ -192,11 +200,113 @@ function statusText(s) {
     casting: "Creating voices\u2026", done: "Analysed", error: "Error" })[s.status] + (s.detail ? " \u2014 " + s.detail : "");
 }
 
+let SERIES_NAMES = null;  // cached for the series pickers (declared before the routing below runs a view)
 const route = location.pathname.replace(/\/+$/, "");
 const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
 if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");
 else if (routeMatch && routeMatch[1] === "voices") voicesView();
+else if (routeMatch && routeMatch[1] === "series") seriesView();
 else if (routeMatch) bookView(routeMatch[1]); else libraryView();
+
+/* ------------------------------------------------------------------ series */
+
+async function seriesNames() {
+  if (!SERIES_NAMES) SERIES_NAMES = (await get("/api/series")).series.map(g => g.name);
+  return SERIES_NAMES;
+}
+
+/* A series chooser: "Detect from title", the series known so far and "New series…". `onPick(name)` gets ""
+   for "detect from the title"; returning false puts the old choice back. */
+function seriesSelect(names, current, auto, detected, onPick) {
+  const AUTO = "__auto__", NEW = "__new__";
+  // The detected name is the "Detect from title" entry; it is only listed on its own when set by hand.
+  const list = [...new Set([...names, current].filter(n => n && (n !== detected || (!auto && n === current))))]
+    .sort((a, b) => a.localeCompare(b));
+  const sel = h("select", { class: "seriessel", title: "Books in a series share their cast and voices" },
+    h("option", { value: AUTO }, detected ? `Detect from title (${detected})` : "Detect from title"),
+    ...list.map(n => h("option", { value: n }, n)),
+    h("option", { value: NEW }, "New series\u2026"));
+  sel.value = auto ? AUTO : current;
+  let last = sel.value;
+  sel.onchange = async () => {
+    let v = sel.value;
+    if (v === NEW) {
+      const name = (prompt("Name of the new series") || "").trim();
+      if (!name) { sel.value = last; return; }
+      if (!list.includes(name)) sel.insertBefore(h("option", { value: name }, name), sel.lastChild);
+      sel.value = v = name;
+    }
+    sel.disabled = true;
+    const ok = await onPick(v === AUTO ? "" : v);
+    sel.disabled = false;
+    if (ok === false) sel.value = last; else { last = sel.value; SERIES_NAMES = null; }
+  };
+  return sel;
+}
+
+/* Volume order inside a series ("Part 2 Volume 3" -> [2, 3]); books without a number go last. */
+function byVolume(a, b) {
+  const x = a.volume || [], y = b.volume || [];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === undefined || y[i] === undefined) return x[i] === undefined ? 1 : -1;
+    if (x[i] !== y[i]) return x[i] - y[i];
+  }
+  return (a.title || "").localeCompare(b.title || "");
+}
+
+async function seriesView() {
+  $("#app").replaceChildren(
+    h("header", {}, h("a", { href: "/books" }, "\u2190 Books"), h("h1", {}, "Series"), h("span", { class: "grow" })),
+    h("div", { class: "serieslist", id: "slist" }, h("p", { class: "muted" }, "Loading\u2026")));
+  async function render() {
+    SERIES_NAMES = null;
+    const { series } = await get("/api/series");
+    const el = $("#slist");
+    el.replaceChildren(h("p", { class: "small muted" }, "Books in a series share their cast: characters, tiers, profiles and " +
+      "voices carry over from one volume to the next. A book's series is detected from its title; change it on the book's page."));
+    for (const g of series.filter(g => g.volumes.length || g.cast)) {
+      const others = series.filter(o => o.name !== g.name).map(o => o.name);
+      const rename = async () => {
+        const to = (prompt(`Rename \u201c${g.name}\u201d to`, g.name) || "").trim();
+        if (!to || to === g.name) return;
+        const into = series.find(o => o.name !== g.name && o.name.toLowerCase() === to.toLowerCase());
+        if (into && !confirm(`\u201c${into.name}\u201d already exists. Merge \u201c${g.name}\u201d into it?`)) return;
+        await move(to);
+      };
+      const move = async (to) => {
+        try { await api("POST", "/api/series/rename", { from: g.name, to }); } catch (e) { alert(e.message); }
+        render();
+      };
+      const merge = (e) => popMenu(e.currentTarget, [{ label: `Merge \u201c${g.name}\u201d into\u2026` },
+        ...others.map(o => ({ text: o, title: "Its books move there; the same characters become one (that series' voices win)",
+          run: () => confirm(`Merge \u201c${g.name}\u201d into \u201c${o}\u201d?`) && move(o) }))]);
+      el.append(h("div", { class: "sr" },
+        h("h3", {}, g.name, h("span", { class: "grow" }),
+          h("button", { class: "small", onclick: rename }, "Rename\u2026"),
+          others.length ? h("button", { class: "small", onclick: merge }, "Merge into\u2026") : null),
+        h("div", { class: "small muted" }, `${g.volumes.length} book${g.volumes.length === 1 ? "" : "s"} \u00b7 ` +
+          (g.cast ? `cast of ${g.cast} (${g.voiced} with voices)` : "no cast remembered yet")),
+        g.volumes.length ? h("ol", {}, ...g.volumes.slice().sort(byVolume).map(v => h("li", {},
+          h("a", { href: `/books/${v.id}` }, v.title), v.auto ? null : h("span", { class: "small muted" }, " (set by hand)")))) : null));
+    }
+  }
+  render().catch(e => tokenScreen.shown || $("#slist").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
+/* Shared popup menu below `anchor`: items are {text, run, title, on}, "-" or {label}. */
+function popMenu(anchor, items) {
+  document.querySelectorAll(".menu").forEach(m => m.remove());
+  const m = h("div", { class: "menu", role: "menu" }, ...items.map(it => it === "-" ? h("hr")
+    : it.label ? h("div", { class: "lbl" }, it.label)
+    : h("button", { type: "button", title: it.title || "", onclick: () => { m.remove(); it.run(); } },
+        it.on === undefined ? "" : (it.on ? "\u2713 " : "\u2003 "), it.text)));
+  (anchor.closest("dialog") || document.body).append(m);
+  const r = anchor.getBoundingClientRect(), w = m.offsetWidth;
+  m.style.top = Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8) + "px";
+  m.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + "px";
+  const off = (e) => { if (!m.contains(e.target)) { m.remove(); document.removeEventListener("mousedown", off, true); } };
+  setTimeout(() => document.addEventListener("mousedown", off, true));
+}
 
 /* ------------------------------------------------------------------ library */
 
@@ -204,6 +314,7 @@ async function libraryView() {
   $("#app").replaceChildren(
     h("header", {}, h("h1", {}, "AndroidReader \u2014 library"), h("span", { class: "grow" }),
       h("button", { class: "primary", onclick: () => addBook(refresh) }, "+ Add book"),
+      h("a", { href: "/books/series" }, "Series"),
       h("a", { href: "/books/voices" }, "Voices"),
       EMBEDDED_TOKEN ? h("a", { href: "/", title: "Links and QR codes to open the library on other devices" }, "Other devices") : null),
     h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
@@ -214,47 +325,70 @@ async function libraryView() {
     const grid = $("#grid");
     grid.replaceChildren(...(books.length ? [] : [h("p", { class: "muted" },
       "No books yet. Use \u201c+ Add book\u201d to upload an EPUB; it is analysed and cast automatically.")]));
+    // Series with several books get a heading (volumes in order); the rest follow under "Other books".
+    const groups = new Map();
     for (const b of books) {
-      const cover = h("div", { class: "cover" }, b.title);
-      if (b.cover) {
-        covers[b.id] = covers[b.id] || authBlobUrl(`/api/books/${b.id}/cover`);
-        covers[b.id].then(u => u && cover.replaceChildren(h("img", { src: u, alt: "" })));
-      }
-      grid.append(h("a", { class: "book", href: `/books/${b.id}` }, cover,
-        h("div", { class: "info" },
-          h("div", { class: "title" }, b.title),
-          h("div", { class: "muted small" }, b.author),
-          h("div", { class: "small" }, `${(b.words || 0).toLocaleString()} words \u00b7 ${b.quotes} quotations`),
-          BUSY.includes(b.status) ? h("div", { class: "bar" }, h("div", { style: { width: (b.status === "casting" ? 100 : b.progress * 100) + "%" } })) : null,
-          h("div", { class: "small" }, statusText(b)),
-          h("div", { class: "small muted" }, `${b.lines} lines \u00b7 ${b.characters} characters \u00b7 ${b.voiced} voiced`),
-          BUSY.includes(b.status) ? null : h("button", { class: "small", style: { marginTop: "6px" },
-            title: "Analyse the book again from the start (your corrections, cast and voices are kept)",
-            onclick: async (e) => {
-              e.preventDefault(); e.stopPropagation();
-              if (!confirm(`Analyse \u201c${b.title}\u201d again? Your corrections, cast and voices are kept; it takes about an hour for a long novel.`)) return;
-              try { await api("POST", `/api/books/${b.id}/analyze`, { reanalyze: true }); } catch (err) { alert(err.message); }
-              refresh();
-            } }, "Re-analyse"))));
+      const key = (b.series || b.title || "").toLowerCase();
+      if (!groups.has(key)) groups.set(key, { name: b.series, books: [] });
+      groups.get(key).books.push(b);
+    }
+    const multi = [...groups.values()].filter(g => g.books.length > 1);
+    const singles = [...groups.values()].filter(g => g.books.length === 1).map(g => g.books[0]);
+    const sections = multi.length
+      ? [...multi.map(g => ({ head: g.name, count: g.books.length, books: g.books.slice().sort(byVolume) })),
+         ...(singles.length ? [{ head: "Other books", books: singles }] : [])]
+      : [{ head: null, books }];
+    for (const sec of sections) {
+      if (sec.head) grid.append(h("h2", { class: "serieshead" }, sec.head,
+        sec.count ? h("span", { class: "small muted" }, `${sec.count} books`) : null));
+      for (const b of sec.books) grid.append(card(b, !sec.count));
     }
     clearTimeout(timer);
     if (books.some(b => BUSY.includes(b.status))) timer = setTimeout(refresh, 8000);
   }
+  function card(b, showSeries) {
+    const cover = h("div", { class: "cover" }, b.title);
+    if (b.cover) {
+      covers[b.id] = covers[b.id] || authBlobUrl(`/api/books/${b.id}/cover`);
+      covers[b.id].then(u => u && cover.replaceChildren(h("img", { src: u, alt: "" })));
+    }
+    return h("a", { class: "book", href: `/books/${b.id}` }, cover,
+      h("div", { class: "info" },
+        h("div", { class: "title" }, b.title),
+        h("div", { class: "muted small" }, b.author),
+        showSeries && b.series && b.series !== b.title ? h("div", { class: "small muted", title: "Series" }, "\uD83D\uDCDA " + b.series) : null,
+        h("div", { class: "small" }, `${(b.words || 0).toLocaleString()} words \u00b7 ${b.quotes} quotations`),
+        BUSY.includes(b.status) ? h("div", { class: "bar" }, h("div", { style: { width: (b.status === "casting" ? 100 : b.progress * 100) + "%" } })) : null,
+        h("div", { class: "small" }, statusText(b)),
+        h("div", { class: "small muted" }, `${b.lines} lines \u00b7 ${b.characters} characters \u00b7 ${b.voiced} voiced`),
+        BUSY.includes(b.status) ? null : h("button", { class: "small", style: { marginTop: "6px" },
+          title: "Analyse the book again from the start (your corrections, cast and voices are kept)",
+          onclick: async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            if (!confirm(`Analyse \u201c${b.title}\u201d again? Your corrections, cast and voices are kept; it takes about an hour for a long novel.`)) return;
+            try { await api("POST", `/api/books/${b.id}/analyze`, { reanalyze: true }); } catch (err) { alert(err.message); }
+            refresh();
+          } }, "Re-analyse")));
+  }
   refresh().catch(e => tokenScreen.shown || $("#grid").replaceChildren(h("p", {}, "Error: " + e.message)));
 }
 
-/* Add a book: upload EPUB files from this device, or (on the PC) give a path. The server parses the book,
-   analyses who says what, sorts the cast and creates voices. */
-function addBook(onDone) {
+/* Add a book: upload EPUB files from this device. The server parses the book, analyses who says what, sorts
+   the cast and creates voices. Its series (detected from the title) can be set before or right after. */
+async function addBook(onDone) {
   const d = $("#dlg");
+  d.onclose = null;
+  const names = await seriesNames().catch(() => []);
   const files = h("input", { type: "file", accept: ".epub,application/epub+zip", multiple: true });
-  const path = h("input", { placeholder: "E:\\Books\\Some Book.epub", style: { width: "100%" } });
+  let chosen = "";  // "" = detect from the title
+  const series = seriesSelect(names, "", true, null, async (name) => { chosen = name; });
   const cast = h("input", { type: "checkbox", checked: true, style: { width: "auto" } });
   const bar = h("div", { style: { width: "0%" } }), status = h("p", { class: "small" });
   const go = h("button", { class: "primary", type: "button" }, "Add");
   const upload = (file) => new Promise((resolve, reject) => {
     const form = new FormData();
     form.append("epub", file); form.append("cast", cast.checked ? "1" : "0");
+    if (chosen) form.append("series", chosen);
     const x = new XMLHttpRequest();
     x.open("POST", "/api/library/import"); x.setRequestHeader("Authorization", "Bearer " + TOKEN);
     x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(e.loaded / e.total * 100) + "%"; };
@@ -266,24 +400,48 @@ function addBook(onDone) {
     x.send(form);
   });
   go.onclick = async () => {
+    if (!files.files.length) { status.textContent = "Choose an EPUB file."; return; }
     go.disabled = true;
     const added = [];
     try {
       for (const f of files.files) {
         status.textContent = `Uploading ${f.name}\u2026`; bar.style.width = "0%";
-        added.push((await upload(f)).title);
+        added.push(await upload(f));
       }
-      if (path.value.trim()) {
-        status.textContent = "Reading the file on the PC\u2026";
-        added.push((await api("POST", "/api/library/import", { path: path.value.trim(), cast: cast.checked })).data.title);
-      }
-      if (!added.length) { status.textContent = "Choose an EPUB file (or enter a path on the PC)."; go.disabled = false; return; }
-      d.close(); onDone && onDone();
-    } catch (e) { status.textContent = "\u26A0 " + e.message; go.disabled = false; }
+    } catch (e) { status.textContent = "\u26A0 " + e.message; go.disabled = false; if (!added.length) return; }
+    onDone && onDone();
+    confirmSeries(added);
   };
+  /* After the upload: each book's series, which can still be fixed before its cast is created. */
+  async function confirmSeries(added) {
+    SERIES_NAMES = null;
+    const known = await seriesNames().catch(() => names);
+    const rows = added.map(b => {
+      const note = h("span", { class: "small muted" });
+      return h("div", { style: { margin: "10px 0" } },
+        h("div", {}, h("b", {}, b.title)),
+        h("div", { style: { display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", marginTop: "4px" } },
+          h("span", { class: "small" }, "Series"),
+          seriesSelect(known, b.series, b.series_auto, b.series_detected, async (name) => {
+            try {
+              const r = (await api("POST", `/api/books/${b.id}/series`, { series: name, apply: true })).data;
+              note.textContent = r.applied ? `\u2713 ${r.applied} characters and their voices from the series` : "\u2713 saved";
+              onDone && onDone();
+            } catch (e) { alert(e.message); return false; }
+          }), note));
+    });
+    const started = added.some(b => BUSY.includes(b.status));
+    d.replaceChildren(h("form", { method: "dialog" }, h("h3", { style: { marginTop: 0 } }, added.length === 1 ? "Book added" : `${added.length} books added`),
+      h("p", { class: "small muted" }, (started ? "The analysis has started. " : "Already analysed. ") +
+        "Books in a series share their cast and voices: if a series below is wrong, " +
+        "change it now, before the cast is created (later it can be changed on the book\u2019s page)."),
+      ...rows,
+      h("div", { class: "row" }, h("button", { class: "primary", value: "ok" }, "Done"))));
+  }
   d.replaceChildren(h("form", { method: "dialog" }, h("h3", { style: { marginTop: 0 } }, "Add a book"),
     h("label", {}, "EPUB file(s) from this device"), files,
-    EMBEDDED_TOKEN ? [h("label", {}, "\u2026or a path on this PC"), path] : null,
+    h("label", {}, "Series"), h("div", {}, series),
+    h("p", { class: "small muted", style: { marginTop: "4px" } }, "Books in a series share their cast and voices. Usually detected from the title."),
     h("label", { style: { display: "flex", gap: "8px", alignItems: "center" } }, cast, "Create the cast's voices when the analysis is done"),
     h("p", { class: "small muted" }, "The book is parsed on the server, then analysed (who says what, the cast's tiers and profiles), " +
       "which takes about an hour for a long novel; you can read along as lines come in."),
@@ -582,7 +740,8 @@ async function bookView(id) {
     h("header", {},
       h("a", { href: "/books" }, "\u2190 Books"),
       h("button", { class: "iconbtn narrowonly", title: "Chapters and cast", onclick: () => $("aside").classList.toggle("open") }, "\u2630"),
-      h("h1", {}, st.book.title), h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
+      h("h1", {}, st.book.title), h("span", { class: "small muted", id: "seriesInfo" }),
+      h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
       h("a", { href: "/books/voices" }, "Voices"),
       h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),
       h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); renderCast(); } })),
@@ -593,8 +752,7 @@ async function bookView(id) {
           h("button", { class: "iconbtn", title: "Cast actions", onclick: (e) => bookMenu(e.currentTarget) }, "\u22EF")),
         h("input", { id: "castSearch", type: "search", placeholder: "Find a character\u2026",
           oninput: (e) => { st.castQuery = e.target.value.trim().toLowerCase(); renderCast(); } }),
-        h("div", { id: "cast" }),
-        h("p", { class: "small muted", id: "seriesInfo" })),
+        h("div", { id: "cast" })),
       h("main", {}, h("div", { class: "text", id: "text" }))),
     h("div", { class: "player" },
       h("button", { class: "primary", id: "playBtn", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6 Play"),
@@ -644,21 +802,6 @@ async function bookView(id) {
       h("span", { class: "nm" }, c.name), h("span", { class: "cnt" }, c.lines),
       c.voice ? h("button", { class: "iconbtn", title: "Play voice sample: " + voiceName(c.voice),
         onclick: (e) => { e.stopPropagation(); playSample(c.voice); } }, "\u25B6") : h("span", { class: "gap", title: "No voice yet" }));
-  }
-
-  /* A small pop-up menu below `anchor`: items are {text, run, title, on}, "-" or {label}. */
-  function popMenu(anchor, items) {
-    document.querySelectorAll(".menu").forEach(m => m.remove());
-    const m = h("div", { class: "menu", role: "menu" }, ...items.map(it => it === "-" ? h("hr")
-      : it.label ? h("div", { class: "lbl" }, it.label)
-      : h("button", { type: "button", title: it.title || "", onclick: () => { m.remove(); it.run(); } },
-          it.on === undefined ? "" : (it.on ? "\u2713 " : "\u2003 "), it.text)));
-    (anchor.closest("dialog") || document.body).append(m);
-    const r = anchor.getBoundingClientRect(), w = m.offsetWidth;
-    m.style.top = Math.min(r.bottom + 4, innerHeight - m.offsetHeight - 8) + "px";
-    m.style.left = Math.max(8, Math.min(r.right - w, innerWidth - w - 8)) + "px";
-    const off = (e) => { if (!m.contains(e.target)) { m.remove(); document.removeEventListener("mousedown", off, true); } };
-    setTimeout(() => document.addEventListener("mousedown", off, true));
   }
 
   function bookMenu(anchor) {
@@ -1051,14 +1194,38 @@ async function bookView(id) {
   async function showSeries() {
     const el = $("#seriesInfo");
     if (!el) return;
-    const meta = (await get("/api/books")).books.find(b => b.id === st.id) || {};
-    el.replaceChildren("Series: ", h("b", {}, meta.series || "(from the title)"), " ",
-      h("button", { onclick: async () => {
-        const name = prompt("Series this book belongs to (its cast and voices carry over to other volumes). Leave empty to detect it from the title.", meta.series || "");
-        if (name === null) return;
-        const r = await api("POST", `/api/books/${st.id}/series`, { series: name });
-        el.querySelector("b").textContent = r.data.series;
-      } }, "Change"));
+    const [info, names] = await Promise.all([get(`/api/books/${st.id}/series`), seriesNames()]);
+    el.replaceChildren("\uD83D\uDCDA ", seriesSelect(names, info.series, info.auto, info.detected, async (name) => {
+      let r;
+      try { r = (await api("POST", `/api/books/${st.id}/series`, { series: name })).data; } catch (e) { alert(e.message); return false; }
+      if (r.can_apply) offerSeriesCast(r);
+    }));
+    el.title = "Series: books in a series share their cast and voices";
+  }
+
+  /* After the series changed: its cast is applied when the book is analysed; it can also be applied now. */
+  function offerSeriesCast(r) {
+    const theirs = Object.values(r.data.characters || {}).filter(e => (e.books || []).some(b => b !== st.id));
+    const voiced = theirs.filter(e => e.voice).length;
+    const d = $("#dlg");
+    d.onclose = null;
+    d.replaceChildren(h("form", { method: "dialog" }, h("h3", { style: { marginTop: 0 } }, `Series: ${r.series}`),
+      h("p", {}, `This series already has a cast from its other books: ${theirs.length} characters, ${voiced} with voices ` +
+        `(${theirs.slice(0, 6).map(e => e.name).join(", ")}${theirs.length > 6 ? ", \u2026" : ""}).`),
+      h("p", { class: "small muted" }, "The series cast is applied when the book is analysed. Apply it now to give this book's " +
+        "matching characters the series' voices, profiles and tiers and to add the series' characters to the cast, " +
+        "without labelling the lines again. Voices you picked yourself are kept."),
+      h("div", { class: "row" }, h("button", { value: "later" }, "Later"), h("button", { class: "primary", value: "apply" }, "Apply series cast now"))));
+    d.onclose = async () => {
+      d.onclose = null;
+      if (d.returnValue !== "apply") return;
+      try {
+        await api("POST", `/api/books/${st.id}/series`, { apply: true });
+        st.voices = (await get("/api/voices?all=1")).voices;
+        await reloadScript();
+      } catch (e) { alert(e.message); }
+    };
+    d.showModal();
   }
 
   async function castVoices(body = {}) {

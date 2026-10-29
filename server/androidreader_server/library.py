@@ -1,4 +1,5 @@
-"""Adding books to the library: an EPUB uploaded from the browser or, from this PC only, a file path.
+"""Adding books to the library: an EPUB uploaded from the browser or, from this PC only (process_book.py), a
+file path.
 
 The server parses the EPUB (epub.py, the same IDs the old phone app used), keeps a copy of it, stores the
 text, cover and pictures, then analyses the book (speakers, tiers) and creates its cast's voices.
@@ -21,11 +22,13 @@ _LOOPBACK = {"127.0.0.1", "::1"}
 
 
 async def import_book(app: web.Application, path: Path, *, analyze: bool = True, cast: bool = True,
-                      reanalyze: bool = False, engine: str | None = None) -> dict:
+                      reanalyze: bool = False, engine: str | None = None, series: str | None = None) -> dict:
     """Parses and stores an EPUB; queues its analysis (and casting) unless it's already done. Returns the
-    book's summary with its id. A book already in the library keeps its analysis (re-numbered if a newer
-    parser split it differently)."""
+    book's summary with its id and series. A book already in the library keeps its analysis (re-numbered if a
+    newer parser split it differently). `series` names the book's series before the analysis starts (by default
+    it is detected from the title)."""
     from .dramatize import ANALYZER_KEY, DRAMA_STORE_KEY, migrate_ids, picture_refs, reset_for_analysis
+    from .series import _write_meta_series, series_info
 
     store = app[DRAMA_STORE_KEY]
     book_id = await asyncio.to_thread(epub.book_id, path)
@@ -45,6 +48,8 @@ async def import_book(app: web.Application, path: Path, *, analyze: bool = True,
     if path.resolve() != target.resolve():
         await asyncio.to_thread(shutil.copyfile, path, target)
     await asyncio.to_thread(_store_pictures, store, book_id, target, picture_refs(store.book(book_id)))
+    if series and series.strip():
+        _write_meta_series(app, book_id, series)
 
     async with store.lock(book_id):
         s = store.script(book_id)
@@ -59,7 +64,9 @@ async def import_book(app: web.Application, path: Path, *, analyze: bool = True,
         store.save_script(book_id, s)
     if start:
         await app[ANALYZER_KEY].enqueue(book_id)
-    return {**(store.summary(book_id) or {}), "id": book_id, "status": store.script(book_id).get("status", "none")}
+    info = series_info(app, book_id)
+    return {**(store.summary(book_id) or {}), "id": book_id, "status": store.script(book_id).get("status", "none"),
+            "series": info["series"], "series_auto": info["auto"], "series_detected": info["detected"]}
 
 
 def _store_pictures(store, book_id: str, epub_path: Path, refs: list[str]) -> int:
@@ -85,8 +92,9 @@ def _flag(value, default: bool) -> bool:
 
 
 async def import_route(request: web.Request) -> web.Response:
-    """POST /api/library/import: multipart with an "epub" file (from any device), or JSON {"path": ...} for a
-    file on this PC (loopback requests only). Options: analyze, cast (default true), reanalyze, engine."""
+    """POST /api/library/import: multipart with an "epub" file (from any device; what the website uses), or JSON
+    {"path": ...} for a file on this PC (loopback requests only; for process_book.py). Options: analyze, cast
+    (default true), reanalyze, engine, series (default: detected from the title)."""
     from .app import CONFIG_KEY
 
     cfg = request.app[CONFIG_KEY]
@@ -121,7 +129,7 @@ async def import_route(request: web.Request) -> web.Response:
         try:
             book = await import_book(request.app, path, analyze=_flag(options.get("analyze"), True),
                                      cast=_flag(options.get("cast"), True), reanalyze=_flag(options.get("reanalyze"), False),
-                                     engine=(options.get("engine") or None))
+                                     engine=(options.get("engine") or None), series=(options.get("series") or None))
         except epub.EpubError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001 - zipfile and XML errors from a broken file

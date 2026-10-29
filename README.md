@@ -143,11 +143,11 @@ port-forward 3950 on your router: the server speaks plain HTTP, protected only b
 
 ## 3. Add books
 
-In the library, **+ Add book**:
-
-* **Upload** one or more EPUB files from the device you're using: a phone, a tablet or another
-  computer on the network.
-* **Or a path** on the PC (only offered on the PC itself), e.g. `E:\Light Novels\Series\Book v10.epub`.
+In the library, **+ Add book** and choose one or more EPUB files from the device you're using: a
+phone, a tablet or another computer on the network. Pick the book's **series** first if you know it
+(by default it is detected from the title). After the upload the dialog shows each book's series and
+lets you fix it before the cast is created; books in a series share their cast and voices (see
+*Series* below).
 
 The server parses the EPUB, keeps a copy with its cover and pictures, and starts working:
 1. **Analysis:** who says each line and how, as described in section 5. It takes about an hour
@@ -155,14 +155,24 @@ The server parses the EPUB, keeps a copy with its cover and pictures, and starts
 2. **Tiers:** the cast is sorted into main, supporting and extras.
 3. **Voices:** the cast's voices are created (untick *Create the cast's voices* to skip this).
 
-The library shows progress. **Re-analyse** on a book starts its analysis again from scratch; your
-corrections, cast and voices are kept. Adding a book that is already in the library keeps its
-analysis.
+The library shows progress, with the books of a series grouped under its name in volume order.
+**Re-analyse** on a book starts its analysis again from scratch; your corrections, cast and voices
+are kept. Adding a book that is already in the library keeps its analysis.
 
-From the command line, the same thing is
+From the command line (which can also add a file by its path on the PC), the same thing is
 `.\.venv\Scripts\python.exe scripts\process_book.py "E:\...\Book.epub"` (options `--no-cast`,
 `--engine qwen3tts`, `--reanalyze`). It prints progress until the book is done, then the cast by
 tier.
+
+**Series.** A book's series is detected from its title (*Sasaki and Peeps, Vol. 10* → *Sasaki and
+Peeps*). To change it, use the 📚 picker next to the book's title: the series known so far,
+*Detect from title* or *New series…*. If the new series already has a cast from its other books,
+you're offered **Apply series cast now**: matching characters take the series' voices, profiles
+and tiers, and the series' characters join the cast, without labelling the lines again (voices you
+picked yourself are kept). Otherwise the series cast is applied when the book is next analysed. The
+book also leaves its old series' memory. The **Series** page lists each series with its books and
+cast size, and can **rename** a series (for all its books) or **merge** it into another (the same
+characters become one; the other series' voices win).
 
 Book IDs are the first 16 hex digits of the EPUB file's SHA-1, and each quotation's ID is
 `c<chapter>p<paragraph>q<offset>`. The parser (`androidreader_server/epub.py`) is a port of the
@@ -206,7 +216,8 @@ after them, so they never shift the text.
   speaker's voice and delivery, using the chosen narrator voice and model. Sentences already
   synthesized come from the server's cache, so re-listening is instant.
 * **Editing:** click a speaker tag to change the speaker or delivery; corrections always win
-  over the model. The book's series is shown under the cast and can be changed.
+  over the model. The book's series is shown next to the title and can be changed there (see
+  *Series* in section 3).
 
 ## 5. How books are dramatized
 
@@ -455,7 +466,7 @@ sections. There, wrong speakers fell from 15 to 7 (93.5%). The other 12 misses a
 before he gives his name, which are labelled "a prisoner".
 
 **Series memory.** A book's series is detected from its title (*Sasaki and Peeps, Vol. 10* →
-*Sasaki and Peeps*; change it in the viewer). After casting, and whenever you edit a character, the
+*Sasaki and Peeps*; change it next to the book's title, see section 3). After casting, and whenever you edit a character, the
 main cast is stored per series: names, aliases, apparent gender and age, dossier and voice. A new
 volume of the series starts its analysis with that cast, so the characters keep the voices you
 chose, including your corrections. *Sasaki and Peeps* is seeded from vol. 10's corrected cast
@@ -581,13 +592,15 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?}` · listen · keep one · Whisper transcript of an uploaded clip. |
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
-| `POST /api/library/import` | Add a book: multipart `epub` file (any device), or `{"path": ...}` (from the PC only); options `analyze`, `cast` (default true), `reanalyze`, `engine`. |
+| `POST /api/library/import` | Add a book: multipart `epub` file (any device; what the website uses), or `{"path": ...}` (from the PC only, for `process_book.py`); options `analyze`, `cast` (default true), `reanalyze`, `engine`, `series` (default: from the title). |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Books with analysis/cast status · a book's paragraphs, quotations and pictures · its cover. |
 | `GET /api/books/{id}/pictures` · `GET /api/books/{id}/picture?path=` | The book's pictures · one picture (by its path in the EPUB; only pictures the book's text refers to). |
 | `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Store already-parsed book text (+`analyze`, `reanalyze`, optional base64 `cover`) · dramatization status and lines · analyse (`{relabel}` labels lines again; `{reanalyze}` starts over, your edits kept). |
 | `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections · rename/merge/voice/`profile`/`aliases`/`role` (`main`, `supporting`, `extra`; `null` = automatic) · create character voices (`{"own_voices_for": ["supporting"]}` also replaces those tiers' pool voices). |
 | `POST /api/books/{id}/roles` · `POST /api/books/{id}/characters/{id}/voice-from-dossier` | Sort the cast into tiers with the LLM (no re-labelling; progress in the script's `roles_state`) · new voice from the character's profile. |
-| `GET /api/series` · `POST /api/books/{id}/series` `{series?}` | Series casts · set a book's series and store its cast there. |
+| `GET /api/series` | Every series: its stored cast plus `volumes` (its books in volume order), `cast`, `voiced`. |
+| `GET /api/books/{id}/series` · `POST` `{series?, apply?}` | A book's series (`auto`, `detected`, `volume`, `can_apply`) · set it (`""` = from the title; the book leaves its old series); `apply` gives the book the series' cast now without re-labelling. |
+| `POST /api/series/rename` `{from, to}` | Rename a series for all its books; if `to` exists, merge into it. |
 | `GET /` · `GET /books[/{id}]` · `GET /books/voices` | Links and QR codes for other devices (PC only) · library and reader (any address; asks for the token unless opened on the PC) · voices. |
 
 ## Development

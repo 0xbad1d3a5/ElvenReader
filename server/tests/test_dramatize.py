@@ -1032,8 +1032,9 @@ async def test_an_uploaded_epub_is_parsed_analysed_and_cast(drama_client, tmp_pa
     pics = await (await c.get(f"/api/books/{book['id']}/pictures", headers=AUTH)).json()
     assert pics == {"have": ["p.jpg"], "need": []}
     # adding it again (here by path, allowed from this PC) keeps the analysis
-    r = await c.post("/api/library/import", json={"path": str(path)}, headers=AUTH)
-    assert (await r.json())["status"] == "done"
+    r = await c.post("/api/library/import", json={"path": str(path), "series": "Tea Books"}, headers=AUTH)
+    again = await r.json()
+    assert again["status"] == "done" and (again["series"], again["series_auto"]) == ("Tea Books", False)
     r = await c.post("/api/library/import", json={"path": str(tmp_path / "missing.epub")}, headers=AUTH)
     assert r.status == 400
     assert (await c.post("/api/library/import", data=aiohttp.FormData({"x": "1"}), headers=AUTH)).status == 400
@@ -1133,3 +1134,120 @@ def test_profile_placeholders_are_not_descriptions():
     assert profile.clean(c) and c["profile"] == {"gender": "female", "notes": "kind"}
     assert not profile.merge(c, {"appearance": "Not described", "notes": "N/A"})
     assert "appears as" not in profile.voice_description({"profile": {"appearance": "none described"}})
+
+def test_volume_key_orders_volumes():
+    from androidreader_server.series import volume_key
+
+    assert volume_key("Sasaki and Peeps, Vol. 10") == [10]
+    assert volume_key("Ascendance of a Bookworm: Part 2 Volume 3") == [2, 3]
+    assert volume_key("Mistborn Book 2") == [2]
+    assert volume_key("Sasaki and Peeps v10 [Yen Press]") == [10]
+    assert volume_key("The Wandering Inn 4") == [4]
+    assert volume_key("Alice's Adventures in Wonderland") == []
+
+
+def test_applying_a_series_keeps_voices_the_reader_chose():
+    from androidreader_server import series as sr
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    data = {"name": "Saga", "books": {"v1": "Saga 1"}, "characters": {
+        "alice": {"name": "Alice", "aliases": [], "voice": "series-alice", "books": ["v1"]},
+        "tom": {"name": "Tom", "aliases": [], "voice": "series-tom", "books": ["v1"]},
+        "ann": {"name": "Ann", "aliases": [], "voice": "pool-female-adult", "books": ["v1"]}}}
+
+    class Store:
+        def get(self, name):
+            return data
+
+    class Drama:
+        def summary(self, book_id):
+            return {"title": "Saga 2"}
+
+    app = {sr.SERIES_KEY: Store(), DRAMA_STORE_KEY: Drama()}
+    script = {"characters": {
+        "alice": {"name": "Alice", "voice": "ch-v2v2v2v2-alice"},
+        "tom": {"name": "Tom", "voice": "my-pick", "voice_user": True}}, "lines": {}}
+    assert sr.seed(app, "v2v2v2v2", script) == 3
+    assert script["characters"]["alice"]["voice"] == "ch-v2v2v2v2-alice"  # a plain seed fills gaps only
+    sr.seed(app, "v2v2v2v2", script, replace_generated=True)
+    assert script["characters"]["alice"]["voice"] == "series-alice"
+    assert script["characters"]["tom"]["voice"] == "my-pick"
+    assert script["characters"]["ann"]["voice"] == "pool-female-adult"
+    assert sr.unseed(script, "Saga") == 3  # none of them has a line here
+    assert script["characters"] == {}
+
+
+async def wait_cast(c, book):
+    for _ in range(200):
+        s = await (await c.get(f"/api/books/{book}/script", headers=AUTH)).json()
+        if s["status"] == "done" and "voices" in s["detail"]:
+            return s
+        await asyncio.sleep(0.05)
+    raise AssertionError(s["detail"])
+
+
+async def test_series_can_be_changed_applied_renamed_and_merged(drama_client):
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    c = drama_client
+    app = c.server.app
+    await c.post("/api/books/vol1", json={**book_payload(), "title": "Tea Saga, Vol. 1", "analyze": True}, headers=AUTH)
+    await wait_done(c, "vol1")
+    await c.patch("/api/books/vol1/characters/alice", json={"voice": "nar"}, headers=AUTH)
+
+    # volume 2 is detected as its own series ("Tea Saga Gaiden"), analysed and cast with voices of its own
+    await c.post("/api/books/gaiden02", json={**book_payload(), "title": "Tea Saga Gaiden 2", "analyze": True}, headers=AUTH)
+    await wait_done(c, "gaiden02")
+    await c.post("/api/books/gaiden02/cast", json={}, headers=AUTH)
+    s = await wait_cast(c, "gaiden02")
+    alice = next(ch for ch in s["characters"] if ch["id"] == "alice")
+    assert alice["voice"].startswith("ch-gaiden02-")
+    info = await (await c.get("/api/books/gaiden02/series", headers=AUTH)).json()
+    assert (info["series"], info["auto"], info["can_apply"], info["volume"]) == ("Tea Saga Gaiden", True, False, [2])
+
+    # moving it to "Tea Saga": it leaves the old series; the series' cast is offered, not yet written over
+    r = await (await c.post("/api/books/gaiden02/series", json={"series": "Tea Saga"}, headers=AUTH)).json()
+    assert (r["series"], r["auto"], r["can_apply"], r["applied"]) == ("Tea Saga", False, True, None)
+    assert "gaiden02" not in r["data"]["books"] and r["data"]["characters"]["alice"]["voice"] == "nar"
+    names = [g["name"] for g in (await (await c.get("/api/series", headers=AUTH)).json())["series"]]
+    assert "Tea Saga Gaiden" not in names
+    # applying it gives the book the series' voices without labelling it again
+    lines_before = (await (await c.get("/api/books/gaiden02/script", headers=AUTH)).json())["lines"]
+    r = await (await c.post("/api/books/gaiden02/series", json={"apply": True}, headers=AUTH)).json()
+    assert r["applied"] >= 1 and not r["can_apply"] and "gaiden02" in r["data"]["books"]
+    s = await (await c.get("/api/books/gaiden02/script", headers=AUTH)).json()
+    assert next(ch for ch in s["characters"] if ch["id"] == "alice")["voice"] == "nar"
+    assert s["lines"] == lines_before and s["status"] == "done"
+
+    # the series page: volumes in order
+    series = (await (await c.get("/api/series", headers=AUTH)).json())["series"]
+    saga = next(g for g in series if g["name"] == "Tea Saga")
+    assert [v["id"] for v in saga["volumes"]] == ["vol1", "gaiden02"] and saga["cast"] >= 1
+
+    # rename: every book follows
+    r = await c.post("/api/series/rename", json={"from": "Tea Saga", "to": "Tea Chronicles"}, headers=AUTH)
+    assert sorted((await r.json())["books"]) == ["gaiden02", "vol1"]
+    store = app[DRAMA_STORE_KEY]
+    assert store.summary("vol1")["series"] == store.summary("gaiden02")["series"] == "Tea Chronicles"
+    # merge: a third book's series folds into it; the same characters become one, the existing voice wins
+    await c.post("/api/books/side", json={**book_payload(), "title": "Tea Side Stories", "analyze": True}, headers=AUTH)
+    await wait_done(c, "side")
+    await c.post("/api/books/side/series", json={}, headers=AUTH)
+    r = await (await c.post("/api/series/rename", json={"from": "Tea Side Stories", "to": "Tea Chronicles"},
+                            headers=AUTH)).json()
+    assert r["merged"] and r["books"] == ["side"]
+    assert r["data"]["characters"]["alice"]["voice"] == "nar" and "side" in r["data"]["characters"]["alice"]["books"]
+    names = [g["name"] for g in (await (await c.get("/api/series", headers=AUTH)).json())["series"]]
+    assert "Tea Side Stories" not in names and store.summary("side")["series"] == "Tea Chronicles"
+    assert (await c.post("/api/series/rename", json={"from": "", "to": "x"}, headers=AUTH)).status == 400
+
+async def test_setting_a_series_keeps_the_title_of_a_book_without_meta(drama_client):
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    c = drama_client
+    store = c.server.app[DRAMA_STORE_KEY]
+    store.save_book("old", {**book_payload(), "title": "Old Tale, Vol. 3"})
+    (store.dir("old") / "meta.json").unlink()  # stored before meta.json existed
+    r = await (await c.post("/api/books/old/series", json={"series": "Old Tales"}, headers=AUTH)).json()
+    assert r["series"] == "Old Tales" and r["title"] == "Old Tale, Vol. 3"
+    assert store.summary("old")["title"] == "Old Tale, Vol. 3"
