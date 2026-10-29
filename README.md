@@ -196,7 +196,10 @@ after them, so they never shift the text.
   * *Highlight lines of* everyone / main / main + supporting (dims everyone else's lines)
 
   Tiers also appear in the Voices page's *Used by* lists. Unnamed speakers are shown as names
-  ("Prisoner", "Tattoo Artist"), as the model's "a prisoner" is stored; names you type are kept
+  ("Prisoner", "Tattoo Artist"), as the model's "a prisoner" is stored. After labelling, a character
+  the model named by description ("Urano's mother", "Dad") takes a proper name it was also called
+  (Effa, Gunther), and anyone takes an alias the book uses at least three times as often ("Myne"
+  over her past-life name "Urano"); the old names stay aliases. Names you type are kept
   exactly. The speaker filter (top) also offers *quotes given to the narrator*; search finds text.
   On a narrow screen (phone), ☰ shows the chapters and the cast.
 * **Playback:** click any line or narration to play from there through the chapter with each

@@ -771,6 +771,51 @@ def find_character(script: dict, name: str) -> str | None:
 
 _ARTICLE = re.compile(r"^(?:a|an|the)\s+", re.IGNORECASE)
 _SMALL_WORDS = {"of", "in", "on", "at", "to", "and", "or", "the", "a", "an", "for", "with", "from", "by"}
+_NAME_PARTICLES = {"van", "von", "de", "da", "di", "du", "del", "della", "der", "den", "la", "le", "bin", "ibn",
+                   "al", "el", "y", "zu", "ten", "ter"}
+# Words that say how a character is addressed or related rather than who they are.
+_DESCRIPTOR_WORDS = {"mom", "mother", "mama", "mum", "dad", "father", "papa", "grandma", "grandpa", "granny",
+                     "grandmother", "grandfather", "sister", "brother", "aunt", "uncle", "boss", "master",
+                     "captain", "chief", "sir", "madam", "lady", "lord", "miss", "mister", "mr.", "mrs.", "ms.",
+                     "wife", "husband", "son", "daughter", "girl", "boy", "man", "woman", "child", "kid"}
+
+
+def _is_descriptor(name: str) -> bool:
+    """"Dad", "Urano's mother", "Old Man": how someone is called, not their name."""
+    words = name.lower().replace("\u2019", "'").split()
+    return bool(words) and ("'s" in name.lower().replace("\u2019", "'") or all(w in _DESCRIPTOR_WORDS for w in words))
+
+
+def canonical_names(book: dict, script: dict, ratio: int = 3) -> list[tuple[str, str]]:
+    """Shows each character under the name the book uses for them. After labelling, a character the model
+    named by description ("Urano's mother", "Dad") takes a proper name it was also called (Effa, Gunther),
+    and any character takes an alias the text uses `ratio` times as often (the heroine of Ascendance of a
+    Bookworm is "Myne" 367 times and "Urano", her past life, 95). The old name stays an alias; names the
+    reader typed are kept."""
+    text = "\n".join(p for ch in book.get("chapters", []) for p in ch.get("paragraphs", []))
+    counts: dict[str, int] = {}
+
+    def count(n: str) -> int:
+        if n not in counts:
+            counts[n] = len(re.findall(r"(?<!\w)" + re.escape(n) + r"(?!\w)", text)) if n else 0
+        return counts[n]
+
+    renamed = []
+    for cid, c in script.get("characters", {}).items():
+        if c.get("name_user") or not c.get("aliases"):
+            continue
+        name = c["name"]
+        options = [a for a in c["aliases"] if a != name and a[:1].isupper() and not _is_descriptor(a)
+                   and find_character(script, a) == cid and count(a) >= 3]
+        if not options:
+            continue
+        best = max(options, key=count)
+        if (_is_descriptor(name) and not _is_descriptor(best)) or count(best) >= ratio * max(1, count(name)):
+            if name not in c["aliases"]:
+                c["aliases"].append(name)
+            c["name"] = best
+            renamed.append((name, best))
+    return renamed
 
 
 def normalize_character_name(name: str) -> tuple[str, bool]:
@@ -778,7 +823,16 @@ def normalize_character_name(name: str) -> tuple[str, bool]:
     "a prisoner" -> ("Prisoner", True), "the tattoo artist" -> ("Tattoo Artist", True),
     "the Neighbor" -> ("The Neighbor", False); deliberate casing ("Type Twelve", "Mr. Akutsu") is kept."""
     n = " ".join((name or "").split())
-    if not n or not n[:1].isalpha() or n[:1].isupper():
+    if not n or not n[:1].isalpha():
+        return n, False
+    if n[:1].isupper():
+        # "Bookstore employee", "Urano's mother": a capitalised description gets the rest of its words
+        # capitalised too; name particles ("Ludwig van Beethoven") and small words stay as they are.
+        words = n.split(" ")
+        if "(" not in n and any(w[:1].islower() and w not in _SMALL_WORDS and w not in _NAME_PARTICLES
+                                for w in words[1:]):
+            n = " ".join(w if i == 0 or w in _SMALL_WORDS or w in _NAME_PARTICLES else w[:1].upper() + w[1:]
+                         for i, w in enumerate(words))
         return n, False
     rest = _ARTICLE.sub("", n)
     if any(ch.isupper() for ch in rest):  # "the Neighbor", "a Starsage": a name after all
@@ -803,7 +857,7 @@ def normalize_names(script: dict) -> int:
                 aliases.append(c["name"])
             c["name"] = shown
             n += 1
-    script["names_v"] = 1
+    script["names_v"] = 2
     return n
 
 
@@ -1534,6 +1588,9 @@ class Analyzer:
                 self.store.save_script(book_id, s)
         async with self.store.lock(book_id):
             s = self.store.script(book_id)
+            renamed = canonical_names(book, s)
+            if renamed:
+                logger.info("%s: named by the text: %s", book_id, ", ".join(f"{a} -> {b}" for a, b in renamed))
             s.update(detail="describing the characters")
             self.store.save_script(book_id, s)
         s = self.store.script(book_id)
@@ -1924,7 +1981,7 @@ async def get_script(request: web.Request) -> web.Response:
     s = store.script(book_id)
     if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
                                       or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))
-                                      or s.get("names_v") != 1 or s.get("voice_desc_v") != 1
+                                      or s.get("names_v") != 2 or s.get("voice_desc_v") != 1
                                       or s.get("profile_v") != 1):
         async with store.lock(book_id):
             s = store.script(book_id)
@@ -1935,8 +1992,9 @@ async def get_script(request: web.Request) -> web.Response:
             if s.get("mentions_v") != 1:  # analysed before quoted terms were told apart from dialogue
                 n = mark_mentions(book, s)
                 logger.info("%s: %d quoted terms given back to the narration", book_id, n)
-            if s.get("names_v") != 1:  # "a prisoner" -> "Prisoner"
+            if s.get("names_v") != 2:  # "a prisoner" -> "Prisoner"; "Urano" -> "Myne" (the name the book uses)
                 normalize_names(s)
+                canonical_names(book, s)
             if s.get("profile_v") != 1:  # dossiers -> voice profiles
                 from .profile import migrate as migrate_profiles
 

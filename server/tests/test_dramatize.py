@@ -1092,3 +1092,32 @@ def test_roster_batches_fit_the_context():
         prompt = (4000 + sum(len(x) + 2 for x in b)) // 3
         assert prompt + 1024 + 300 * len(b) <= 12288
     assert dz._roster_batches(blocks[:3], 4000, 12288) == [blocks[:3]]  # a small cast stays one request
+
+def test_capitalised_descriptions_get_title_case():
+    norm = lambda n: dz.normalize_character_name(n)[0]
+    assert norm("Bookstore employee") == "Bookstore Employee"
+    assert norm("Urano's mother") == "Urano's Mother"
+    assert norm("Ludwig van Beethoven") == "Ludwig van Beethoven"
+    assert norm("Queen of Hearts") == "Queen of Hearts"
+    assert norm("Pat (a footman)") == "Pat (a footman)"
+    assert norm("Type Twelve") == "Type Twelve"
+
+
+def test_canonical_names_follow_the_text():
+    paras = (["Myne smiled."] * 12 + ["Urano read."] * 3 + ["Mom, said Effa."] * 4 + ["Dad, Gunther and Otto."] * 4
+             + ["Futarishizuka bowed."] * 5 + ["Ms. Futarishizuka bowed."] * 3)
+    book = {"chapters": [{"title": "1", "paragraphs": paras}]}
+    s = {"characters": {}}
+    ids = {}
+    for name, aliases in (("Urano", ["Myne"]), ("Urano's Mother", ["Mom", "Effa"]), ("Dad", ["Captain", "Gunther"]),
+                          ("Ms. Futarishizuka", ["Futarishizuka"]), ("Otto", [])):
+        ids[name] = dz.ensure_character(s, name, aliases=aliases)
+    typed = dz.ensure_character(s, "Mother dear", aliases=["Effa2"], exact=True)
+    s["characters"][typed]["name_user"] = True
+    renamed = dict(dz.canonical_names(book, s))
+    assert renamed == {"Urano": "Myne", "Urano's Mother": "Effa", "Dad": "Gunther"}
+    c = s["characters"][ids["Urano"]]
+    assert c["name"] == "Myne" and "Urano" in c["aliases"]
+    assert dz.find_character(s, "Urano") == ids["Urano"]  # old names still match
+    assert s["characters"][ids["Ms. Futarishizuka"]]["name"] == "Ms. Futarishizuka"  # under 3x: kept
+    assert s["characters"][typed]["name"] == "Mother dear"
