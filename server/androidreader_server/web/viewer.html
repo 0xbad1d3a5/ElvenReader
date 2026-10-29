@@ -607,7 +607,7 @@ async function bookView(id) {
       { text: "Create missing voices", run: () => castVoices() },
       { text: "Give supporting characters their own voices", title: "Supporting characters who share a pooled voice get a designed voice of their own",
         run: () => castVoices({ own_voices_for: ["supporting"] }) },
-      { text: "Re-label lines with the profiles\u2026", title: "Label every line again using the character profiles as they are now", run: relabel },
+      { text: "Re-label lines\u2026", title: "Label every line again (your corrections are kept)", run: relabel },
       "-", { label: "Highlight lines of" },
       hi("", "Everyone"), hi("main", "Main characters only"), hi("main,supporting", "Main + supporting"),
     ]);
@@ -883,13 +883,12 @@ async function bookView(id) {
     });
   }
 
-  const DOSSIER_FIELDS = [
+  const PROFILE_FIELDS = [
     ["gender", "Gender", ["", "male", "female", "unknown"]],
     ["apparent_age", "Apparent age (what a listener should hear)", ["", "child", "teen", "young adult", "adult", "middle-aged", "elderly", "unknown"]],
-    ["form", "Form (human, Java sparrow, android girl\u2026)"], ["true_nature", "True age or nature, if different"],
-    ["personality", "Personality"], ["speech_style", "Speech style and verbal tics"], ["relationships", "Relationships"],
-    ["introduced_as", "First appears as (before the book names them)"], ["narrates", "Narrates"],
-    ["voice", "Voice description (for designing their voice)"],
+    ["appearance", "Physical appearance (young girl in a kimono, Java sparrow, android girl\u2026)"],
+    ["speech_style", "Speech style (how they talk, verbal tics)"],
+    ["notes", "Important characteristics (true age or nature, temperament, accent\u2026)"],
   ];
 
   /* Everything about one character, in a side drawer: tier, voice, profile, lines, and rarer actions under ⋯. */
@@ -903,7 +902,7 @@ async function bookView(id) {
     function render() {
       const c = charById()[cid];
       if (!c) { d.close(); return; }
-      const tier = tierOf(c), model = c.dossier || {}, mine = c.dossier_user || {};
+      const tier = tierOf(c), model = c.profile || {}, mine = c.profile_user || {};
       const seg = h("div", { class: "seg" }, ...[["main", "Main"], ["supporting", "Supporting"], ["extra", "Extra"]].map(([k, label]) =>
         h("button", { type: "button", class: tier === k ? "on" : "", onclick: () => patch({ role: k }) }, label)));
       const why = [c.role_user ? "Your choice." : c.role ? `Automatic (${c.role_source || "rules"})${c.role_note ? ": " + c.role_note : "."}` : "Not sorted yet.",
@@ -913,19 +912,18 @@ async function bookView(id) {
         ...st.voices.map(v => h("option", { value: v.id }, v.name + (v.source === "character" ? " (character)" : ""))));
       voiceSel.value = c.voice || "";
       const inputs = {};
-      const fields = DOSSIER_FIELDS.map(([key, label, options]) => {
+      const fields = PROFILE_FIELDS.map(([key, label, options]) => {
         const el = options ? h("select", {}, ...options.map(o => h("option", { value: o }, o || "\u2014")))
-          : h(key === "voice" ? "textarea" : "input", { rows: key === "voice" ? 3 : undefined, style: { width: "100%" } });
+          : h(key === "notes" ? "textarea" : "input", { rows: key === "notes" ? 3 : undefined, maxlength: key === "notes" ? 300 : 320,
+              style: { width: "100%" } });
         el.value = mine[key] ?? model[key] ?? "";
         inputs[key] = el;
         return [h("label", {}, label, mine[key] != null ? h("span", { class: "small", style: { color: "var(--accent)" } }, " \u270E edited") : null), el];
       }).flat();
-      const aliases = h("input", { value: (c.aliases || []).join(", ") });
-      const saveProfile = async () => patch({ dossier: Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])),
-        aliases: aliases.value.split(",").map(a => a.trim()).filter(Boolean) });
-      const facts = (model.facts || []).map(f => h("li", { class: "small" }, f.fact, " \u2014 ", h("i", {}, "\u201c" + (f.quote || "") + "\u201d"), " ",
-        Array.isArray(f.at) ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); d.close(); gotoChapter(f.at[0]); } }, `ch ${f.at[0] + 1}`) : null));
-      const revisions = (model.revisions || []).map(r => h("li", { class: "small" }, r.note));
+      // Aliases help attribution (matching names in the text); they live with the overview, not the profile.
+      const aliases = h("input", { value: (c.aliases || []).join(", "), title: "Other names the book uses for them",
+        onchange: () => patch({ aliases: aliases.value.split(",").map(a => a.trim()).filter(Boolean) }) });
+      const saveProfile = async () => patch({ profile: Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value])) });
       const design = h("button", { type: "button", onclick: async () => {
         design.disabled = true; design.textContent = "Designing\u2026 (about 20 s)";
         try {
@@ -942,7 +940,8 @@ async function bookView(id) {
           ]) }, "\u22EF"),
           h("button", { class: "iconbtn", title: "Close", onclick: () => d.close() }, "\u2715")),
         section("Overview",
-          h("div", { class: "small muted" }, `${c.lines} lines` + (c.aliases && c.aliases.length ? " \u00b7 also called " + c.aliases.join(", ") : "")),
+          h("div", { class: "small muted" }, `${c.lines} lines`),
+          h("label", {}, "Also called (comma separated; used to recognise them in the text)"), aliases,
           h("div", { class: "rowx" }, seg, c.role_user ? h("button", { type: "button", class: "iconbtn small", title: "Let the model decide again",
             onclick: () => patch({ role: null }) }, "use automatic") : null),
           h("div", { class: "small muted" }, why)),
@@ -961,9 +960,7 @@ async function bookView(id) {
             ontoggle: (e) => { st.profileOpen = e.target.open; } },
           h("summary", {}, h("h4", { style: { display: "inline" } }, "Profile (for voice design)")),
           h("p", { class: "small muted" }, "Used to design this character's voice and for later volumes in the series. Doesn't change who-said-what."),
-          h("label", {}, "Also called (comma separated)"), aliases, ...fields,
-          facts.length ? h("details", {}, h("summary", { class: "small" }, `Evidence (${facts.length})`), h("ul", {}, ...facts)) : null,
-          revisions.length ? h("details", {}, h("summary", { class: "small" }, "Changed its mind"), h("ul", {}, ...revisions)) : null,
+          ...fields,
           h("div", { class: "rowx" }, h("button", { type: "button", class: "primary", onclick: saveProfile }, "Save profile"), design))),
         section("Lines",
           h("button", { type: "button", onclick: () => {
@@ -984,7 +981,7 @@ async function bookView(id) {
       });
   }
   async function relabel() {
-    if (!confirm("Label every line again with the current dossiers? Your line corrections are kept. This takes the second half of a normal analysis (about 45 minutes for a long novel).")) return;
+    if (!confirm("Label every line again? Your line corrections, cast and voices are kept. This takes about as long as the first analysis (about an hour for a long novel).")) return;
     try { st.script = (await api("POST", `/api/books/${st.id}/analyze`, { relabel: true })).data; } catch (e) { alert(e.message); return; }
     renderStatus(); follow();
   }

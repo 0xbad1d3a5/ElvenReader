@@ -94,6 +94,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `cache_max_mb` | `4096` | Sentence audio cache (`data\cache`). |
 | `llm_model`, `llm_mode`, `llm_cpu_moe`, `llm_threads` | Qwen3.5-35B-A3B, `auto`, `20`, `12` | Dramatization LLM (see below). |
 | `llm_label_context_words`, `llm_label_recent_lines` | `600`, `12` | Story text before each passage and earlier attributions shown when labelling; `0`, `6` = the old, slightly faster pass (see *What does more time per book buy?*). |
+| `llm_label_profiles` | `true` | The labelling pass also notes each speaker's voice profile (see *Voice profiles*). |
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
 | `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
 | `voice_design_engine` | `qwen3tts` | Creates character voices. |
@@ -475,11 +476,39 @@ excerpts, 161 quotations; `scripts\eval_dossier.py`):
 | + dossier, gpt-oss-20b, high reasoning | 64/102 = 62.7% | 51/59 = 86.4% | 17/24 | 68 min |
 | Qwen3-30B-A3B-Thinking-2507 / Qwen3.5-35B-A3B | not completed | | | ~2 h (3–3.5 min per passage) |
 
-Dossiers you edit yourself are still useful. In the viewer (a character's panel, *Profile*) you can set the
-apparent age, form, speech style and other fields. Your fields always win, are used to design the
-character's voice (*Design voice from profile*) and, once any character has edits, are
-given to the model when you *Re-label lines with the profiles*. Edits also go into the series
-memory.
+The opt-in dossier pass is separate from the voice profiles below.
+
+**Voice profiles.** Each character has a short profile that exists only to design their voice:
+* **Gender**
+* **Apparent age** (what a listener should hear)
+* **Physical appearance** ("young girl in a kimono", "Java sparrow")
+* **Speech style** (how they talk, verbal tics)
+* **Important characteristics** (true age or nature, temperament, accent)
+
+The labelling pass fills it as it reads: each passage's answer may include `profile_updates` with
+what that passage shows about its speakers, and only that. The server merges them:
+* Gender and apparent age go by majority over the passages, so a disguise or role-play doesn't stick.
+* Appearance is replaced only by a more specific version.
+* Speech style and characteristics accumulate.
+* At the end of the analysis, entries that grew too long are compacted in one short LLM call.
+* The roster step fills whatever is still empty from the appearance evidence it gathers.
+* Your edits (character panel → *Profile (for voice design)*) always win.
+
+The profile is used to design voices (casting, *Design voice from profile*) and is carried to
+later volumes by the series memory. It is not given to attribution, so it never changes who says
+what. `"llm_label_profiles": false` turns the reading-time notes off, so the profile then comes
+only from the roster step. Books analysed before profiles existed are converted when opened. The
+old dossier fields map over: form becomes appearance; speech style is kept; true nature,
+personality, temperament and accent become characteristics. Your earlier edits stay yours.
+
+Noting profiles while labelling doesn't change attribution, and costs about 14% more labelling time.
+On the gold-chunk harness, three interleaved runs each (`scripts\eval_reasoning.py context-small
+context-profiles`):
+* *Sasaki*: 153, 153, 153/161 without profiles; 152, 153, 153/161 with them.
+* Classics: 180/182 in every run.
+* Time: 226 s vs 258 s on *Sasaki*, 145 s vs 166 s on the classics.
+
+Compacting a book's profiles at the end takes one call of about 15 seconds.
 
 ## 8. Process a book on the PC
 
@@ -524,10 +553,10 @@ The viewer has:
 * **Cast panel:** characters grouped as **Main / Supporting / Extras** (Extras folded), each row
   just a colour dot, the name, the line count and ▶ (voice sample). Type in *Find a character* to
   filter. Click a character to open its panel:
-  * **Overview:** aliases and the tier (*Main / Supporting / Extra*; *use automatic* hands it back
-    to the model, whose reason is shown).
+  * **Overview:** aliases (editable; they help recognise the character in the text) and the tier
+    (*Main / Supporting / Extra*; *use automatic* hands it back to the model, whose reason is shown).
   * **Voice:** play, change, or *Edit voice…*; shows the assigned voice's own description (a character with a voice of its own takes that voice's description whenever the voice is chosen or edited).
-  * **Profile (for voice design)**, folded: what the book says about them, editable, and *Design voice from profile*. It is used to design the voice and for later volumes in the series; it doesn't change who-said-what.
+  * **Profile (for voice design)**, folded: gender, apparent age, physical appearance, speech style and important characteristics (see *Voice profiles*), editable, and *Design voice from profile*. It is used to design the voice and for later volumes in the series; it doesn't change who-said-what.
   * **Lines:** *Show this character's lines*.
   * **⋯:** rename, or merge into another character.
 
@@ -535,7 +564,7 @@ The viewer has:
   * *Sort cast into tiers*
   * *Create missing voices*
   * *Give supporting characters their own voices* (replaces their shared pool voices)
-  * *Re-label lines with the profiles*
+  * *Re-label lines* (your corrections are kept)
   * *Highlight lines of* everyone / main / main + supporting (dims everyone else's lines)
 
   Tiers also appear in the Voices page's *Used by* lists. Unnamed speakers are shown as names

@@ -462,16 +462,17 @@ async def test_two_pass_analysis_uses_the_dossier_and_keeps_user_edits(aiohttp_c
     assert tom["age"] == "child" and tom["dossier"]["introduced_as"] == "a boy by the river"
     assert "alice" not in [ch["id"] for ch in s["characters"]]  # present but never speaks: pruned
 
-    # Edit the dossier; relabel runs pass 2 only, with the edit; reanalyze reads again but keeps the edit.
-    r = await c.patch("/api/books/book1/characters/tom", json={"dossier": {"speech_style": "stammers"}}, headers=AUTH)
-    assert next(ch for ch in (await r.json())["characters"] if ch["id"] == "tom")["dossier_user"] == {"speech_style": "stammers"}
+    # Edit the profile (for voice design); relabel runs pass 2 only; the edit shapes voices, not who says
+    # what, so it is not in the labelling prompt; reanalyze reads again but keeps the edit.
+    r = await c.patch("/api/books/book1/characters/tom", json={"profile": {"speech_style": "stammers"}}, headers=AUTH)
+    assert next(ch for ch in (await r.json())["characters"] if ch["id"] == "tom")["profile_user"] == {"speech_style": "stammers"}
     await c.post("/api/books/book1/analyze", json={"relabel": True}, headers=AUTH)
     await wait_done(c)
-    assert prompts["dossier"] == 1 and "stammers" in prompts["label"][-1]
+    assert prompts["dossier"] == 1 and "stammers" not in prompts["label"][-1]
     await c.post("/api/books/book1/analyze", json={"reanalyze": True}, headers=AUTH)
     s = await wait_done(c)
     tom = next(ch for ch in s["characters"] if ch["id"] == "tom")
-    assert prompts["dossier"] == 2 and tom["dossier_user"] == {"speech_style": "stammers"}
+    assert prompts["dossier"] == 2 and tom["profile_user"] == {"speech_style": "stammers"}
 
 
 def test_series_name_from_titles():
@@ -491,7 +492,7 @@ async def test_series_memory_carries_cast_and_voices_to_the_next_volume(drama_cl
     app = c.server.app
     await c.post("/api/books/vol1", json={**book_payload(), "title": "Tea Saga, Vol. 1", "analyze": True}, headers=AUTH)
     await wait_done(c, "vol1")
-    r = await c.patch("/api/books/vol1/characters/alice", json={"voice": "nar", "dossier": {"apparent_age": "child"}},
+    r = await c.patch("/api/books/vol1/characters/alice", json={"voice": "nar", "profile": {"apparent_age": "child"}},
                       headers=AUTH)
     assert r.status == 200
     series = await (await c.get("/api/series", headers=AUTH)).json()
@@ -505,7 +506,7 @@ async def test_series_memory_carries_cast_and_voices_to_the_next_volume(drama_cl
     s2 = store.script("vol2")
     assert sr.seed(app, "vol2", s2) >= 1
     assert s2["characters"]["alice"]["voice"] == "nar"
-    assert s2["characters"]["alice"]["dossier_user"]["apparent_age"] == "child"
+    assert s2["characters"]["alice"]["profile_user"]["apparent_age"] == "child"
     # analysing the next volume starts from the series cast (pass 1 off by default)
     await c.post("/api/books/vol3", json={**book_payload(), "title": "Tea Saga, Vol. 3", "analyze": True}, headers=AUTH)
     s3 = await wait_done(c, "vol3")
@@ -918,3 +919,72 @@ async def test_characters_are_described_by_their_own_voice(drama_client):
     class V:
         description, instruct = "An adult man with an ordinary voice.", ""
     assert dz.follow_voice(pool, {"pool-male-adult": V()}) is False and pool["description"] == "A gruff old sailor."
+
+
+# ---------------------------------------------------------------- voice profiles
+
+
+def test_profile_updates_merge_specifics_and_never_touch_the_readers_fields():
+    from androidreader_server import profile as pf
+
+    c = {"name": "F"}
+    assert pf.merge(c, {"gender": "female", "apparent_age": "unknown", "appearance": "young girl",
+                        "speech_style": "teasing", "notes": "centuries old"})
+    assert pf.merge(c, {"apparent_age": "child", "appearance": "young girl in a kimono",  # more specific: replaces
+                        "speech_style": "calls people dearie", "notes": "Centuries old; sly"})
+    assert not pf.merge(c, {"gender": "male", "appearance": "tall woman"})  # set fields are not overturned
+    assert c["profile"] == {"gender": "female", "apparent_age": "child", "appearance": "young girl in a kimono",
+                            "speech_style": "teasing; calls people dearie", "notes": "centuries old; sly"}
+    pf.set_user_fields(c, {"appearance": "girl in a kimono, bob cut", "gender": "female"})  # same as model: not kept
+    assert c["profile_user"] == {"appearance": "girl in a kimono, bob cut"}
+    pf.merge(c, {"appearance": "girl in a kimono, bob cut, holding a fan"})
+    assert pf.effective(c)["appearance"] == "girl in a kimono, bob cut"  # the reader's field wins
+    d = pf.voice_description(c)
+    assert d.startswith("A child female voice for a character who appears as girl in a kimono, bob cut.")
+    assert "Way of speaking: teasing; calls people dearie." in d and "Centuries old; sly." in d
+    assert pf.voice_description({"profile": {"apparent_age": "adult", "gender": "male"}}) == "An adult male voice."
+    long = "; ".join(f"trait number {i}" for i in range(40))
+    assert len(pf.compact_text(long)) <= pf.NOTES_MAX
+
+
+def test_old_dossiers_become_profiles():
+    from androidreader_server import profile as pf
+
+    s = {"characters": {
+        "f": {"name": "Futarishizuka", "temperament": "calm, perceptive", "accent": "neutral",
+              "dossier_user": {"gender": "female", "apparent_age": "child", "form": "human, looks like a young girl in a kimono",
+                               "true_nature": "centuries old", "speech_style": "old-fashioned, teasing, calls people dearie"}},
+        "t": {"name": "TV Announcer", "appearance": "A polished broadcast figure.", "accent": "american",
+              "temperament": "professional"}}}
+    assert pf.migrate(s) == 2
+    f, t = s["characters"]["f"], s["characters"]["t"]
+    assert f["profile_user"] == {"gender": "female", "apparent_age": "child", "speech_style": "old-fashioned, teasing, calls people dearie",
+                                 "appearance": "human, looks like a young girl in a kimono", "notes": "centuries old"}
+    assert f["profile"] == {"notes": "calm, perceptive"}
+    assert t["profile"] == {"appearance": "A polished broadcast figure.", "notes": "professional; american accent"}
+    assert s["profile_v"] == 1
+
+
+async def test_the_labelling_pass_fills_profiles(aiohttp_client, tmp_path, monkeypatch):
+    seen = []
+
+    async def fake(self, session, system, user, schema, max_tokens=2048, **kw):
+        if "quotes" in schema["properties"]:
+            seen.append((system, schema))
+            ids = schema["properties"]["quotes"]["items"]["properties"]["id"]["enum"]
+            return {"narrator": "third person", "speakers": [{"name": "Tom", "aliases": [], "gender": "male", "age": "child"}],
+                    "quotes": [{"id": i, "starts": "", "speaker": "Tom", "delivery": "neutral"} for i in ids],
+                    "profile_updates": [{"character": "Tom", "appearance": "a small boy in a straw hat",
+                                         "speech_style": "stammers", "notes": "shy"}]}
+        return {"characters": [{"name": "Tom", "appearance": "a boy", "gender": "male", "age": "child", "accent": "irish",
+                                "temperament": "timid", "voice": "A shy boy's voice."}]}
+
+    monkeypatch.setattr(dz.LocalLlm, "complete", fake)
+    c = await aiohttp_client(make_app(make_cfg(tmp_path), specs=SPECS))
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    s = await wait_done(c)
+    assert "profile_updates" in seen[0][1]["properties"] and "Character profiles" in seen[0][0]
+    tom = next(ch for ch in s["characters"] if ch["id"] == "tom")
+    # noted while reading; the roster step doesn't overwrite it (its appearance only fills gaps)
+    assert tom["profile"] == {"appearance": "a small boy in a straw hat", "speech_style": "stammers", "notes": "shy",
+                              "gender": "male", "apparent_age": "child"}

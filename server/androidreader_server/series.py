@@ -45,9 +45,12 @@ class SeriesStore:
         if p.exists():
             data = json.loads(p.read_text(encoding="utf-8"))
             from .dramatize import normalize_names
+            from .profile import migrate as migrate_profiles
 
             normalize_names(data)  # older entries may hold "a prisoner"
+            migrate_profiles(data)  # dossiers -> voice profiles
             data.pop("names_v", None)
+            data.pop("profile_v", None)
             return data
         return {"name": name, "books": {}, "characters": {}}
 
@@ -96,6 +99,10 @@ def seed(app: web.Application, book_id: str, script: dict) -> int:
             c["dossier"] = copy.deepcopy(entry["dossier"])
         if entry.get("dossier_user"):
             c["dossier_user"] = {**entry["dossier_user"], **(c.get("dossier_user") or {})}
+        if entry.get("profile") and not c.get("profile"):
+            c["profile"] = copy.deepcopy(entry["profile"])
+        if entry.get("profile_user"):
+            c["profile_user"] = {**entry["profile_user"], **(c.get("profile_user") or {})}
         if entry.get("voice") and not c.get("voice"):
             c["voice"] = entry["voice"]
         if entry.get("description") and not c.get("description"):
@@ -159,6 +166,8 @@ def remember(app: web.Application, book_id: str, only: str | None = None) -> str
             "description": c.get("description", ""),
             "dossier": dossier or old.get("dossier", {}),
             "dossier_user": {**old.get("dossier_user", {}), **(c.get("dossier_user") or {})},
+            "profile": c.get("profile") or old.get("profile", {}),
+            "profile_user": {**old.get("profile_user", {}), **(c.get("profile_user") or {})},
             "voice": c.get("voice") or old.get("voice"),
             # Tiers from other volumes are a floor; this volume's own earlier tier is simply replaced.
             "role": _higher(c.get("role_user") or c.get("role_auto") or c.get("role"),

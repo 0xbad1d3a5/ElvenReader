@@ -51,6 +51,7 @@ class Variant:
     consistency: bool = False  # a second run on shifted chunks; disagreements get a review call
     revise: int = 0  # earlier lines each call may revise (label_chunk's revise window)
     revise_unnamed: bool = False
+    profiles: bool = False  # the labelling pass also fills voice profiles (profile_updates)
 
 
 V = Variant
@@ -72,6 +73,8 @@ VARIANTS = {
     "context-review": V("context-small + review pass per chunk", context_words=600, recent=12, review=True),
     "context-big": V("600-word chunks + 1,200 words of preceding text, 20 recent lines", context_words=1200, recent=20),
     "consistency": V("two runs (600/420-word chunks); disagreeing chunks reviewed", consistency=True),
+    "context-profiles": V("context-small + voice profiles noted while labelling", context_words=600, recent=12,
+                          profiles=True),
     "rev12": V("context-small + may revise the last 12 earlier lines", context_words=600, recent=12, revise=12),
     "rev30": V("context-small + may revise the last 30 earlier lines", context_words=600, recent=12, revise=30),
     "rev60": V("context-small + may revise the last 60 earlier lines (about the previous chunk or two)",
@@ -167,7 +170,7 @@ async def label(llm, session, book: dict, s: dict, chunk, v: Variant, proposed=N
     result, local = await dz.label_chunk(
         llm, session, book, s, chunk, thinking=v.thinking if thinking is None else thinking, model=v.model,
         effort=v.effort, context_words=v.context_words, recent=v.recent, proposed=proposed,
-        revise=0 if proposed else v.revise, revise_unnamed=v.revise_unnamed)
+        revise=0 if proposed else v.revise, revise_unnamed=v.revise_unnamed, profiles=v.profiles)
     if chunk.tense and by_tense.get(chunk.tense):
         result["narrator"] = by_tense[chunk.tense]
     dz.apply_chunk_result(s, result, local)
@@ -258,6 +261,9 @@ async def evaluate(name: str, v: Variant, sets: list[str]) -> dict:
                     ok, n = ok + r["correct"], n + r["quotes"]
                     wrong += r["wrong"]
                 out["sasaki"] = [ok, n, round(secs / words * 100000 / 60, 1)]
+                if v.profiles:
+                    out["profiles"] = {c["name"]: c["profile"] for c in s["characters"].values() if c.get("profile")}
+                    print(f"{name:16} profiles for {len(out['profiles'])} characters", flush=True)
                 out["sasaki_wrong"] = wrong
                 tally_revisions(s, 0, [sasaki_judge(json.loads(p_.read_text(encoding="utf-8"))) for p_ in SASAKI], out)
                 kinds = [r_["kind"] for r_ in out.get("revisions", [])]

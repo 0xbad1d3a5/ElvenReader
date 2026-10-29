@@ -90,6 +90,9 @@ class ServerConfig:
     # unnamed speakers ("a prisoner"). Reader corrections are never revised.
     llm_label_revise_window: int = 0
     llm_label_revise_unnamed: bool = False
+    # Let the labelling pass note what each character looks and sounds like (the profile used to design
+    # voices) as it reads; off = the profile comes only from the roster step at the end.
+    llm_label_profiles: bool = True
     # Cap on reasoning tokens per request (llama.cpp --reasoning-budget); -1 = unlimited.
     llm_reasoning_budget: int = -1
     # Engine used to create character voices from a description.

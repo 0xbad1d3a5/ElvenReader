@@ -232,8 +232,13 @@ First-person narration: when the story is told by "I", every line the narrator s
 Also list every character who speaks in this passage with their gender, age group and any other names, titles or nicknames the passage uses for them (aliases)."""
 
 
-def chunk_schema(local_ids: list[str], revisable: list[str] | None = None) -> dict:
+def chunk_schema(local_ids: list[str], revisable: list[str] | None = None, profiles: bool = False) -> dict:
     schema = _chunk_schema(local_ids)
+    if profiles:
+        from .profile import UPDATES_SCHEMA
+
+        schema["properties"]["profile_updates"] = UPDATES_SCHEMA
+        schema["required"] = [*schema["required"], "profile_updates"]  # optional fields get skipped; [] is fine
     if revisable:
         # Earlier lines the passage shows were given to the wrong speaker (see label_chunk's revise).
         schema["properties"]["revisions"] = {
@@ -246,8 +251,9 @@ def chunk_schema(local_ids: list[str], revisable: list[str] | None = None) -> di
                                      "reason": {"type": "string", "maxLength": 160}},
                       "required": ["id", "starts", "speaker", "reason"]},
         }
-        schema["required"] = ["narrator", "quotes", "revisions", "speakers"]
-        schema["properties"] = {k: schema["properties"][k] for k in ("narrator", "quotes", "revisions", "speakers")}
+        schema["required"] = ["narrator", "quotes", "revisions", "speakers"] + (["profile_updates"] if profiles else [])
+        schema["properties"] = {k: schema["properties"][k] for k in ("narrator", "quotes", "revisions", "speakers",
+                                                                     "profile_updates") if k in schema["properties"]}
     return schema
 
 
@@ -889,20 +895,6 @@ def roster_text(script: dict, limit: int = 40) -> str:
     return "\n".join(parts)
 
 
-def user_notes(script: dict) -> str:
-    """The reader's own dossier edits, as short notes next to the roster (speech style helps attribution;
-    apparent age and form mostly matter for voices)."""
-    out = []
-    for c in script["characters"].values():
-        d = c.get("dossier_user") or {}
-        bits = [f"{label} {d[k]}" for k, label in (("speech_style", "talks:"), ("form", "is"), ("true_nature", "really"),
-                                                    ("introduced_as", "first appears as"), ("relationships", "relations:"))
-                if d.get(k)]
-        if bits:
-            out.append(f"- {c['name']}: " + "; ".join(bits))
-    return "\n".join(out)
-
-
 def recent_text(script: dict, book: dict, chunk: Chunk, n: int = 6) -> str:
     """The last few attributed quotations before this chunk, for continuity."""
     ch = book["chapters"][chunk.chapter]
@@ -955,6 +947,10 @@ def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) 
             n += 1
     if result.get("revisions"):
         apply_revisions(script, result)
+    if result.get("profile_updates"):
+        from .profile import apply_updates
+
+        apply_updates(script, result["profile_updates"])
     return n
 
 
@@ -1179,7 +1175,7 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
                       thinking: bool = False, model: str | None = None, effort: str = "high",
                       context_words: int = 0, recent: int = 6,
                       proposed: dict[str, str] | None = None, revise: int = 0,
-                      revise_unnamed: bool = False) -> tuple[dict, dict[str, str]]:
+                      revise_unnamed: bool = False, profiles: bool = False) -> tuple[dict, dict[str, str]]:
     """Label one chunk. `context_words` adds the preceding text, `recent` sets how many earlier
     attributions are shown, and `proposed` (number -> speaker) asks the model to review a first pass."""
     text, local = render_chunk(book, chunk)
@@ -1210,10 +1206,8 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
                  f"{render_dossier(script, limit=30, width=110)}"
                  + (f"\n\nPresent in this part of the story: {', '.join(present)}" if present else ""))
     else:
+        # Profiles (and the reader's profile edits) only shape voices; they are not given to attribution.
         known = f"Known characters:\n{roster_text(script)}"
-        notes = user_notes(script)
-        if notes:
-            known += f"\n\nNotes on some characters (from the reader):\n{notes}"
     before = preceding_text(book, chunk, context_words) if context_words else ""
     editable: dict[str, str] = {}
     revise_block = ""
@@ -1248,13 +1242,19 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         budget += 8000
     if editable:
         budget += 60 * min(len(editable), 8)
-    schema = chunk_schema(list(local), list(editable))
+    schema = chunk_schema(list(local), list(editable), profiles=profiles)
+    system = SYSTEM_PROMPT
+    if profiles:
+        from .profile import PROMPT_RULE
+
+        system += "\n" + PROMPT_RULE
+        budget += 200
     try:
-        result = await llm.complete(session, SYSTEM_PROMPT, user, schema, max_tokens=budget, **extra)
+        result = await llm.complete(session, system, user, schema, max_tokens=budget, **extra)
     except LlmError as exc:
         if "invalid JSON" not in str(exc):
             raise
-        result = await llm.complete(session, SYSTEM_PROMPT, user, schema, max_tokens=budget * 3, **extra)
+        result = await llm.complete(session, system, user, schema, max_tokens=budget * 3, **extra)
     result["_editable"] = editable
     if editable:
         result["_texts"] = texts
@@ -1291,20 +1291,16 @@ async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_ch
             texts.append(para[max(0, s - 60): s + 160])
         aliases = [a for a in c.get("aliases", []) if a != c["name"]]
         raw = script["characters"][c["id"]]
-        if raw.get("dossier") or raw.get("dossier_user"):
-            from .dossier import effective
+        from .profile import effective as profile_of
 
-            d = effective(raw)
-            about = "\n".join(f"- {k.replace('_', ' ')}: {d[k]}" for k in
-                              ("gender", "apparent_age", "form", "true_nature", "personality", "speech_style")
-                              if d.get(k))
-            blocks.append(f"## {c['name']}" + (f" (also called: {', '.join(aliases)})" if aliases else "") + "\n"
-                          + "Dossier (from reading the whole book; follow its gender and apparent age):\n" + about
-                          + "\nLines:\n" + "\n".join(f"- {t}" for t in texts))
-            continue
+        prof = profile_of(raw)
+        about = ("Profile (noted while reading; follow its gender, apparent age and appearance):\n"
+                 + "\n".join(f"- {k.replace('_', ' ')}: {prof[k]}" for k in
+                             ("gender", "apparent_age", "appearance", "speech_style", "notes") if prof.get(k)) + "\n"
+                 if prof else "")
         looks = appearance_evidence(book, [c["name"], *aliases])
         blocks.append(
-            f"## {c['name']}" + (f" (also called: {', '.join(aliases)})" if aliases else "") + "\n"
+            f"## {c['name']}" + (f" (also called: {', '.join(aliases)})" if aliases else "") + "\n" + about
             + "Described as:\n" + ("\n".join(f"- {t}" for t in looks) or "- (nothing found)") + "\n"
             + "Lines:\n" + "\n".join(f"- {t}" for t in texts))
     user = f"Book: {book.get('title', '')} by {book.get('author', '')}\n\n" + "\n\n".join(blocks)
@@ -1318,12 +1314,20 @@ async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_ch
             if d.get(key):
                 c[key] = d[key]
         c["description"] = d.get("voice", "")
-        if c.get("dossier") or c.get("dossier_user"):
-            from .dossier import effective, sync_character
+        from . import profile
 
-            sync_character(c)  # the dossier's apparent gender and age win
-            if effective(c).get("voice"):
-                c["description"] = effective(c)["voice"]
+        # What the roster step saw fills what the reading left empty (the fallback when nothing was noted).
+        prof = c.setdefault("profile", {})
+        if d.get("appearance") and not prof.get("appearance"):
+            prof["appearance"] = " ".join(d["appearance"].split())[:profile.TEXT_MAX]
+        for key, src in (("gender", "gender"), ("apparent_age", "age")):
+            if d.get(src) and d[src] != "unknown" and prof.get(key, "unknown") == "unknown":
+                prof[key] = d[src]
+        extra = "; ".join(x for x in (d.get("temperament"), d.get("accent") and d["accent"] != "neutral"
+                                      and f"{d['accent']} accent") if x)
+        if extra and not prof.get("notes"):
+            prof["notes"] = extra
+        profile.sync_character(c)  # the profile's gender and apparent age win (the reader's above all)
 
 
 # ----------------------------------------------------------------- analysis job
@@ -1384,7 +1388,8 @@ class Analyzer:
                                                    context_words=cfg.llm_label_context_words,
                                                    recent=cfg.llm_label_recent_lines,
                                                    revise=cfg.llm_label_revise_window,
-                                                   revise_unnamed=cfg.llm_label_revise_unnamed))
+                                                   revise_unnamed=cfg.llm_label_revise_unnamed,
+                                                   profiles=cfg.llm_label_profiles))
 
     async def _read_for_dossier(self, session, book: dict, book_id: str) -> None:
         """Pass 1: the reasoning model reads the whole book and builds the character dossier."""
@@ -1496,6 +1501,9 @@ class Analyzer:
         await self._gpu(lambda: describe_cast(self.llm, session, book, s))
         from . import roles
 
+        from .profile import compact as compact_profiles
+
+        await self._gpu(lambda: compact_profiles(self.llm, session, s))
         s["narration"] = compute_narration(book, s)  # so narrators count as main
         try:
             await self._gpu(lambda: roles.classify(self.llm, session, book, s))
@@ -1509,7 +1517,7 @@ class Analyzer:
             for cid, c in s["characters"].items():
                 if cid in fresh["characters"]:
                     for k in ("gender", "age", "accent", "temperament", "appearance", "description",
-                              "role_auto", "role_source", "role_note", "role_flag"):
+                              "role_auto", "role_source", "role_note", "role_flag", "profile"):
                         fresh["characters"][cid][k] = c.get(k, fresh["characters"][cid].get(k))
                     f = fresh["characters"][cid]
                     f["role"] = f.get("role_user") if f.get("role_user") in roles.ROLES else f.get("role_auto")
@@ -1615,14 +1623,11 @@ async def sync_voice_descriptions(app: web.Application, voice_id: str) -> None:
 
 
 def character_description(c: dict) -> str:
-    user_voice = (c.get("dossier_user") or {}).get("voice")
-    if user_voice:
-        return user_voice
     if c.get("description"):
         return c["description"]
-    if c.get("dossier"):
-        from .dossier import voice_description
+    from .profile import effective as profile_of, voice_description
 
+    if profile_of(c):
         return voice_description(c)
     parts = [c.get("gender"), c.get("age"), c.get("accent") and f"{c['accent']} accent", c.get("temperament")]
     return ", ".join(p for p in parts if p and p != "unknown") or "an adult speaker with a natural voice"
@@ -1895,7 +1900,8 @@ async def get_script(request: web.Request) -> web.Response:
     s = store.script(book_id)
     if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
                                       or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))
-                                      or s.get("names_v") != 1 or s.get("voice_desc_v") != 1):
+                                      or s.get("names_v") != 1 or s.get("voice_desc_v") != 1
+                                      or s.get("profile_v") != 1):
         async with store.lock(book_id):
             s = store.script(book_id)
             book = store.book(book_id)
@@ -1907,6 +1913,10 @@ async def get_script(request: web.Request) -> web.Response:
                 logger.info("%s: %d quoted terms given back to the narration", book_id, n)
             if s.get("names_v") != 1:  # "a prisoner" -> "Prisoner"
                 normalize_names(s)
+            if s.get("profile_v") != 1:  # dossiers -> voice profiles
+                from .profile import migrate as migrate_profiles
+
+                migrate_profiles(s)
             if s.get("voice_desc_v") != 1:  # descriptions left behind by voices chosen or redesigned later
                 from .app import VOICES_KEY
 
@@ -1993,21 +2003,11 @@ async def patch_character(request: web.Request) -> web.Response:
 
             c["voice"] = body["voice"] or None
             follow_voice(c, request.app[VOICES_KEY])
-        if isinstance(body.get("dossier"), dict):
-            from .dossier import FIELDS, effective, sync_character
+        if isinstance(body.get("profile"), dict) or isinstance(body.get("dossier"), dict):
+            from . import profile
 
-            mine = c.setdefault("dossier_user", {})
-            for key, value in body["dossier"].items():
-                if key not in FIELDS and key != "narrates":
-                    continue
-                value = (value or "").strip() if isinstance(value, str) else ""
-                if value and value != (c.get("dossier") or {}).get(key):
-                    mine[key] = value
-                elif not value or value == (c.get("dossier") or {}).get(key):
-                    mine.pop(key, None)
-            sync_character(c)
-            if mine.get("voice"):
-                c["description"] = effective(c)["voice"]
+            fields = body.get("profile") if isinstance(body.get("profile"), dict) else profile.from_dossier(body["dossier"])
+            profile.set_user_fields(c, fields)
         if isinstance(body.get("aliases"), list):
             c["aliases"] = [a.strip() for a in body["aliases"] if isinstance(a, str) and a.strip()]
         if "role" in body:
@@ -2049,7 +2049,9 @@ async def voice_from_dossier(request: web.Request) -> web.Response:
     if c is None:
         return web.json_response({"error": "no such character"}, status=404)
     engine = (body or {}).get("engine") or request.app[CONFIG_KEY_REF].voice_design_engine
-    description = character_description(c)
+    from .profile import effective as profile_of, voice_description
+
+    description = voice_description(c) if profile_of(c) else character_description(c)
     try:
         v = await design_voice(request.app, engine, description, c["name"], source="character",
                                voice_id=f"ch-{book_id[:8]}-{cid}"[:55] + f"-{int(time.time()) % 100000}",
