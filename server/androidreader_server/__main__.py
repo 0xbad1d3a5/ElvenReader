@@ -11,7 +11,7 @@ from pathlib import Path
 from aiohttp import web
 
 from . import __version__
-from .app import make_app, pair_url, server_urls
+from .app import make_app, server_urls, viewer_url
 from .config import default_data_dir, load_config, rotate_token
 from .engines.registry import ENGINES
 from .voices import VoiceStore
@@ -20,7 +20,7 @@ VOICESTUDIO_DB = Path(os.path.expandvars(r"%APPDATA%\OmniVoice\omnivoice.db"))
 VOICESTUDIO_VOICES = Path(os.path.expandvars(r"%APPDATA%\OmniVoice\voices"))
 
 
-def _print_pairing(cfg) -> None:
+def _print_addresses(cfg) -> None:
     urls = server_urls(cfg.port, cfg.extra_urls)
     print(f"\nAndroidReader server {__version__}")
     print(f"  Listening on   : {cfg.host}:{cfg.port}")
@@ -30,17 +30,18 @@ def _print_pairing(cfg) -> None:
     if not urls:
         print("  No network address found - connect this PC to a network.")
         return
+    print(f"  Library        : http://127.0.0.1:{cfg.port}/books")
     for url in urls:
-        print(f"  Phone URL      : {url}")
-    print(f"\nPairing QR codes: open http://127.0.0.1:{cfg.port}/ in a browser on this PC.")
+        print(f"  On the network : {url}/books")
+    print(f"\nLinks and QR codes for other devices: open http://127.0.0.1:{cfg.port}/ on this PC.")
     try:
         import qrcode
 
         qr = qrcode.QRCode(border=1)
-        qr.add_data(pair_url(urls[0], urls, cfg.token))
+        qr.add_data(viewer_url(urls[0], cfg.token))
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8")
-        print(f"Or scan this ({urls[0]}):")
+        print(f"Or scan this to open the library ({urls[0]}):")
         qr.print_ascii(out=sys.stdout, invert=True)
     except Exception:  # noqa: BLE001 - the QR is a convenience only
         pass
@@ -53,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--engine", help=f"default engine ({', '.join(ENGINES)})")
     parser.add_argument("--no-preload", action="store_true", help="don't load the default engine at start-up")
     parser.add_argument("--rotate-token", action="store_true", help="generate a new token and exit")
-    parser.add_argument("--show-pairing", action="store_true", help="print pairing info and exit")
+    parser.add_argument("--show-links", action="store_true", help="print the library links and exit")
     parser.add_argument(
         "--import-voicestudio", action="store_true",
         help="copy VoiceStudio voice profiles (read-only) into the voice store and exit",
@@ -93,8 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(imported)} voice(s) imported; {len(store.list())} in the store.")
         return 0
 
-    _print_pairing(cfg)
-    if args.rotate_token or args.show_pairing:
+    _print_addresses(cfg)
+    if args.rotate_token or args.show_links:
         return 0
     print("\nPress Ctrl+C to stop.\n")
     web.run_app(

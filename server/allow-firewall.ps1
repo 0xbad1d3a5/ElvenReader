@@ -1,5 +1,5 @@
 #Requires -RunAsAdministrator
-# Lets phones on your private network (and on your VPN, if it is a Private network) reach the server.
+# Lets other devices on your private network (and on your VPN, if it is a Private network) reach the server.
 # Run once from an elevated PowerShell:  .\allow-firewall.ps1
 param([int]$Port = 3950)
 
@@ -12,6 +12,6 @@ Write-Host "Firewall rule '$name' added (Domain + Private networks)."
 $public = Get-NetConnectionProfile | Where-Object NetworkCategory -eq "Public"
 if ($public) {
     Write-Warning ("These networks are marked Public, so the rule does not apply to them: " +
-        ($public.Name -join ", ") + ". Mark your home network (and your VPN's adapter, if the phone " +
+        ($public.Name -join ", ") + ". Mark your home network (and your VPN's adapter, if your devices " +
         "connects through it) Private in Windows Settings > Network.")
 }

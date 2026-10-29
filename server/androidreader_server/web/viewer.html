@@ -202,14 +202,18 @@ else if (routeMatch) bookView(routeMatch[1]); else libraryView();
 
 async function libraryView() {
   $("#app").replaceChildren(
-    h("header", {}, h("h1", {}, "AndroidReader \u2014 processed books"), h("span", { class: "grow" }), h("a", { href: "/books/voices" }, "Voices"), EMBEDDED_TOKEN ? h("a", { href: "/" }, "Pairing") : null),
+    h("header", {}, h("h1", {}, "AndroidReader \u2014 library"), h("span", { class: "grow" }),
+      h("button", { class: "primary", onclick: () => addBook(refresh) }, "+ Add book"),
+      h("a", { href: "/books/voices" }, "Voices"),
+      EMBEDDED_TOKEN ? h("a", { href: "/", title: "Links and QR codes to open the library on other devices" }, "Other devices") : null),
     h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
   const covers = {};
+  let timer = null;
   async function refresh() {
     const { books } = await get("/api/books");
     const grid = $("#grid");
     grid.replaceChildren(...(books.length ? [] : [h("p", { class: "muted" },
-      "No books yet. Process one with scripts\\process_book.py, or turn on dramatized reading for a book in the app.")]));
+      "No books yet. Use \u201c+ Add book\u201d to upload an EPUB; it is analysed and cast automatically.")]));
     for (const b of books) {
       const cover = h("div", { class: "cover" }, b.title);
       if (b.cover) {
@@ -223,11 +227,69 @@ async function libraryView() {
           h("div", { class: "small" }, `${(b.words || 0).toLocaleString()} words \u00b7 ${b.quotes} quotations`),
           BUSY.includes(b.status) ? h("div", { class: "bar" }, h("div", { style: { width: (b.status === "casting" ? 100 : b.progress * 100) + "%" } })) : null,
           h("div", { class: "small" }, statusText(b)),
-          h("div", { class: "small muted" }, `${b.lines} lines \u00b7 ${b.characters} characters \u00b7 ${b.voiced} voiced`))));
+          h("div", { class: "small muted" }, `${b.lines} lines \u00b7 ${b.characters} characters \u00b7 ${b.voiced} voiced`),
+          BUSY.includes(b.status) ? null : h("button", { class: "small", style: { marginTop: "6px" },
+            title: "Analyse the book again from the start (your corrections, cast and voices are kept)",
+            onclick: async (e) => {
+              e.preventDefault(); e.stopPropagation();
+              if (!confirm(`Analyse \u201c${b.title}\u201d again? Your corrections, cast and voices are kept; it takes about an hour for a long novel.`)) return;
+              try { await api("POST", `/api/books/${b.id}/analyze`, { reanalyze: true }); } catch (err) { alert(err.message); }
+              refresh();
+            } }, "Re-analyse"))));
     }
-    if (books.some(b => BUSY.includes(b.status))) setTimeout(refresh, 8000);
+    clearTimeout(timer);
+    if (books.some(b => BUSY.includes(b.status))) timer = setTimeout(refresh, 8000);
   }
   refresh().catch(e => tokenScreen.shown || $("#grid").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
+/* Add a book: upload EPUB files from this device, or (on the PC) give a path. The server parses the book,
+   analyses who says what, sorts the cast and creates voices. */
+function addBook(onDone) {
+  const d = $("#dlg");
+  const files = h("input", { type: "file", accept: ".epub,application/epub+zip", multiple: true });
+  const path = h("input", { placeholder: "E:\\Books\\Some Book.epub", style: { width: "100%" } });
+  const cast = h("input", { type: "checkbox", checked: true, style: { width: "auto" } });
+  const bar = h("div", { style: { width: "0%" } }), status = h("p", { class: "small" });
+  const go = h("button", { class: "primary", type: "button" }, "Add");
+  const upload = (file) => new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("epub", file); form.append("cast", cast.checked ? "1" : "0");
+    const x = new XMLHttpRequest();
+    x.open("POST", "/api/library/import"); x.setRequestHeader("Authorization", "Bearer " + TOKEN);
+    x.upload.onprogress = (e) => { if (e.lengthComputable) bar.style.width = Math.round(e.loaded / e.total * 100) + "%"; };
+    x.onload = () => {
+      let data = {}; try { data = JSON.parse(x.responseText); } catch (_) {}
+      x.status === 200 ? resolve(data) : reject(new Error(data.error || "HTTP " + x.status));
+    };
+    x.onerror = () => reject(new Error("Upload failed"));
+    x.send(form);
+  });
+  go.onclick = async () => {
+    go.disabled = true;
+    const added = [];
+    try {
+      for (const f of files.files) {
+        status.textContent = `Uploading ${f.name}\u2026`; bar.style.width = "0%";
+        added.push((await upload(f)).title);
+      }
+      if (path.value.trim()) {
+        status.textContent = "Reading the file on the PC\u2026";
+        added.push((await api("POST", "/api/library/import", { path: path.value.trim(), cast: cast.checked })).data.title);
+      }
+      if (!added.length) { status.textContent = "Choose an EPUB file (or enter a path on the PC)."; go.disabled = false; return; }
+      d.close(); onDone && onDone();
+    } catch (e) { status.textContent = "\u26A0 " + e.message; go.disabled = false; }
+  };
+  d.replaceChildren(h("form", { method: "dialog" }, h("h3", { style: { marginTop: 0 } }, "Add a book"),
+    h("label", {}, "EPUB file(s) from this device"), files,
+    EMBEDDED_TOKEN ? [h("label", {}, "\u2026or a path on this PC"), path] : null,
+    h("label", { style: { display: "flex", gap: "8px", alignItems: "center" } }, cast, "Create the cast's voices when the analysis is done"),
+    h("p", { class: "small muted" }, "The book is parsed on the server, then analysed (who says what, the cast's tiers and profiles), " +
+      "which takes about an hour for a long novel; you can read along as lines come in."),
+    h("div", { class: "bar" }, bar), status,
+    h("div", { class: "row" }, h("button", { value: "cancel" }, "Cancel"), go)));
+  d.showModal();
 }
 
 /* ------------------------------------------------------------------ voices */

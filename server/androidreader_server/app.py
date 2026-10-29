@@ -1,4 +1,4 @@
-"""aiohttp application: the phone-facing API of the AndroidReader server."""
+"""aiohttp application: the AndroidReader server's API and web pages."""
 from __future__ import annotations
 
 import asyncio
@@ -37,9 +37,6 @@ from .voices import VoiceStore
 
 logger = logging.getLogger("androidreader")
 
-ANDROID_PACKAGE = "com.androidreader"
-PAIR_SCHEME = "areader"
-
 CONFIG_KEY = web.AppKey("config", ServerConfig)
 ENGINES_KEY = web.AppKey("engines", EngineManager)
 VOICES_KEY = web.AppKey("voices", VoiceStore)
@@ -47,7 +44,7 @@ PRON_KEY = web.AppKey("pronunciations", PronunciationStore)
 CACHE_KEY = web.AppKey("cache", AudioCache)
 EXTRA_KEY = web.AppKey("extra", dict)
 
-_PUBLIC_PATHS = {"/api/ping", "/pair"}
+_PUBLIC_PATHS = {"/api/ping"}
 _LOOPBACK_ONLY_PATHS = {"/"}
 _LOOPBACK = {"127.0.0.1", "::1"}
 
@@ -465,51 +462,18 @@ async def tts(request: web.Request) -> web.StreamResponse:
     return resp
 
 
-# ---------------------------------------------------------------- pairing
+# ---------------------------------------------------------------- addresses
 
 
 def server_urls(port: int, extra: list[str] | None = None) -> list[str]:
-    """URLs the phone can try: this PC's addresses (private ones first), then any
-    configured extra URLs, e.g. the PC's address or name on your own VPN."""
+    """URLs other devices can open: this PC's addresses (private ones first), then any configured extra
+    URLs, e.g. the PC's address or name on your own VPN."""
     addrs = lan_addresses()
     urls = [f"http://{a['ip']}:{port}" for a in addrs if a["kind"] == "lan"]
     urls += [f"http://{a['ip']}:{port}" for a in addrs if a["kind"] != "lan"]
     urls += [u.rstrip("/") for u in extra or [] if u.strip()]
     seen = set()
     return [u for u in urls if not (u in seen or seen.add(u))]
-
-
-def pairing_link(urls: list[str], token: str) -> str:
-    """Deep link understood by the Android app."""
-    q = "&".join(f"url={quote(u, safe='')}" for u in urls)
-    return f"{PAIR_SCHEME}://pair?{q}&token={quote(token, safe='')}"
-
-
-_PAIR_PAGE = """<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
-<title>Pair AndroidReader</title><style>body{font-family:sans-serif;margin:2em;line-height:1.5}
-a.btn{display:inline-block;padding:.8em 1.2em;background:#3557d6;color:#fff;border-radius:.5em;text-decoration:none}
-code{background:#eee;padding:.1em .3em;word-break:break-all}</style></head><body>
-<h2>AndroidReader</h2><p id=msg>Opening the app&hellip;</p>
-<p><a class=btn id=open href="#">Open AndroidReader</a></p>
-<p>Or enter manually in the app:<br>Server URLs: <code id=url></code><br>Token: <code id=tok></code></p>
-<script>
-var h = location.hash.slice(1), tok = '', urls = [location.origin];
-if (h.indexOf('=') < 0) { tok = decodeURIComponent(h); } else {
-  h.split('&').forEach(function (kv) { var p = kv.split('='), v = decodeURIComponent(p[1] || '');
-    if (p[0] == 't') tok = v; if (p[0] == 'u' && v) v.split(',').forEach(function (u) { if (urls.indexOf(u) < 0) urls.push(u); }); });
-}
-document.getElementById('url').textContent = urls.join(', ');
-document.getElementById('tok').textContent = tok || '(missing - scan the QR code again)';
-var q = urls.map(function (u) { return 'url=' + encodeURIComponent(u); }).join('&') + '&token=' + encodeURIComponent(tok);
-document.getElementById('open').href = 'intent://pair?' + q + '#Intent;scheme=__SCHEME__;package=__PKG__;end';
-document.getElementById('msg').textContent = tok ? 'Tap the button to pair this phone.' : 'No token in link.';
-</script></body></html>"""
-
-
-async def pair_page(request: web.Request) -> web.Response:
-    # Public on purpose: the token lives in the URL fragment, which browsers never send to the server.
-    page = _PAIR_PAGE.replace("__PKG__", ANDROID_PACKAGE).replace("__SCHEME__", PAIR_SCHEME)
-    return web.Response(text=page, content_type="text/html")
 
 
 def _qr_svg(data: str) -> str:
@@ -522,17 +486,12 @@ def _qr_svg(data: str) -> str:
     return buf.getvalue().decode("utf-8")
 
 
-def pair_url(base: str, urls: list[str], token: str) -> str:
-    others = ",".join(u for u in urls if u != base)
-    return f"{base}/pair#t={quote(token, safe='')}" + (f"&u={quote(others, safe=':/,')}" if others else "")
-
-
 def viewer_url(base: str, token: str) -> str:
     return f"{base}/books#token={quote(token, safe='')}"
 
 
 async def index(request: web.Request) -> web.Response:
-    """Loopback-only page showing pairing QR codes (it contains the token)."""
+    """Loopback-only page with links and QR codes to open the viewer on other devices (they contain the token)."""
     cfg = request.app[CONFIG_KEY]
     urls = server_urls(cfg.port, cfg.extra_urls)
     parts = [
@@ -540,28 +499,21 @@ async def index(request: web.Request) -> web.Response:
         "<style>body{font-family:sans-serif;margin:2em}.card{display:inline-block;margin:1em;"
         "padding:1em;border:1px solid #ccc;border-radius:.5em;vertical-align:top}</style></head><body>",
         "<h2>AndroidReader server</h2>",
-        "<p>Scan a code with the phone's camera, open the link, then tap <b>Open AndroidReader</b>. "
-        "Every code carries all the addresses below, so the app switches between them by itself "
-        "(e.g. home Wi-Fi and your VPN). Add more with <code>extra_urls</code> in config.json.</p>"
-        "<p><a href=\"/books\">Processed books (viewer)</a> on this PC.</p>",
+        "<p><a href=\"/books\">Open the library</a> on this PC.</p>",
     ]
     if not urls:
         parts.append("<p><b>No network address found.</b> Is this PC connected to a network?</p>")
-    for base in urls:
-        parts.append(
-            f"<div class=card><h3>{html.escape(base)}</h3>{_qr_svg(pair_url(base, urls, cfg.token))}</div>"
-        )
-    if urls:
-        parts.append("<h3>Open the viewer on another device</h3><p>Scan or open one of these links on a "
-                     "computer, tablet or phone on the same network (or your VPN). The token travels in "
-                     "the link's <code>#</code> part, which the browser keeps to itself and remembers.</p>")
+    else:
+        parts.append("<h3>Open it on another device</h3><p>Scan or open one of these links on a computer, "
+                     "tablet or phone on the same network (or your VPN; add its address with <code>extra_urls</code> "
+                     "in config.json). The token travels in the link's <code>#</code> part, which the browser keeps "
+                     "to itself and remembers.</p>")
         for base in urls:
             link = viewer_url(base, cfg.token)
             parts.append(f"<div class=card><h3><a href=\"{html.escape(link)}\">{html.escape(base)}/books</a></h3>"
                          f"{_qr_svg(link)}</div>")
     parts.append(f"<p>Token: <code>{html.escape(cfg.token)}</code></p></body></html>")
     return web.Response(text="".join(parts), content_type="text/html")
-
 
 async def viewer_page(request: web.Request) -> web.Response:
     """Book viewer. Only loopback requests get the token embedded; other devices supply it."""
@@ -614,7 +566,6 @@ def make_app(
     r.add_get("/", index)
     r.add_get("/books", viewer_page)
     r.add_get("/books/{book}", viewer_page)
-    r.add_get("/pair", pair_page)
     r.add_get("/api/ping", ping)
     r.add_get("/api/health", health)
     r.add_get("/api/engines", engines)

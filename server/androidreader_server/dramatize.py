@@ -1,15 +1,15 @@
 """Dramatization: who says each quotation in a book, and how.
 
-The phone uploads a book's paragraphs together with the quotations it found
-(stable IDs and offsets, so highlighting always matches the EPUB). A local LLM
+A book's paragraphs are stored with the quotations found in them (epub.py:
+stable IDs and offsets, so highlighting always matches the EPUB). A local LLM
 then labels each quotation, chunk by chunk, with a speaker and a short delivery
 ("shouting, urgent"). The LLM never rewrites text: it only returns labels for
 the IDs it was given, constrained by a JSON schema. Results are saved after
 every chunk, so playback can use them while the analysis is still running.
 
 A roster pass then describes the main characters (gender, age, accent,
-temperament) and voices are created for them with a voice-design model; minor
-characters share a small pool of voices. Users can rename, merge and re-voice
+temperament), the cast is sorted into tiers, and voices are created with a voice-design
+model; extras share a small pool of voices. Users can rename, merge and re-voice
 characters, and correct any line; corrections always win.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ GENDERS = ["male", "female", "unknown"]
 
 
 def quote_regions(text: str) -> list[tuple[int, int]]:
-    """Python twin of the app's Quotes.regions (used by the evaluation tools)."""
+    """Quotation ranges, including the quote marks (an unclosed quote runs to the paragraph end)."""
     pairs = {"\u201c": "\u201d", "\u00ab": "\u00bb", "\u201e": "\u201c", "\u2018": "\u2019", '"': '"'}
     out, open_at, closer = [], -1, ""
     for i, c in enumerate(text):
@@ -474,7 +474,7 @@ class ScriptStore:
 
     @staticmethod
     def public(script: dict) -> dict:
-        """What the phone sees: lines with corrections applied, characters with line counts."""
+        """What clients see: lines with corrections applied, characters with line counts."""
         lines = {}
         for qid, line in script.get("lines", {}).items():
             lines[qid] = {"speaker": line.get("speaker"), "delivery": line.get("delivery"), "corrected": False}
@@ -1368,6 +1368,13 @@ class Analyzer:
                 self.current = book_id
                 try:
                     await self.analyse(session, book_id)
+                    s = self.store.script(book_id)
+                    if s.get("auto_cast") and s.get("status") == "done":  # added from the library: cast it too
+                        async with self.store.lock(book_id):
+                            s = self.store.script(book_id)
+                            s.update(status="casting", detail="creating character voices")
+                            self.store.save_script(book_id, s)
+                        await run_cast(self.app, book_id, s.get("auto_cast_engine") or self.llm.cfg.voice_design_engine)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -1767,21 +1774,6 @@ async def _picture_target(request: web.Request) -> tuple[Path | None, web.Respon
     return f, None
 
 
-async def put_picture(request: web.Request) -> web.Response:
-    """PUT /api/books/{book}/picture?path=<zip path>: the picture's bytes, as in the EPUB."""
-    f, err = await _picture_target(request)
-    if err is not None:
-        return err
-    data = await request.read()
-    if not data:
-        return web.json_response({"error": "empty body"}, status=400)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f.with_suffix(f.suffix + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(f)
-    return web.json_response({"ok": True, "bytes": len(data)})
-
-
 async def get_picture(request: web.Request) -> web.StreamResponse:
     f, err = await _picture_target(request)
     if err is not None:
@@ -1928,20 +1920,7 @@ async def get_script(request: web.Request) -> web.Response:
 
                 roles.apply_rules(book, s)
             store.save_script(book_id, s)
-    return web.json_response(with_voice_versions(request.app, ScriptStore.public(s)))
-
-
-def with_voice_versions(app: web.Application, public: dict) -> dict:
-    """Add each cast voice's fingerprint, so clients notice edited voices and drop prepared audio."""
-    from .app import VOICES_KEY
-
-    voices = app[VOICES_KEY]
-    versions = {}
-    for c in public.get("characters", []):
-        v = voices.get(c.get("voice"))
-        if v is not None:
-            versions[v.id] = v.fingerprint
-    return {**public, "voice_versions": versions}
+    return web.json_response(ScriptStore.public(s))
 
 
 async def analyze(request: web.Request) -> web.Response:
@@ -2067,6 +2046,29 @@ async def voice_from_dossier(request: web.Request) -> web.Response:
     return web.json_response(ScriptStore.public(s))
 
 
+async def run_cast(app: web.Application, book_id: str, engine: str, upgrade: set[str] | None = None,
+                   previous: str = "done") -> None:
+    """Creates the cast's voices (status "casting" while it runs) and stores the cast in the series."""
+    from .engines.manager import EngineError
+    from .series import remember
+
+    store = app[DRAMA_STORE_KEY]
+    try:
+        result = await cast_voices(app, book_id, engine, upgrade_roles=upgrade)
+        detail = f"{len(result['created'])} voices created"
+        remember(app, book_id)
+    except EngineError as exc:
+        detail = f"voice creation failed: {exc.detail}"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("casting failed")
+        detail = f"voice creation failed: {exc}"
+    async with store.lock(book_id):
+        fresh = store.script(book_id)
+        fresh.update(status=previous if previous != "casting" else "done", detail=detail)
+        fresh.pop("auto_cast", None)
+        store.save_script(book_id, fresh)
+
+
 async def cast(request: web.Request) -> web.Response:
     book_id = request.match_info["book"]
     store = request.app[DRAMA_STORE_KEY]
@@ -2084,26 +2086,7 @@ async def cast(request: web.Request) -> web.Response:
         s.update(status="casting", detail="creating character voices")
         store.save_script(book_id, s)
 
-    async def run():
-        from .engines.manager import EngineError
-
-        try:
-            result = await cast_voices(request.app, book_id, engine, upgrade_roles=upgrade or None)
-            detail = f"{len(result['created'])} voices created"
-            from .series import remember
-
-            remember(request.app, book_id)
-        except EngineError as exc:
-            detail = f"voice creation failed: {exc.detail}"
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("casting failed")
-            detail = f"voice creation failed: {exc}"
-        async with store.lock(book_id):
-            fresh = store.script(book_id)
-            fresh.update(status=previous if previous != "casting" else "done", detail=detail)
-            store.save_script(book_id, fresh)
-
-    task = asyncio.ensure_future(run())
+    task = asyncio.ensure_future(run_cast(request.app, book_id, engine, upgrade or None, previous))
     request.app[CAST_TASKS_KEY].add(task)
     task.add_done_callback(request.app[CAST_TASKS_KEY].discard)
     return web.json_response(ScriptStore.public(store.script(book_id)), status=202)
@@ -2149,7 +2132,6 @@ def setup(app: web.Application) -> None:
     r.add_get("/api/books/{book}/cover", get_cover)
     r.add_get("/api/books/{book}/pictures", list_pictures)
     r.add_get("/api/books/{book}/picture", get_picture)
-    r.add_put("/api/books/{book}/picture", put_picture)
     r.add_post("/api/books/{book}", upload_book)
     r.add_get("/api/books/{book}/script", get_script)
     r.add_post("/api/books/{book}/analyze", analyze)

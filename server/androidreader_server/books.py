@@ -5,6 +5,7 @@ from aiohttp import web
 
 
 def setup(app: web.Application) -> None:
-    from . import dramatize
+    from . import dramatize, library
 
     dramatize.setup(app)
+    library.setup(app)

@@ -675,7 +675,7 @@ def test_mentions_are_narration_and_corrections_still_win():
     assert pub["q1"]["speaker"] == dz.find_character(script, "Bob") and "mention" not in pub["q1"]
 
 
-async def test_book_pictures_are_listed_uploaded_and_served(drama_client):
+async def test_book_pictures_are_listed_and_served(drama_client):
     c = drama_client
     payload = book_payload()
     payload["chapters"][0]["images"] = {"1": ["OEBPS/images/p1.jpg"]}
@@ -686,13 +686,15 @@ async def test_book_pictures_are_listed_uploaded_and_served(drama_client):
     lst = await (await c.get("/api/books/book1/pictures", headers=AUTH)).json()
     assert lst == {"have": [], "need": ["OEBPS/images/p1.jpg", "OEBPS/images/end.png"]}
     q = "/api/books/book1/picture?path=OEBPS%2Fimages%2Fp1.jpg"
-    assert (await c.get(q, headers=AUTH)).status == 404  # not uploaded yet
-    assert (await c.put(q, data=b"\xff\xd8jpeg", headers=AUTH)).status == 200
+    assert (await c.get(q, headers=AUTH)).status == 404  # not stored yet
+    f = c.server.app[dz.DRAMA_STORE_KEY].picture_file("book1", "OEBPS/images/p1.jpg")  # as an import stores it
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(b"\xff\xd8jpeg")
     r = await c.get(q, headers=AUTH)
     assert r.status == 200 and r.headers["Content-Type"] == "image/jpeg" and await r.read() == b"\xff\xd8jpeg"
     assert (await c.get(q)).status == 401  # token needed
     # only pictures the book refers to, no path tricks
-    assert (await c.put("/api/books/book1/picture?path=..%2F..%2Fconfig.json", data=b"x", headers=AUTH)).status == 404
+    assert (await c.get("/api/books/book1/picture?path=..%2F..%2Fconfig.json", headers=AUTH)).status == 404
     lst = await (await c.get("/api/books/book1/pictures", headers=AUTH)).json()
     assert lst == {"have": ["OEBPS/images/p1.jpg"], "need": ["OEBPS/images/end.png"]}
 
@@ -988,3 +990,50 @@ async def test_the_labelling_pass_fills_profiles(aiohttp_client, tmp_path, monke
     # noted while reading; the roster step doesn't overwrite it (its appearance only fills gaps)
     assert tom["profile"] == {"appearance": "a small boy in a straw hat", "speech_style": "stammers", "notes": "shy",
                               "gender": "male", "apparent_age": "child"}
+
+
+# ---------------------------------------------------------------- adding books from the website
+
+
+async def test_an_uploaded_epub_is_parsed_analysed_and_cast(drama_client, tmp_path):
+    import aiohttp
+
+    from test_epub import make_epub
+
+    path = make_epub(tmp_path / "tea.epub", {
+        "META-INF/container.xml": '<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>',
+        "content.opf": """<package><metadata><dc:title>Tea Party</dc:title><dc:creator>L. C.</dc:creator></metadata><manifest>
+            <item id="c" href="c.xhtml" media-type="application/xhtml+xml"/>
+            <item id="pic" href="p.jpg" media-type="image/jpeg" properties="cover-image"/></manifest>
+            <spine><itemref idref="c"/></spine></package>""",
+        "c.xhtml": "<html><body><p><img src='p.jpg'/></p>" + "".join(f"<p>{p}</p>" for p in PARAS) + "</body></html>",
+        "p.jpg": "\xff\xd8\xff fake jpeg",
+    })
+    c = drama_client
+    form = aiohttp.FormData()
+    form.add_field("epub", path.read_bytes(), filename="tea.epub", content_type="application/epub+zip")
+    r = await c.post("/api/library/import", data=form, headers=AUTH)
+    assert r.status == 200, await r.text()
+    book = await r.json()
+    from androidreader_server import epub
+
+    assert book["id"] == epub.book_id(path) and book["title"] == "Tea Party"
+    s = await wait_done(c, book["id"])
+    for _ in range(100):  # analysis, then the cast, without being asked
+        s = await (await c.get(f"/api/books/{book['id']}/script", headers=AUTH)).json()
+        if s["status"] == "done" and "voices created" in s["detail"]:
+            break
+        await asyncio.sleep(0.05)
+    assert "voices created" in s["detail"], s["detail"]
+    assert all(ch.get("voice") and ch.get("role") for ch in s["characters"] if ch["lines"])
+    stored = await (await c.get(f"/api/books/{book['id']}", headers=AUTH)).json()
+    assert stored["chapters"][0]["quotes"][0][0].startswith("c0p")
+    assert (await c.get(f"/api/books/{book['id']}/cover", headers=AUTH)).status == 200
+    pics = await (await c.get(f"/api/books/{book['id']}/pictures", headers=AUTH)).json()
+    assert pics == {"have": ["p.jpg"], "need": []}
+    # adding it again (here by path, allowed from this PC) keeps the analysis
+    r = await c.post("/api/library/import", json={"path": str(path)}, headers=AUTH)
+    assert (await r.json())["status"] == "done"
+    r = await c.post("/api/library/import", json={"path": str(tmp_path / "missing.epub")}, headers=AUTH)
+    assert r.status == 400
+    assert (await c.post("/api/library/import", data=aiohttp.FormData({"x": "1"}), headers=AUTH)).status == 400

@@ -3,7 +3,7 @@
     .venv\\Scripts\\python.exe scripts\\make_gold.py book.epub "It is a truth universally" out.json
 
 Finds the spine document containing the given phrase, extracts its paragraphs
-and quotations (same quote rules as the app) and writes them with empty
+and quotations (same quote rules as the server) and writes them with empty
 "speaker"/"delivery" fields to fill in by hand.
 """
 from __future__ import annotations

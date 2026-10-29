@@ -1,7 +1,7 @@
 [project]
 name = "androidreader-server"
 version = "0.2.0"
-description = "PC server for AndroidReader: runs quality TTS models locally and streams speech to the phone"
+description = "AndroidReader: a PC server and web reader that dramatizes books with local LLM and TTS models"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [

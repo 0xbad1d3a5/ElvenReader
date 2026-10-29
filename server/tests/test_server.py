@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from androidreader_server.app import make_app, pair_url, pairing_link
+from androidreader_server.app import make_app, viewer_url
 from androidreader_server.audio import wav_bytes
 from androidreader_server.config import ServerConfig, load_config
 from androidreader_server.engines.manager import EngineError, EngineManager
@@ -52,18 +52,13 @@ async def test_api_requires_token(client, headers):
     assert (await client.post("/api/tts", json={"text": "hi"}, headers=headers)).status == 401
 
 
-async def test_pair_page_public_without_token_and_index_on_loopback(client):
-    page = await (await client.get("/pair")).text()
-    assert TOKEN not in page and "areader" in page and "com.androidreader" in page
+async def test_index_on_loopback_and_no_phone_pairing(client):
     assert (await client.get("/")).status == 200
+    assert (await client.get("/pair")).status in (401, 404)  # the phone app's pairing page is gone
 
 
-def test_pairing_links_carry_all_urls():
-    urls = ["http://192.168.1.5:3950", "http://10.8.0.2:3950"]
-    assert pairing_link(urls, "a b") == (
-        "areader://pair?url=http%3A%2F%2F192.168.1.5%3A3950&url=http%3A%2F%2F10.8.0.2%3A3950&token=a%20b"
-    )
-    assert pair_url(urls[0], urls, "tok") == "http://192.168.1.5:3950/pair#t=tok&u=http://10.8.0.2:3950"
+def test_viewer_links_carry_the_token_in_the_fragment():
+    assert viewer_url("http://192.168.1.5:3950", "a b") == "http://192.168.1.5:3950/books#token=a%20b"
 
 
 def test_server_urls_put_private_addresses_first_and_add_extras(monkeypatch):
@@ -396,13 +391,7 @@ async def test_used_by_and_duplicate_for_one_character(client):
     assert r.status == 201 and copy["id"] != "nar" and copy["name"] == "Tom"
     assert [u["name"] for u in copy["used_by"]] == ["Tom"]
     assert store.script("book1")["characters"]["ann"]["voice"] == "nar"
-    # the script tells clients which version of each cast voice they should hear
-    script = await (await client.get("/api/books/book1/script", headers=AUTH)).json()
-    assert set(script["voice_versions"]) == {"nar", copy["id"]}
-    before = script["voice_versions"][copy["id"]]
-    await client.patch(f"/api/voices/{copy['id']}", json={"seed": 5}, headers=AUTH)
-    script = await (await client.get("/api/books/book1/script", headers=AUTH)).json()
-    assert script["voice_versions"][copy["id"]] != before
+
     assert (await client.post("/api/voices/nar/duplicate", json={"book": "book1", "character": "zed"},
                               headers=AUTH)).status == 404
 

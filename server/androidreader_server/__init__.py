@@ -1,3 +1,3 @@
-"""AndroidReader PC server: runs quality TTS models locally and streams speech to the phone."""
+"""AndroidReader PC server: dramatizes books with a local LLM and reads them with local quality TTS models."""
 
 __version__ = "0.2.0"

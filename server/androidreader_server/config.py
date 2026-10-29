@@ -9,7 +9,7 @@ from pathlib import Path
 
 DEFAULT_PORT = 3950
 DEFAULT_ENGINE = "omnivoice"
-# Unambiguous characters so the token is easy to type on a phone if needed.
+# Unambiguous characters so the token is easy to type on another device if needed.
 _TOKEN_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 _TOKEN_LENGTH = 16
 
@@ -35,10 +35,10 @@ class ServerConfig:
     models_dir: str = ""
     # Engine used when a request does not name one.
     default_engine: str = DEFAULT_ENGINE
-    # Voice used when the phone has not picked one. Empty = first voice in the store.
+    # Voice used when a request has not picked one. Empty = first voice in the store.
     default_voice: str = ""
     # Extra URLs to put in pairing codes, e.g. this PC's address on your own VPN
-    # ("http://10.8.0.2:3950"). The app tries them when the home address fails.
+    # ("http://10.8.0.2:3950"). They get links and QR codes on the server's page too.
     extra_urls: list = field(default_factory=list)
     # Load the default engine at start-up so the first sentence is not slow.
     preload: bool = True
@@ -46,7 +46,7 @@ class ServerConfig:
     # finish before requesting the next, so padding lengthens every gap.
     trim_silence: bool = True
     # Silence added after an utterance ending a sentence (a third of it after a
-    # clause). The phone can override it per request.
+    # clause). A request can override it.
     sentence_pause_ms: int = 300
     # On-disk cache of synthesized sentences.
     cache_max_mb: int = 4096

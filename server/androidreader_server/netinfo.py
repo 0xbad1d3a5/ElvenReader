@@ -1,4 +1,4 @@
-"""Network helpers: which addresses can the phone reach this PC on?"""
+"""Network helpers: which addresses can other devices reach this PC on?"""
 from __future__ import annotations
 
 import ipaddress
