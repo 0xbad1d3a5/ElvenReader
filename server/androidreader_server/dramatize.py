@@ -25,7 +25,7 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from aiohttp import web
+from aiohttp import ClientConnectionError, web
 
 logger = logging.getLogger("androidreader.drama")
 
@@ -1056,13 +1056,24 @@ class LocalLlm:
             "chat_template_kwargs": ({"enable_thinking": True, "reasoning_effort": effort} if thinking
                                      else {"enable_thinking": False, "reasoning_effort": "low"}),
         }
-        try:
-            async with session.post(f"{self.url}/chat/completions", json=body, timeout=1800) as r:
-                data = await r.json(content_type=None)
-                if r.status >= 400:
-                    raise LlmError(f"LLM HTTP {r.status}: {str(data)[:300]}")
-        except asyncio.TimeoutError as exc:
-            raise LlmError("LLM timed out") from exc
+        for attempt in range(3):
+            try:
+                async with session.post(f"{self.url}/chat/completions", json=body, timeout=1800) as r:
+                    data = await r.json(content_type=None)
+                    if r.status >= 400:
+                        raise LlmError(f"LLM HTTP {r.status}: {str(data)[:300]}")
+                break
+            except asyncio.TimeoutError as exc:
+                raise LlmError("LLM timed out") from exc
+            except (OSError, ClientConnectionError) as exc:
+                # A local llama-server that crashed mid-request (seen once: a transient page-in
+                # fault) is restarted and the request retried, rather than failing the whole book.
+                if attempt == 2 or self.proc is None:
+                    raise
+                logger.warning("LLM connection lost (%s); restarting it and retrying", exc)
+                await self.stop()
+                await asyncio.sleep(2)
+                await self.ensure(session, model, context)
         content = data["choices"][0]["message"].get("content") or ""
         usage = data.get("usage", {})
         try:

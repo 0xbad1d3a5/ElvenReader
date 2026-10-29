@@ -1037,3 +1037,48 @@ async def test_an_uploaded_epub_is_parsed_analysed_and_cast(drama_client, tmp_pa
     r = await c.post("/api/library/import", json={"path": str(tmp_path / "missing.epub")}, headers=AUTH)
     assert r.status == 400
     assert (await c.post("/api/library/import", data=aiohttp.FormData({"x": "1"}), headers=AUTH)).status == 400
+
+
+def test_llm_restarts_after_crash_mid_request(monkeypatch, tmp_path):
+    """A local llama-server that dies during a request is restarted and the request retried."""
+    import aiohttp
+
+    llm = dz.LocalLlm(make_cfg(tmp_path))
+    starts, stops = [], []
+
+    async def ensure(self, session, model=None, context=None):
+        starts.append(1)
+        self.proc = object()
+
+    async def stop(self):
+        stops.append(1)
+        self.proc = None
+
+    monkeypatch.setattr(dz.LocalLlm, "ensure", ensure)
+    monkeypatch.setattr(dz.LocalLlm, "stop", stop)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(dz.asyncio, "sleep", lambda s: real_sleep(0))
+
+    class Resp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self, content_type=None):
+            return {"choices": [{"message": {"content": '{"ok": 1}'}}]}
+
+    class Session:
+        calls = 0
+
+        def post(self, *a, **k):
+            Session.calls += 1
+            if Session.calls == 1:
+                raise aiohttp.ClientOSError(64, "The specified network name is no longer available")
+            return Resp()
+
+    out = asyncio.run(llm.complete(Session(), "s", "u", {}))
+    assert out["ok"] == 1 and Session.calls == 2 and len(starts) == 2 and len(stops) == 1
