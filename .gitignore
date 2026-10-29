@@ -5,18 +5,8 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
-# Server runtime data: config with the pairing token, voices, cache, logs, books
+# Server runtime data: config with the token, voices, cache, logs, books
 server/data/
-
-# Android / Gradle
-android/.gradle/
-android/.kotlin/
-android/build/
-android/app/build/
-android/local.properties
-android/.idea/
-*.iml
-*.apk
 
 # Build logs
 build.log
