@@ -584,15 +584,23 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     btn.textContent = "\u25A0 Stop recording";
   }
 
-  async function makeTakes(btn) {
+  async function makeTakes(btn, age = 0) {
     const description = ui.description.value.trim();
     if (!description) { alert("Describe the voice first."); return; }
-    await busy(btn, "Making 3 options\u2026 (about a minute)", async () => {
+    const label = age < 0 ? "Making 3 younger options\u2026 (about a minute)" : age > 0 ? "Making 3 older options\u2026 (about a minute)"
+      : "Making 3 options\u2026 (about a minute)";
+    await busy(btn, label, async () => {
       const body = { description, count: 3 };
+      if (age) body.age = age;
       if (ui.designEngine) body.engine = ui.designEngine.value;
       if (ui.sampleLine && ui.sampleLine.value.trim()) body.text = ui.sampleLine.value.trim();
-      takes = (await api("POST", `/api/voices/${v.id}/design`, body)).data.candidates;
-      message = "";
+      const r = (await api("POST", `/api/voices/${v.id}/design`, body)).data;
+      takes = r.candidates;
+      // The description now says the new age; pressing again goes a step further.
+      if (age) { ui.description.value = r.description; ui.description.dataset.touched = "1"; }
+      message = !age ? "" : r.age_from ? `${age < 0 ? "Younger" : "Older"}: ${r.age_from} \u2192 ${r.age_to}` +
+        (v.seed != null ? ". Option 1 keeps this voice's seed (closest to it)." : ".")
+        : `No age in the description, so it asks for a ${age < 0 ? "younger" : "older"}-sounding voice.`;
       render();
       playPath(`/api/voice-candidates/${takes[0].id}/audio`);
     });
@@ -684,6 +692,10 @@ async function openVoiceEditor(voiceId, ctx = {}) {
       h("div", { class: "line" },
         h("button", { class: "primary", disabled: !designers.length, onclick: (e) => makeTakes(e.target) },
           takes.length ? "Try again" : "Make 3 options"),
+        h("button", { disabled: !designers.length, title: "3 options one age group younger (e.g. adult \u2192 young adult)",
+          onclick: (e) => makeTakes(e.target, -1) }, "\u2193 Younger"),
+        h("button", { disabled: !designers.length, title: "3 options one age group older (e.g. young adult \u2192 adult)",
+          onclick: (e) => makeTakes(e.target, 1) }, "\u2191 Older"),
         v.history.length ? h("button", { onclick: (e) => busy(e.target, "Undoing\u2026", async () => {
           untouch(...Object.keys(ui));
           await changed((await api("POST", `/api/voices/${v.id}/revert`)).data, "Went back to the previous voice.");

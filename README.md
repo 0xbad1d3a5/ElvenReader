@@ -533,7 +533,11 @@ voice, including imported VoiceStudio voices, pool voices and character voices, 
 Describe the voice in plain words ("a young girl's high, light voice, but old-fashioned and teasing
 like a grandmother"), press **Make 3 options**, listen, and press **Use this** on the one you like.
 That's all. It takes about a minute, and **Undo** goes back to the previous voice (the last 5 are
-kept). A voice shared by several characters, such as a pool voice for minor characters, is
+kept). **↓ Younger** / **↑ Older** make 3 options one age group younger or older (child, teen,
+young adult, adult, middle-aged, elderly): the description's age is rewritten ("a gravelly adult
+male voice" → "a gravelly young adult male voice"; "a 16-year-old girl" → "a 24-year-old young
+woman"), shown in the box so pressing again goes further, and option 1 keeps the voice's seed to
+stay closest to it. A description without an age asks for a younger- or older-sounding voice. A voice shared by several characters, such as a pool voice for minor characters, is
 copied for the character you are editing. Tick *Also change it for N other characters* to change
 it for all of them.
 
@@ -589,7 +593,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/engines` · `POST /api/engines/{id}/load` · `POST /api/engines/unload` | Engines with capabilities, licence and measured RTF; preload; free the GPU. |
 | `GET/POST /api/voices` · `DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store (`?all=1` adds character voices, `?details=1` everything with who uses it). |
 | `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
-| `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?}` · listen · keep one · Whisper transcript of an uploaded clip. |
+| `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?, age?}` (`age` -1/1: one age group younger/older; returns the new `description`, `age_from`, `age_to`) · listen · keep one · Whisper transcript of an uploaded clip. |
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `POST /api/library/import` | Add a book: multipart `epub` file (any device; what the website uses), or `{"path": ...}` (from the PC only, for `process_book.py`); options `analyze`, `cast` (default true), `reanalyze`, `engine`, `series` (default: from the title). |

@@ -281,16 +281,34 @@ def _candidates_dir(app: web.Application) -> Path:
 
 
 async def voice_design_candidates(request: web.Request) -> web.Response:
-    """Design `count` voices from a description (different seeds) to listen to before keeping one."""
+    """Design `count` voices from a description (different seeds) to listen to before keeping one.
+
+    {"age": -1 | 1} makes them one age group younger or older: the description's age is moved
+    (voice_age.shift_age) and the first option keeps the voice's seed, the closest to the current voice."""
+    from .voice_age import shift_age
+
     voice = _voice_or_404(request)
     body = await _json_body(request)
     description = _str(body, "description") or voice.instruct or voice.description
     if not description:
         return _json_error(400, "Describe the voice, e.g. 'male, elderly, low pitch, british accent'")
+    aged = None
+    try:
+        step = max(-2, min(2, int(body.get("age") or 0)))
+    except (TypeError, ValueError):
+        return _json_error(400, "age must be -1 (younger) or 1 (older)")
+    if step:
+        try:
+            aged = shift_age(description, step)
+        except ValueError as exc:
+            return _json_error(400, str(exc))
+        description = aged["description"]
     engine = _str(body, "engine") or request.app[CONFIG_KEY].voice_design_engine
     text = _str(body, "text") or voice.ref_text or DESIGN_TEXT
     count = max(1, min(4, int(body.get("count") or 3)))
     seeds = [int(s) for s in body.get("seeds") or [] if isinstance(s, (int, float))][:count]
+    if step and not seeds and voice.seed is not None:
+        seeds = [int(voice.seed)]
     seeds += [random.randrange(100000) for _ in range(count - len(seeds))]
     folder = _candidates_dir(request.app)
     for old in folder.glob("*.json"):
@@ -311,7 +329,8 @@ async def voice_design_candidates(request: web.Request) -> web.Response:
                 "engine": engine}
         (folder / f"{cid}.json").write_text(json.dumps(meta), encoding="utf-8")
         out.append(meta)
-    return web.json_response({"candidates": out})
+    return web.json_response({"candidates": out, "description": description,
+                              **({"age_from": aged["from"], "age_to": aged["to"]} if aged else {})})
 
 
 def _candidate(request: web.Request) -> tuple[Path, dict] | None:

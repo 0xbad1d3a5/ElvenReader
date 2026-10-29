@@ -424,3 +424,19 @@ def test_default_voice_prefers_your_own_voices_over_designed_ones(tmp_path):
     store.add("The Documentarian", wav, "x", source="voicestudio")
     store.add("Zed", wav, "x", source="upload")
     assert store.default().name == "The Documentarian"
+
+
+async def test_design_younger_or_older_options(client):
+    await client.patch("/api/voices/nar", json={"seed": 4242}, headers=AUTH)
+    r = await client.post("/api/voices/nar/design", json={"description": "An adult woman with a warm, low voice.",
+                                                           "engine": "fake", "count": 2, "age": -1}, headers=AUTH)
+    body = await r.json()
+    assert body["description"] == "A young woman with a warm, low voice."
+    assert (body["age_from"], body["age_to"]) == ("adult", "young adult")
+    assert body["candidates"][0]["seed"] == 4242  # the first option keeps the voice's seed
+    assert all(c["description"] == body["description"] for c in body["candidates"])
+    v = await (await client.post(f"/api/voices/nar/design/{body['candidates'][1]['id']}", headers=AUTH)).json()
+    assert v["instruct"] == "A young woman with a warm, low voice."
+    r = await client.post("/api/voices/nar/design", json={"description": "An elderly man.", "engine": "fake",
+                                                           "count": 1, "age": 1}, headers=AUTH)
+    assert r.status == 400 and "already elderly" in (await r.json())["error"]
