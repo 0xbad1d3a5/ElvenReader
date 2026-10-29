@@ -1,33 +1,28 @@
 # AndroidReader
 
-Listen to your EPUBs read by high-quality voice models running on **your own PC**, at home or away.
-A standalone Android app plus this PC as the server; no cloud service and no other reading app.
+Listen to your EPUBs read by high-quality voice models running on **your own PC**, in your browser,
+at home or away. No cloud service: a PC server plus its website.
 
-* **The PC server** (`server/`) loads open-weight text-to-speech models on the GPU itself (no
-  VoiceStudio or cloud service), clones voices from a short reference clip, applies your
-  pronunciation fixes, caches every sentence, and streams audio to the phone.
-* **The Android app** (`android/`) is an EPUB reader that reads aloud with highlighting, background
-  playback and lock-screen/Bluetooth controls.
-* **Dramatized reading (optional):** a local LLM works out who says each line and how
-  (*"Stop!" she shouted* → the character's voice, shouting), and each character gets a voice.
+* **The PC server** (`server/`) loads open-weight text-to-speech models on the GPU itself, clones
+  voices from a short reference clip, applies your pronunciation fixes and caches every sentence.
+* **Dramatized reading:** a local LLM works out who says each line and how (*"Stop!" she shouted*
+  → the character's voice, shouting), sorts the cast into main, supporting and extras, and each
+  character gets a voice.
+* **The website** (`http://<PC>:3950/books`) is the library and reader: add EPUBs, read along
+  while it plays with every character's voice, correct speakers, edit voices. It works on any
+  device on your network or your own VPN.
 
 ```mermaid
 flowchart LR
-    subgraph Phone
-      R[AndroidReader<br/>EPUB reader] --> C[ServerClient<br/>tries each server URL]
-    end
-    C -- "HTTP + token<br/>home Wi-Fi or your VPN" --> S
+    B[Browser<br/>library + reader] -- "HTTP + token<br/>home network or your VPN" --> S
     subgraph PC
-      S[androidreader_server<br/>port 3950] --> W[engine worker<br/>one model on the GPU]
-      S --> V[(voices, pronunciations,<br/>audio cache)]
+      S[androidreader_server<br/>port 3950] --> W[engine worker<br/>one TTS model on the GPU]
+      S --> V[(books, voices, pronunciations,<br/>audio cache)]
       S --> L[llama.cpp LLM<br/>book analysis]
     end
 ```
 
-| Folder | What it is |
-|--------|------------|
-| `server/` | `androidreader_server`: aiohttp API, engine manager and workers, voice store, pronunciation dictionary, audio cache, dramatization. |
-| `android/` | Kotlin/Compose app: library, reader, Media3 playback service, settings. |
+The Android app that used to be the reader has been retired (see *The Android app* at the end).
 
 ## Voice models
 
@@ -76,18 +71,18 @@ cd D:\Dev\AndroidReader\server
 .\setup-engines.ps1                 # one venv per engine (torch cu128); or e.g. .\setup-engines.ps1 omnivoice fish_s2
 .\download-models.ps1               # weights into <models_dir>\hf and <models_dir>\checkpoints
 .\run-server.ps1 --import-voicestudio   # optional: copy VoiceStudio's voice profiles (read-only)
-.\run-server.ps1                    # start; prints the token, URLs and a pairing QR code
+.\run-server.ps1                    # start; prints the token and the library's addresses
 ```
 
 `run-server.ps1` creates the server's own small environment (`server\.venv`) on first run.
 Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--rotate-token`,
-`--show-pairing`. Settings live in `server\data\config.json` (git-ignored, contains the token):
+`--show-links`. Settings live in `server\data\config.json` (git-ignored, contains the token):
 
 | Key | Default | Meaning |
 |---|---|---|
 | `models_dir` | `data\models` | Engine venvs, model weights, compile caches, LLM files. |
-| `default_engine` / `default_voice` | `omnivoice` / first voice | Used when the phone doesn't choose. |
-| `extra_urls` | `[]` | More URLs for the pairing codes, e.g. `["http://10.8.0.2:3950"]` for the PC on your VPN. |
+| `default_engine` / `default_voice` | `omnivoice` / first voice | Used when the reader doesn't choose. |
+| `extra_urls` | `[]` | More addresses for the links and QR codes on the server's page, e.g. `["http://10.8.0.2:3950"]` for the PC on your VPN. |
 | `preload` | `true` | Load the default engine at start-up. |
 | `engine_options` | `{}` | Per engine, e.g. `{"omnivoice": {"num_step": 16}, "indextts": {"compile": true}}`. |
 | `sentence_pause_ms`, `trim_silence` | `300`, `true` | Pacing between sentences. |
@@ -119,9 +114,8 @@ cd D:\Dev\AndroidReader\server
 .\allow-firewall.ps1        # TCP 3950 on Domain and Private networks
 ```
 
-Your home Wi-Fi must be a **Private** network (and so must your VPN's adapter, if the phone
-reaches the PC through it). Without this rule the phone can't connect (the app reports *Could
-not reach the PC … failed to connect*).
+Your home network must be a **Private** network (and so must your VPN's adapter, if other devices
+reach the PC through it). Without this rule other devices can't open the library.
 
 ### Start automatically (optional)
 
@@ -130,89 +124,94 @@ $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -Wi
 Register-ScheduledTask -TaskName "AndroidReader server" -Action $a -Trigger (New-ScheduledTaskTrigger -AtLogOn)
 ```
 
-## 2. Away from home: your own VPN
 
-Use your own VPN to reach the PC from outside, and add the PC's address on that VPN as an extra
-server URL: either in the app (*Settings → Connection*, one URL per line, after the home address)
-or in `extra_urls` in `server\data\config.json`, so the pairing QR codes include it. Don't
+The server parses EPUBs itself, so there is nothing else to install: no JDK, Android SDK or adb.
+
+## 2. Open it on other devices
+
+On the PC, **http://127.0.0.1:3950/books** opens the library directly. For other devices, open
+**http://127.0.0.1:3950/** on the PC (it's served only to the PC itself because it shows the token).
+It lists a link and a QR code for each of the PC's addresses, in the form
+`http://<PC address>:3950/books#token=…`. The browser keeps the `#` part to itself, stores the token
+and removes it from the address bar. Without the link, the library asks for the token. The page
+itself is served to any address but holds no token, and every book, script and audio request needs
+the token.
+
+**Away from home:** use your own VPN to reach the PC, and add the PC's address on that VPN to
+`extra_urls` in `server\data\config.json` so the server's page shows a link for it too. Don't
 port-forward 3950 on your router: the server speaks plain HTTP, protected only by its token.
 
-The app tries the URL that worked last; if it can't connect, it tries the others, and it starts
-again from the first (home) address whenever the phone's network changes. At home you get the
-LAN; on mobile data you get the VPN address, without touching anything.
+## 3. Add books
 
-## 3. Build and install the app
+In the library, **+ Add book**:
 
-Requirements: JDK 17 and the Android SDK (platform 35).
+* **Upload** one or more EPUB files from the device you're using: a phone, a tablet or another
+  computer on the network.
+* **Or a path** on the PC (only offered on the PC itself), e.g. `E:\Light Novels\Series\Book v10.epub`.
 
-```powershell
-cd D:\Dev\AndroidReader\android
-$env:JAVA_HOME = "D:\Dev\.toolchains\jdk-17.0.20.1+1"
-$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
-.\gradlew.bat assembleDebug
-adb install -r app\build\outputs\apk\debug\app-debug.apk
-```
+The server parses the EPUB, keeps a copy with its cover and pictures, and starts working:
+1. **Analysis:** who says each line and how, as described in section 5. It takes about an hour
+   per 100k words on the GPU, and you can read along as lines come in.
+2. **Tiers:** the cast is sorted into main, supporting and extras.
+3. **Voices:** the cast's voices are created (untick *Create the cast's voices* to skip this).
 
-The app id is `com.androidreader`.
+The library shows progress. **Re-analyse** on a book starts its analysis again from scratch; your
+corrections, cast and voices are kept. Adding a book that is already in the library keeps its
+analysis.
 
-## 4. Pair the phone
+From the command line, the same thing is
+`.\.venv\Scripts\python.exe scripts\process_book.py "E:\...\Book.epub"` (options `--no-cast`,
+`--engine qwen3tts`, `--reanalyze`). It prints progress until the book is done, then the cast by
+tier.
 
-1. On the PC, open **http://127.0.0.1:3950/** (served only to the PC itself; it contains the token).
-2. Scan any QR code with the phone camera, open the link, tap **Open AndroidReader**. Each code
-   carries *all* the PC's addresses (plus `extra_urls`) and the token.
+Book IDs are the first 16 hex digits of the EPUB file's SHA-1, and each quotation's ID is
+`c<chapter>p<paragraph>q<offset>`. The parser (`androidreader_server/epub.py`) is a port of the
+retired Android app's parser and gives identical chapters, paragraphs, quotation IDs and pictures.
+Chapters follow the book's own table of contents: a chapter that a publisher split into several
+files (often at every illustration) is joined back into one. Pictures are attached to the paragraph
+after them, so they never shift the text.
 
-Or enter them by hand in *Settings → Connection to your PC*: one URL per line (home address
-first, e.g. `192.168.86.10`, then the PC's address on your VPN) and the token, then **Save &
-test connection**. *Settings* also holds the default model, voice and sentence pause for books.
+## 4. Read and listen
 
-## 5. Reading
+* **Library:** every book with its cover, word count, analysis progress and cast status; **+ Add
+  book** and **Re-analyse** (section 3).
+* **Book:** chapters in reading order, with the book's illustrations (click one to open it full
+  size); quotations coloured by speaker with the speaker's name and
+  delivery (*shouting, urgent*); ✎ marks your corrections.
+* **Cast panel:** characters grouped as **Main / Supporting / Extras** (Extras folded), each row
+  just a colour dot, the name, the line count and ▶ (voice sample). Type in *Find a character* to
+  filter. Click a character to open its panel:
+  * **Overview:** aliases (editable; they help recognise the character in the text) and the tier
+    (*Main / Supporting / Extra*; *use automatic* hands it back to the model, whose reason is shown).
+  * **Voice:** play, change, or *Edit voice…*; shows the assigned voice's own description (a character with a voice of its own takes that voice's description whenever the voice is chosen or edited).
+  * **Profile (for voice design)**, folded: gender, apparent age, physical appearance, speech style and important characteristics (see *Voice profiles*), editable, and *Design voice from profile*. It is used to design the voice and for later volumes in the series; it doesn't change who-said-what.
+  * **Lines:** *Show this character's lines*.
+  * **⋯:** rename, or merge into another character.
 
-* **Import:** *Import EPUB* opens the system file picker, and file managers can *Open with
-  AndroidReader*. Books are copied into the app, with covers.
-  Long-press a book to remove it.
-* **Reader:** tap any sentence to start reading from it; the sentence being read is highlighted
-  and the page follows it. The list icon opens the table of contents. Chapters follow the book's
-  own table of contents: when a publisher splits a chapter into several files (often at every
-  illustration), the files are joined back into one chapter. Books imported with an older version
-  are re-split the next time you open them, and your place is kept.
-* **Pictures:** illustrations appear where they are in the book, full width; tap one to see it
-  on its own. Tiny ornaments (scene-break flourishes) are left out. They are not read aloud and
-  don't change the text, so analyses and positions are unaffected. Books imported earlier get
-  their pictures the next time you open them.
-* **Controls:** play/pause, previous/next sentence and chapter, also from the lock screen,
-  notification and Bluetooth headsets. Unplugging headphones pauses; calls pause reading.
-* **Reading options** (sliders icon): text size, theme (light/sepia/dark), speed (pitch is kept),
-  sleep timer (15/30/60 min or end of chapter), the **voice model and voice for this book**,
-  dramatized reading, and how many sentences to prepare ahead (default 6; raise it for slower
-  models). The status line shows how many sentences are ready and when the PC is still working.
-* Your position is saved per book. Sentences already synthesized are cached on the PC, so
-  re-listening is instant.
+  The ⋯ next to *Cast* holds the book's cast actions:
+  * *Sort cast into tiers*
+  * *Create missing voices*
+  * *Give supporting characters their own voices* (replaces their shared pool voices)
+  * *Re-label lines* (your corrections are kept)
+  * *Highlight lines of* everyone / main / main + supporting (dims everyone else's lines)
 
-## 6. Pronunciations
+  Tiers also appear in the Voices page's *Used by* lists. Unnamed speakers are shown as names
+  ("Prisoner", "Tattoo Artist"), as the model's "a prisoner" is stored; names you type are kept
+  exactly. The speaker filter (top) also offers *quotes given to the narrator*; search finds text.
+  On a narrow screen (phone), ☰ shows the chapters and the cast.
+* **Playback:** click any line or narration to play from there through the chapter with each
+  speaker's voice and delivery, using the chosen narrator voice and model. Sentences already
+  synthesized come from the server's cache, so re-listening is instant.
+* **Editing:** click a speaker tag to change the speaker or delivery; corrections always win
+  over the model. The book's series is shown under the cast and can be changed.
 
-Long-press a word while reading → **Fix pronunciation**:
+## 5. How books are dramatized
 
-* **Say it like:** a respelling such as `her-MY-oh-nee`. Works with every model. (Stress capitals
-  are lower-cased before synthesis because some models spell out capitalised syllables.)
-* **Phonemes (optional):** CMU/ARPAbet such as `HH ER0 M AY1 AH0 N IY0`. Used by OmniVoice and
-  IndexTTS; other models use the respelling.
-* **Preview** synthesizes the sentence with the current voice and the unsaved fix.
-* **Only in this book** or **in all books.** Book entries win over global ones.
-* Matching is whole-word, case-insensitive unless *Match case exactly* is ticked, and covers
-  possessives and plurals (*Hermione's*, *Hermiones*) and multi-word names (*Sirius Black*).
+When a book is added, the server analyses it in the background:
 
-Fixes are applied on the PC before synthesis and are part of the audio cache key, so a changed
-fix never reuses stale audio; sentences already buffered on the phone are re-synthesized. The
-list (spell-check icon) shows, edits and deletes entries.
-
-## 7. Dramatized reading (multi-voice, expressive)
-
-Turn on **Dramatized reading** in a book's reading options. The phone uploads the book's text and
-the quotations it found (with stable IDs) to the PC, which analyses it in the background:
-
-1. **Deterministic segmentation** on the phone: sentences are split at quotation marks, so
-   *"Stop!" she shouted.* becomes the quotation (character voice) and *she shouted.* (narrator).
-   The text is never rewritten, so highlighting and positions always match the EPUB.
+1. **Deterministic segmentation:** quotation marks split each paragraph into quotations
+   (character voices) and narration, so *"Stop!" she shouted.* becomes the quotation and *she
+   shouted.* (narrator). The text is never rewritten, so highlighting always matches the EPUB.
 2. **LLM pass per ~600-word chunk** (llama.cpp, JSON-schema constrained): for each numbered
    speaker turn, the speaker and a short delivery (*shouting, urgent*), using a rolling character
    roster and the last few attributions.
@@ -220,13 +219,14 @@ the quotations it found (with stable IDs) to the PC, which analyses it in the ba
    accent, temperament and a voice description per main character, from their lines and the
    narration's descriptions of them.
 4. **Cast:** after the lines, the LLM sorts the characters into three tiers (see *Character
-   tiers* below): **main**, **supporting** and **extras**. *Cast → Create voices* designs a voice
+   tiers* below): **main**, **supporting** and **extras**. *Create missing voices* designs a voice
    (Qwen3-TTS VoiceDesign) for every main character and narrator and for up to
    `cast_supporting_voices` (12) supporting characters, most lines first. Each designed voice is
    locked as a cloned reference so it stays consistent. Extras share a small pool of voices by
    gender and age. Any character can be renamed, merged with an alias (*Lizzy* = *Elizabeth*),
    moved to another tier or given any voice.
-5. Long-press a quotation → **Change speaker or delivery**. Corrections always win over the model.
+5. Click a speaker tag in the reader to change the speaker or delivery. Corrections always win
+   over the model.
 
 **Character tiers.**
 * **Main:** the protagonists and core recurring cast, plus anyone who narrates.
@@ -417,7 +417,7 @@ explicitly. In first-person books the model used to give them to the narrating c
 of 18 right in *Sasaki and Peeps* v10, 16–17 with the new wording. A rule backs it up: a short
 quote straight after a word, with no punctuation inside and no speech verb before it ("then said
 “The fourth.”" stays dialogue). Such quotes stay inside the narration: the whole sentence is read in
-one go, in the narrator's voice, on the phone and in the viewer, which shows them as plain text
+one go, in the narrator's voice, and the reader shows them as plain text
 (dotted underline); double-click one to give it to a speaker. Books analysed earlier
 are fixed when the server opens them. Quotations given to the narrator (signs, notes) are also
 read in the narration's voice, so in first-person passages they no longer switch to a different
@@ -430,7 +430,7 @@ model also reports nicknames ("Makeup", "Robot Girl"), which are merged into the
 belong to. On a hand-labelled excerpt of *Sasaki and Peeps* vol. 10 (108 quotations: Sasaki's
 first-person prison scene, then the neighbor's POV with her nicknames for everyone) this raised
 accuracy from 36% to 88%. The remaining misses are group banter in the neighbor's chapter; fix
-them in the viewer or the app. That excerpt is copyrighted, so it lives in the git-ignored
+them in the reader. That excerpt is copyrighted, so it lives in the git-ignored
 `server\tests\gold\private\`.
 
 **Two narrators in different tenses.** Some books switch narrator without marking the way back.
@@ -510,75 +510,7 @@ context-profiles`):
 
 Compacting a book's profiles at the end takes one call of about 15 seconds.
 
-## 8. Process a book on the PC
-
-Dramatize a book without touching the phone, then optionally put it on the phone:
-
-```powershell
-cd D:\Dev\AndroidReader\server
-.\run-server.ps1                               # in another window
-.\.venv\Scripts\python.exe scripts\process_book.py "E:\Light Novels\Series\Book v10.epub" --phone
-```
-
-1. The EPUB is parsed with **the app's own Kotlin parser** on the JVM (`ExportBookTool`, run through
-   Gradle, so JDK 17 and the Android SDK are needed), so the book ID (SHA-1 of the file) and every
-   quotation ID match what the phone produces when it imports the same file.
-2. The text is uploaded and analysed (progress is printed; about an hour per 100k words on the
-   GPU), then voices are created for the cast.
-3. With `--phone` (phone connected over adb, app installed and paired) the EPUB is copied into the
-   app and imported with dramatized reading switched on. Without it, import the same file in the
-   app later: it finds the finished analysis because the IDs match.
-
-Options: `--no-cast`, `--engine qwen3tts` (voice-design engine), `--reanalyze` (start over; your
-corrections, names and voices are kept). Running it again on a finished book only does the
-missing steps. It always sends the text again, so if a newer version of the app splits the book
-into chapters differently, the server moves the existing analysis and your corrections to the new
-chapter numbering.
-
-## 9. PC viewer
-
-Open **http://127.0.0.1:3950/books** on the PC. On other devices on your network (or your VPN),
-open the viewer link or scan its QR code on the PC's server page (http://127.0.0.1:3950/). That
-link is `http://<PC address>:3950/books#token=…`. The browser keeps the `#` part to itself, stores
-the token and removes it from the address bar. Without the link, the viewer asks for the token,
-which is shown on the server page. The page is served to any address, but holds no token itself;
-every book, script and audio request needs the token, like the app's.
-
-The viewer has:
-
-* **Library:** every analysed book with its cover, word count, analysis progress and cast status.
-* **Book:** chapters in reading order, with the book's illustrations (click one to open it full
-  size); quotations coloured by speaker with the speaker's name and
-  delivery (*shouting, urgent*); ✎ marks your corrections.
-* **Cast panel:** characters grouped as **Main / Supporting / Extras** (Extras folded), each row
-  just a colour dot, the name, the line count and ▶ (voice sample). Type in *Find a character* to
-  filter. Click a character to open its panel:
-  * **Overview:** aliases (editable; they help recognise the character in the text) and the tier
-    (*Main / Supporting / Extra*; *use automatic* hands it back to the model, whose reason is shown).
-  * **Voice:** play, change, or *Edit voice…*; shows the assigned voice's own description (a character with a voice of its own takes that voice's description whenever the voice is chosen or edited).
-  * **Profile (for voice design)**, folded: gender, apparent age, physical appearance, speech style and important characteristics (see *Voice profiles*), editable, and *Design voice from profile*. It is used to design the voice and for later volumes in the series; it doesn't change who-said-what.
-  * **Lines:** *Show this character's lines*.
-  * **⋯:** rename, or merge into another character.
-
-  The ⋯ next to *Cast* holds the book's cast actions:
-  * *Sort cast into tiers*
-  * *Create missing voices*
-  * *Give supporting characters their own voices* (replaces their shared pool voices)
-  * *Re-label lines* (your corrections are kept)
-  * *Highlight lines of* everyone / main / main + supporting (dims everyone else's lines)
-
-  Tiers also appear in the Voices page's *Used by* lists. Unnamed speakers are shown as names
-  ("Prisoner", "Tattoo Artist"), as the model's "a prisoner" is stored; names you type are kept
-  exactly. The speaker filter (top) also offers *quotes given to the narrator*; search finds text.
-  On a narrow screen (phone), ☰ shows the chapters and the cast.
-* **Playback:** click any line or narration to play from there through the chapter with each
-  speaker's voice and delivery, using the chosen narrator voice and model. Audio comes from the
-  same server cache as the phone.
-* **Editing:** click a speaker tag to change the speaker or delivery. The book's series is shown
-  under the cast and can be changed. Changes go through the same API as the app; the phone picks
-  them up the next time you open the book (sentences it had already prepared are re-synthesized).
-
-## 10. Voice editor
+## 6. Voice editor
 
 Edit any voice by hand in the viewer: *Edit voice…* in a character's panel, or **Voices**
 (http://127.0.0.1:3950/books/voices, linked from every viewer page). The Voices page lists every
@@ -603,23 +535,34 @@ it for all of them.
 
 The audio cache key includes a fingerprint of the voice's reference audio, transcript, language,
 seed and design description, not only its ID. Edited voices are therefore never served from old
-cached audio, and undoing an edit finds the old clips again. The book script sent to the phone
-carries the same fingerprints. When the reader opens a book whose voices changed, it drops the
-sentences it had prepared and fetches them again.
+cached audio, and undoing an edit finds the old clips again.
+
+## 7. Pronunciations
+
+The server keeps a pronunciation dictionary and applies it before synthesis. Each entry has a
+respelling such as `her-MY-oh-nee`, which works with every model; stress capitals are lower-cased.
+It can also have CMU/ARPAbet phonemes such as `HH ER0 M AY1 AH0 N IY0`, used by OmniVoice and
+IndexTTS. An entry applies to one book or to all books, and book entries win. Matching is
+whole-word and case-insensitive unless an entry says otherwise. It covers possessives and plurals
+(*Hermione's*) and multi-word names. Entries are part of the audio cache key, so a changed fix never
+reuses stale audio. The website doesn't edit them yet; use `GET/POST /api/pronunciations` and
+`PATCH/DELETE /api/pronunciations/{id}` (see *API*). Entries made with the Android app still apply.
 
 ## Troubleshooting
 
-* **Could not reach the PC:** server running? Firewall rule added (`allow-firewall.ps1`, elevated)?
-  Network *Private*? Away from home: is your VPN connected, and is the PC's VPN address in the
-  app's server URLs? From the phone's browser, `http://<pc>:3950/api/ping` should return JSON.
-* **Phone on Wi-Fi but routing over mobile data:** for LAN addresses the app binds to the Wi-Fi
-  network that owns the subnet (Samsung *Switch to mobile data*); behind a VPN it leaves routing
-  to the VPN and falls back to unbound sockets if Android refuses the binding.
+* **Another device can't open the library:** is the server running? Is the firewall rule added
+  (`allow-firewall.ps1`, elevated)? Is the network *Private*? Away from home: is your VPN connected,
+  and are you using the PC's VPN address? `http://<pc>:3950/api/ping` should return JSON.
+* **The library asks for the token:** open the link or scan the QR code on the PC's server page
+  (http://127.0.0.1:3950/), or type the token shown there.
 * **First sentence slow:** the model is loading (OmniVoice ~10 s, Qwen3-TTS ~15 s, IndexTTS ~1 min,
   Fish S2 Pro ~3 min because of `torch.compile`). Switching models also reloads.
-* **Gaps while reading:** the model is slower than real time for this text. Raise *Sentences
-  prepared ahead* or pick a faster model for the book.
-* **Wrong voice for a character / wrong speaker:** fix it in *Cast* or long-press the line.
+* **Playback pauses between lines:** the chosen model is slower than real time for this text;
+  pick a faster one in the player bar.
+* **Wrong voice for a character, or wrong speaker:** fix it in the cast panel, or click the line's
+  speaker tag.
+* **An EPUB won't add:** the error says why (not an EPUB, no readable text). DRM-protected files
+  can't be read.
 
 ## API (for reference)
 
@@ -635,38 +578,35 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?}` · listen · keep one · Whisper transcript of an uploaded clip. |
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
 | `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
-| `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Uploaded books with analysis/cast status · a book's paragraphs and quotations · its cover. |
-| `GET /api/books/{id}/pictures` · `GET`/`PUT /api/books/{id}/picture?path=` | The book's pictures the server has and still needs · one picture (by its path in the EPUB; only pictures the book's text refers to). The phone and `process_book.py` upload them for the viewer. |
-| `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Upload book text (+`analyze`, `reanalyze`, optional base64 `cover`), dramatization status and lines. |
-| `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections, rename/merge/voice/`dossier`/`aliases`/`role` (`main`, `supporting`, `extra`; `null` = automatic), create character voices (`{"own_voices_for": ["supporting"]}` also replaces those tiers' pool voices). |
-| `POST /api/books/{id}/roles` | Sort the cast into tiers with the LLM (no re-labelling); progress in the script's `roles_state`. |
-| `POST /api/books/{id}/characters/{id}/voice-from-dossier` · `POST /api/books/{id}/analyze` `{relabel\|reanalyze}` | New voice from the dossier · label lines again (keep dossiers) or analyse from scratch (user edits kept). |
+| `POST /api/library/import` | Add a book: multipart `epub` file (any device), or `{"path": ...}` (from the PC only); options `analyze`, `cast` (default true), `reanalyze`, `engine`. |
+| `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Books with analysis/cast status · a book's paragraphs, quotations and pictures · its cover. |
+| `GET /api/books/{id}/pictures` · `GET /api/books/{id}/picture?path=` | The book's pictures · one picture (by its path in the EPUB; only pictures the book's text refers to). |
+| `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Store already-parsed book text (+`analyze`, `reanalyze`, optional base64 `cover`) · dramatization status and lines · analyse (`{relabel}` labels lines again; `{reanalyze}` starts over, your edits kept). |
+| `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections · rename/merge/voice/`profile`/`aliases`/`role` (`main`, `supporting`, `extra`; `null` = automatic) · create character voices (`{"own_voices_for": ["supporting"]}` also replaces those tiers' pool voices). |
+| `POST /api/books/{id}/roles` · `POST /api/books/{id}/characters/{id}/voice-from-dossier` | Sort the cast into tiers with the LLM (no re-labelling; progress in the script's `roles_state`) · new voice from the character's profile. |
 | `GET /api/series` · `POST /api/books/{id}/series` `{series?}` | Series casts · set a book's series and store its cast there. |
-| `GET /pair` · `GET /` · `GET /books[/{id}]` | Pairing page (token in the URL fragment) · QR codes for pairing and the viewer (PC only) · book viewer (any address; asks for the token unless opened on the PC). |
+| `GET /` · `GET /books[/{id}]` · `GET /books/voices` | Links and QR codes for other devices (PC only) · library and reader (any address; asks for the token unless opened on the PC) · voices. |
 
 ## Development
 
 ```powershell
-# server tests (fake engine in a real worker process; no GPU needed)
-cd server; .\.venv\Scripts\python.exe -m pytest
+cd server
+# server tests: API, EPUB parsing, dramatization (fake engine and LLM; no GPU needed)
+.\.venv\Scripts\python.exe -m pytest
 
 # engine benchmark (real models) and attribution accuracy (real LLM)
 .\.venv\Scripts\python.exe scripts\bench_engines.py omnivoice fish_s2 indextts qwen3tts
 .\.venv\Scripts\python.exe scripts\eval_attribution.py tests\gold\pride-ch1.json tests\gold\alice-ch7.json
-# dossier pipeline vs single pass on a processed book (gold excerpts of copyrighted books live in tests\gold\private)
+# labelling variants on the gold excerpts (gold excerpts of copyrighted books live in tests\gold\private)
+.\.venv\Scripts\python.exe scripts\eval_reasoning.py --list
 .\.venv\Scripts\python.exe scripts\eval_dossier.py --dossier-model gpt-oss-20b-MXFP4.gguf --roster tests\gold\sasaki10-roster.json tests\gold\private\sasaki10-ch8.json tests\gold\private\sasaki10-ch12.json
-
-# Android unit tests (EPUB parsing, sentence/quote segmentation, URLs, language names)
-cd android; .\gradlew.bat testDebugUnitTest
-
-# On-device tests (phone paired, server running). Installed manually so the app isn't
-# uninstalled afterwards. Without the firewall rule, `adb reverse tcp:3950 tcp:3950` and the URL
-# http://127.0.0.1:3950 work over USB.
-.\gradlew.bat assembleDebugAndroidTest
-adb install -r -t app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
-adb shell am instrument -w -e class com.androidreader.ReaderPlaybackTest com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
-# slow: analyses the whole of Alice, casts voices, then plays the Mad Tea-Party dramatized
-adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest#analysesCastsAndReadsWithCharacterVoices com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
-# a book processed with process_book.py --phone: narrator voices per section, character voices in a scene
-adb shell am instrument -w -e class com.androidreader.DramaPlaybackTest#readsAProcessedBook -e bookId 2f145f7d38c07f00 -e mainAt 3:1 -e povAt 12:170 -e dialogueAt 10:12 com.androidreader.test/androidx.test.runner.AndroidJUnitRunner
 ```
+
+## The Android app
+
+Earlier versions had an Android app (an EPUB reader that played the server's voices, with
+lock-screen controls and system TTS). It has been removed to focus on the server and the website;
+git history has it (`git show cded61d^:android`). A copy already installed on a phone isn't
+uninstalled. It may keep working for books and voices against this server, but it is no longer
+maintained, and its pairing page and picture upload are gone. You can remove it from the phone
+whenever you like. Book IDs and quotation IDs are unchanged, so nothing analysed with it is lost.
