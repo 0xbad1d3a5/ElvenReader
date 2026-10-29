@@ -1982,7 +1982,7 @@ async def get_script(request: web.Request) -> web.Response:
     if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
                                       or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))
                                       or s.get("names_v") != 2 or s.get("voice_desc_v") != 1
-                                      or s.get("profile_v") != 1):
+                                      or s.get("profile_v") != 2):
         async with store.lock(book_id):
             s = store.script(book_id)
             book = store.book(book_id)
@@ -1995,7 +1995,7 @@ async def get_script(request: web.Request) -> web.Response:
             if s.get("names_v") != 2:  # "a prisoner" -> "Prisoner"; "Urano" -> "Myne" (the name the book uses)
                 normalize_names(s)
                 canonical_names(book, s)
-            if s.get("profile_v") != 1:  # dossiers -> voice profiles
+            if s.get("profile_v") != 2:  # dossiers -> voice profiles
                 from .profile import migrate as migrate_profiles
 
                 migrate_profiles(s)

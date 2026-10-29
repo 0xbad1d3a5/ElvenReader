@@ -964,7 +964,7 @@ def test_old_dossiers_become_profiles():
                                  "appearance": "human, looks like a young girl in a kimono", "notes": "centuries old"}
     assert f["profile"] == {"notes": "calm, perceptive"}
     assert t["profile"] == {"appearance": "A polished broadcast figure.", "notes": "professional; american accent"}
-    assert s["profile_v"] == 1
+    assert s["profile_v"] == 2
 
 
 async def test_the_labelling_pass_fills_profiles(aiohttp_client, tmp_path, monkeypatch):
@@ -1121,3 +1121,15 @@ def test_canonical_names_follow_the_text():
     assert dz.find_character(s, "Urano") == ids["Urano"]  # old names still match
     assert s["characters"][ids["Ms. Futarishizuka"]]["name"] == "Ms. Futarishizuka"  # under 3x: kept
     assert s["characters"][typed]["name"] == "Mother dear"
+
+def test_profile_placeholders_are_not_descriptions():
+    from androidreader_server import profile
+
+    for t in ("none described", "Not mentioned", "N/A", "unknown", "nothing specified", "No details given"):
+        assert profile.blank(t), t
+    for t in ("pale skin, wears glasses", "none too friendly", "Nothing escapes her"):
+        assert not profile.blank(t), t
+    c = {"profile": {"gender": "female", "appearance": "none described", "notes": "kind; not mentioned"}}
+    assert profile.clean(c) and c["profile"] == {"gender": "female", "notes": "kind"}
+    assert not profile.merge(c, {"appearance": "Not described", "notes": "N/A"})
+    assert "appears as" not in profile.voice_description({"profile": {"appearance": "none described"}})

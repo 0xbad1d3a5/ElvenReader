@@ -45,7 +45,35 @@ PROMPT_RULE = (
 
 def effective(c: dict) -> dict:
     """The profile as used: the model's, with the reader's edits on top."""
-    return {k: v for k, v in {**(c.get("profile") or {}), **(c.get("profile_user") or {})}.items() if v}
+    return {k: v for k, v in {**(c.get("profile") or {}), **(c.get("profile_user") or {})}.items()
+            if v and not blank(v)}
+
+
+# What a model writes when it has nothing to say ("none described", "Not mentioned", "N/A").
+_PLACEHOLDER = re.compile(
+    r"^\W*(?:none|nothing|n/?a|unknown|unspecified|unclear|not applicable)\W*$"
+    r"|^\W*(?:none|nothing|not|never|no\s+\w+)\s+(?:yet\s+|really\s+|clearly\s+)?"
+    r"(?:described|mentioned|given|specified|stated|noted|shown|known)\b", re.IGNORECASE)
+
+
+def blank(text) -> bool:
+    return isinstance(text, str) and bool(_PLACEHOLDER.search(text.strip()))
+
+
+def clean(c: dict) -> bool:
+    """Drops placeholder values from the model's profile (the reader's own text is left alone)."""
+    p = c.get("profile")
+    if not p:
+        return False
+    before = dict(p)
+    for key in ("appearance", "speech_style", "notes"):
+        if isinstance(p.get(key), str):
+            kept = "; ".join(x for x in (s.strip() for s in p[key].split(";")) if x and not blank(x))
+            if kept:
+                p[key] = kept
+            else:
+                p.pop(key)
+    return p != before
 
 
 def _norm(text: str) -> str:
@@ -77,14 +105,14 @@ def merge(c: dict, upd: dict) -> bool:
                 p[key] = v
     for key in ("appearance", "speech_style"):
         v = " ".join(str(upd.get(key) or "").split())[:TEXT_MAX]
-        if not v:
+        if not v or blank(v):
             continue
         old = p.get(key, "")
         if not old or _norm(old) in _norm(v):
             p[key] = v
         elif key == "speech_style" and _norm(v) not in _norm(old):
             p[key] = _add_note(old, v)
-    if upd.get("notes"):
+    if upd.get("notes") and not blank(str(upd["notes"])):
         p["notes"] = _add_note(p.get("notes", ""), " ".join(str(upd["notes"]).split()))
     if not p:
         c.pop("profile", None)
@@ -107,6 +135,7 @@ def apply_updates(script: dict, updates: list) -> int:
 
 def sync_character(c: dict) -> None:
     """Apparent gender and age from the profile drive pool voices and casting."""
+    clean(c)
     d = effective(c)
     if d.get("gender") in ("male", "female"):
         c["gender"] = d["gender"]
@@ -161,6 +190,7 @@ def migrate(script: dict) -> int:
     everyone else, start from what the roster step wrote (appearance, accent, temperament)."""
     n = 0
     for c in script.get("characters", {}).values():
+        n += clean(c)  # v2: placeholders such as "none described" are not descriptions
         if "profile" in c or "profile_user" in c:
             continue
         model = from_dossier(c.get("dossier") or {})
@@ -176,7 +206,7 @@ def migrate(script: dict) -> int:
         if user:
             c["profile_user"] = user
         n += bool(model or user)
-    script["profile_v"] = 1
+    script["profile_v"] = 2
     return n
 
 
