@@ -1280,6 +1280,23 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     return result, local
 
 
+def _roster_batches(blocks: list[str], fixed_chars: int, context: int) -> list[list[str]]:
+    """Splits the roster's character blocks so each request (prompt plus its answer budget) fits the
+    LLM's context; a big cast with long evidence overflowed 12k tokens in one request."""
+    tokens = lambda chars: chars // 3 + 1  # conservative; English runs about 4 chars per token
+    batches: list[list[str]] = []
+    used = 0
+    for block in blocks:
+        cost = tokens(len(block) + 2) + 300
+        if batches and used + cost <= context - 1024 - 256 - tokens(fixed_chars):
+            batches[-1].append(block)
+            used += cost
+        else:
+            batches.append([block])
+            used = cost
+    return batches
+
+
 async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_chars: int = 12) -> None:
     public = ScriptStore.public(script)
     # Characters that already have a voice (re-analysis) keep their description.
@@ -1314,9 +1331,13 @@ async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_ch
             f"## {c['name']}" + (f" (also called: {', '.join(aliases)})" if aliases else "") + "\n" + about
             + "Described as:\n" + ("\n".join(f"- {t}" for t in looks) or "- (nothing found)") + "\n"
             + "Lines:\n" + "\n".join(f"- {t}" for t in texts))
-    user = f"Book: {book.get('title', '')} by {book.get('author', '')}\n\n" + "\n\n".join(blocks)
-    result = await llm.complete(session, ROSTER_PROMPT, user, ROSTER_SCHEMA, max_tokens=1024 + 300 * len(main))
-    for d in result.get("characters", []):
+    head = f"Book: {book.get('title', '')} by {book.get('author', '')}\n\n"
+    described = []
+    for batch in _roster_batches(blocks, len(ROSTER_PROMPT) + len(head), llm.cfg.llm_context):
+        result = await llm.complete(session, ROSTER_PROMPT, head + "\n\n".join(batch), ROSTER_SCHEMA,
+                                    max_tokens=1024 + 300 * len(batch))
+        described += result.get("characters", [])
+    for d in described:
         cid = find_character(script, d.get("name", ""))
         if cid is None:
             continue

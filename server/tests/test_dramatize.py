@@ -1082,3 +1082,13 @@ def test_llm_restarts_after_crash_mid_request(monkeypatch, tmp_path):
 
     out = asyncio.run(llm.complete(Session(), "s", "u", {}))
     assert out["ok"] == 1 and Session.calls == 2 and len(starts) == 2 and len(stops) == 1
+
+def test_roster_batches_fit_the_context():
+    """A big cast with long evidence is split so every roster request fits the LLM context."""
+    blocks = [f"## C{i}\n" + "x" * 3800 for i in range(12)]  # about 13k tokens in one request
+    batches = dz._roster_batches(blocks, 4000, 12288)
+    assert len(batches) > 1 and sum(batches, []) == blocks
+    for b in batches:
+        prompt = (4000 + sum(len(x) + 2 for x in b)) // 3
+        assert prompt + 1024 + 300 * len(b) <= 12288
+    assert dz._roster_batches(blocks[:3], 4000, 12288) == [blocks[:3]]  # a small cast stays one request
