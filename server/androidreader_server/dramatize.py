@@ -2072,6 +2072,7 @@ async def patch_character(request: web.Request) -> web.Response:
         if "voice" in body:
             from .app import VOICES_KEY
 
+            old_voice = c.get("voice")
             c["voice"] = body["voice"] or None
             c["voice_user"] = bool(c["voice"])  # the reader's choice: a series applied later keeps it
             follow_voice(c, request.app[VOICES_KEY])
@@ -2100,8 +2101,10 @@ async def patch_character(request: web.Request) -> web.Response:
                 refresh_narration(store, book_id, s)
         store.save_script(book_id, s)
     if "merge_into" not in body:
-        from .series import remember
+        from .series import propagate_voice, remember
 
+        if "voice" in body:  # the same character in the series' other volumes follows
+            await propagate_voice(request.app, book_id, cid, old_voice, body["voice"] or None)
         remember(request.app, book_id, only=cid)
     return web.json_response(ScriptStore.public(s))
 
@@ -2132,9 +2135,14 @@ async def voice_from_dossier(request: web.Request) -> web.Response:
         return web.json_response({"error": exc.detail}, status=exc.status)
     async with store.lock(book_id):
         s = store.script(book_id)
+        old_voice = None
         if cid in s["characters"]:
-            s["characters"][cid].update(voice=v.id, description=description, user=True)
+            old_voice = s["characters"][cid].get("voice")
+            s["characters"][cid].update(voice=v.id, description=description, user=True, voice_user=True)
         store.save_script(book_id, s)
+    from .series import propagate_voice
+
+    await propagate_voice(request.app, book_id, cid, old_voice, v.id)
     remember(request.app, book_id, only=cid)
     return web.json_response(ScriptStore.public(s))
 

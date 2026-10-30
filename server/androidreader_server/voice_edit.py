@@ -129,17 +129,19 @@ TRANSCRIBE_KEY = web.AppKey("transcriber", Transcriber)
 def voice_usage(app: web.Application) -> dict[str, list[dict]]:
     """voice id -> who uses it: characters in analysed books, and the default reader voice."""
     from .dramatize import DRAMA_STORE_KEY
+    from .series import book_series
 
     out: dict[str, list[dict]] = {}
     store = app.get(DRAMA_STORE_KEY)
     if store is not None:
         for book_id in store.ids():
             title = (store.summary(book_id) or {}).get("title", "")
+            series = book_series(app, book_id)
             for cid, c in store.script(book_id).get("characters", {}).items():
                 if c.get("voice"):
                     out.setdefault(c["voice"], []).append(
-                        {"book": book_id, "title": title, "character": cid, "name": c.get("name", cid),
-                         "role": c.get("role")})
+                        {"book": book_id, "title": title, "series": series, "character": cid,
+                         "name": c.get("name", cid), "aliases": c.get("aliases", []), "role": c.get("role")})
     default = app[CONFIG_KEY].default_voice
     if default:
         out.setdefault(default, []).append({"default": True, "name": "Default reader voice"})
@@ -258,10 +260,16 @@ async def voice_duplicate(request: web.Request) -> web.Response:
         name = store.script(book)["characters"][character].get("name", character)
     copy = request.app[VOICES_KEY].duplicate(voice.id, name)
     if book and character:
+        from .series import propagate_voice, remember
+
         async with store.lock(book):
             s = store.script(book)
             s["characters"][character]["voice"] = copy.id
+            s["characters"][character]["voice_user"] = True
             store.save_script(book, s)
+        # The same character in the series' other volumes gets the copy too: they are one character.
+        await propagate_voice(request.app, book, character, voice.id, copy.id)
+        remember(request.app, book, only=character)
         await _characters_follow(request.app, copy.id)
     return web.json_response(details(request.app, copy), status=201)
 

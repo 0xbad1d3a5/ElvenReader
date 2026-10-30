@@ -137,6 +137,53 @@ def seed(app: web.Application, book_id: str, script: dict, replace_generated: bo
     return n
 
 
+def same_character_elsewhere(app: web.Application, book_id: str, cid: str) -> list[tuple[str, str]]:
+    """The same character in the other books of this book's series: (book, character id) pairs, matched by
+    id, name or alias."""
+    from .dramatize import DRAMA_STORE_KEY, find_character
+
+    store = app[DRAMA_STORE_KEY]
+    c = store.script(book_id).get("characters", {}).get(cid)
+    name = book_series(app, book_id)
+    if c is None or not name:
+        return []
+    names = [c.get("name", ""), *c.get("aliases", [])]
+    out = []
+    for other in store.ids():
+        if other == book_id or series_slug(book_series(app, other)) != series_slug(name):
+            continue
+        s = store.script(other)
+        hit = cid if cid in s.get("characters", {}) else next(
+            (h for h in (find_character(s, n) for n in names if n) if h), None)
+        if hit:
+            out.append((other, hit))
+    return out
+
+
+async def propagate_voice(app: web.Application, book_id: str, cid: str, old: str | None, new: str | None) -> list[str]:
+    """A character's new voice also goes to the same character in the series' other books, where they still
+    had the old voice (a voice chosen differently for one volume is left alone). Returns the books changed."""
+    from .app import VOICES_KEY
+    from .dramatize import DRAMA_STORE_KEY, follow_voice
+
+    if not new or new == old:
+        return []
+    store = app[DRAMA_STORE_KEY]
+    changed = []
+    for other, ocid in same_character_elsewhere(app, book_id, cid):
+        async with store.lock(other):
+            s = store.script(other)
+            c = s["characters"].get(ocid)
+            if c is None or (c.get("voice") or None) != (old or None):
+                continue
+            c["voice"] = new
+            c["voice_user"] = True
+            follow_voice(c, app[VOICES_KEY])
+            store.save_script(other, s)
+            changed.append(other)
+    return changed
+
+
 def _higher(new: str | None, old: str | None, user: bool = False) -> str | None:
     """The series' tier for a character: the reader's choice, otherwise the highest tier seen so far."""
     from .roles import RANK

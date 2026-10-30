@@ -507,8 +507,17 @@ async function openVoiceEditor(voiceId, ctx = {}) {
   let recorder = null;
   const ui = {};                 // inputs that survive re-rendering
 
-  // A voice shared with other characters is copied for this one, unless the user says otherwise.
-  const others = () => v.used_by.filter(u => !(u.book === ctx.book && u.character === ctx.character));
+  // A voice shared with other characters is copied for this one, unless the user says otherwise. The same
+  // character in other volumes of the series is this character, not another one: it keeps the voice too.
+  const isSelf = (u) => u.book === ctx.book && u.character === ctx.character;
+  const sameCharacter = (u) => {
+    const me = v.used_by.find(isSelf);
+    if (!me || isSelf(u) || u.default || u.series !== me.series) return false;
+    const names = new Set([me.name, ...(me.aliases || [])].map(n => n.toLowerCase()));
+    return u.character === me.character || [u.name, ...(u.aliases || [])].some(n => names.has(n.toLowerCase()));
+  };
+  const otherVolumes = () => v.used_by.filter(sameCharacter);
+  const others = () => v.used_by.filter(u => !isSelf(u) && !sameCharacter(u));
   const forThisOnly = () => ctx.character && others().length > 0 && !(ui.everyone && ui.everyone.checked);
   async function target() {
     if (!forThisOnly()) return v.id;
@@ -689,6 +698,9 @@ async function openVoiceEditor(voiceId, ctx = {}) {
         v.instruct || v.description),
       shared ? h("label", { class: "small", style: { color: "var(--fg)" } }, ui.everyone = ui.everyone || h("input", { type: "checkbox", style: { width: "auto" } }),
         ` Also change it for ${others().length} other character${others().length > 1 ? "s" : ""} who share this voice`) : null,
+      ctx.character && otherVolumes().length ? h("p", { class: "small muted", style: { margin: "4px 0" } },
+        `Also ${ctx.characterName || "this character"}'s voice in ${otherVolumes().length} other volume${otherVolumes().length > 1 ? "s" : ""} of the series ` +
+        `(${otherVolumes().map(u => u.title).join("; ")}): changes apply there too.`) : null,
       h("div", { class: "line" },
         h("button", { class: "primary", disabled: !designers.length, onclick: (e) => makeTakes(e.target) },
           takes.length ? "Try again" : "Make 3 options"),

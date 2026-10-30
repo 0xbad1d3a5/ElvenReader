@@ -1251,3 +1251,42 @@ async def test_setting_a_series_keeps_the_title_of_a_book_without_meta(drama_cli
     r = await (await c.post("/api/books/old/series", json={"series": "Old Tales"}, headers=AUTH)).json()
     assert r["series"] == "Old Tales" and r["title"] == "Old Tale, Vol. 3"
     assert store.summary("old")["title"] == "Old Tale, Vol. 3"
+
+async def test_a_characters_voice_follows_across_the_series(drama_client):
+    from androidreader_server.app import VOICES_KEY
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    c = drama_client
+    app = c.server.app
+    store = app[DRAMA_STORE_KEY]
+    app[VOICES_KEY].add("Other", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="other")
+    for book in ("v1", "v2", "v3"):
+        await c.post(f"/api/books/{book}", json={**book_payload(), "title": f"Tea Saga, Vol. {book[1]}", "analyze": True},
+                     headers=AUTH)
+        await wait_done(c, book)
+    for book in ("v1", "v2"):
+        s = store.script(book)
+        s["characters"]["alice"]["voice"] = "nar"
+        s["characters"]["tom"]["voice"] = "nar" if book == "v1" else None
+        store.save_script(book, s)
+    s = store.script("v3")
+    s["characters"]["alice"]["voice"] = "my-v3-pick"  # chosen differently for this volume: left alone
+    store.save_script("v3", s)
+
+    # the editor's copy for Alice (the voice is shared with Tom) goes to Alice in every volume, not to Tom
+    used = (await (await c.get("/api/voices/nar", headers=AUTH)).json())["used_by"]
+    assert {u["series"] for u in used} == {"Tea Saga"} and all("aliases" in u for u in used)
+    r = await c.post("/api/voices/nar/duplicate", json={"book": "v1", "character": "alice"}, headers=AUTH)
+    copy = (await r.json())["id"]
+    assert store.script("v1")["characters"]["alice"]["voice"] == copy
+    assert store.script("v2")["characters"]["alice"]["voice"] == copy
+    assert store.script("v1")["characters"]["tom"]["voice"] == "nar"
+    assert store.script("v3")["characters"]["alice"]["voice"] == "my-v3-pick"
+    series = (await (await c.get("/api/series", headers=AUTH)).json())["series"]
+    assert next(g for g in series if g["name"] == "Tea Saga")["characters"]["alice"]["voice"] == copy
+
+    # picking another voice in the drawer does the same
+    r = await c.patch("/api/books/v2/characters/alice", json={"voice": "other"}, headers=AUTH)
+    assert r.status == 200
+    assert store.script("v1")["characters"]["alice"]["voice"] == "other"
+    assert store.script("v3")["characters"]["alice"]["voice"] == "my-v3-pick"

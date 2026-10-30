@@ -533,7 +533,9 @@ voice, including imported VoiceStudio voices, pool voices and character voices, 
 Describe the voice in plain words ("a young girl's high, light voice, but old-fashioned and teasing
 like a grandmother"), press **Make 3 options**, listen, and press **Use this** on the one you like.
 That's all. It takes about a minute, and **Undo** goes back to the previous voice (the last 5 are
-kept). **↓ Younger** / **↑ Older** make 3 options one age group younger or older (child, teen,
+kept). A character's voice belongs to the character across the series: a voice you pick, design or
+edit for Tuuli in volume 1 also goes to Tuuli in the series' other volumes (unless you gave her a
+different voice in one of them) and to the series memory. **↓ Younger** / **↑ Older** make 3 options one age group younger or older (child, teen,
 young adult, adult, middle-aged, elderly): the description's age is rewritten ("a gravelly adult
 male voice" → "a gravelly young adult male voice"; "a 16-year-old girl" → "a 24-year-old young
 woman"), shown in the box so pressing again goes further, and option 1 keeps the voice's seed to
