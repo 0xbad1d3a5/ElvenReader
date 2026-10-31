@@ -169,7 +169,7 @@ are kept. Adding a book that is already in the library keeps its analysis.
 
 **Queue** (in the library header, with the number of books waiting) shows the book being analysed
 with its progress, the books next in line with a rough time each (about 1,800 words a minute with
-the whole GPU), and the books whose voices are still to be created. ⏵ analyses a waiting book now:
+the whole GPU), and the books whose voices are still to be created. ▶ analyses a waiting book now:
 the current one stops, keeps the passages it has finished, and goes next. Drag a book, or use ⤒
 (next), ↑, ↓ and ⤓ (bottom; on the current book it stops it and sends it to the end), to change
 the order; ✕ takes a book out of the queue, keeping what's done. **Continue

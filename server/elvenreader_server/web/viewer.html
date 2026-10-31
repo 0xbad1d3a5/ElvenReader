@@ -631,7 +631,7 @@ async function queueView() {
         h("span", { class: "qbtns" },
         h("button", { class: "iconbtn", title: q.current
             ? `Analyse it now: \u201c${q.current.title}\u201d stops, keeps its progress and goes next`
-            : "Analyse it now", onclick: () => post(`/api/queue/${b.id}/now`) }, "\u23F5"),
+            : "Analyse it now", onclick: () => post(`/api/queue/${b.id}/now`) }, "\u25B6\uFE0E"),
         h("button", { class: "iconbtn", title: "Analyse it next", disabled: i === 0, onclick: () => move(i, 0) }, "\u2912"),
         h("button", { class: "iconbtn", title: "Move up", disabled: i === 0, onclick: () => move(i, i - 1) }, "\u2191"),
         h("button", { class: "iconbtn", title: "Move down", disabled: i === ids.length - 1, onclick: () => move(i, i + 1) }, "\u2193"),
@@ -663,7 +663,7 @@ async function queueView() {
         : h("p", { class: "small muted" }, "Nothing."),
       h("h3", {}, `Next up (${q.queued.length})`),
       q.queued.length ? h("div", {}, ...q.queued.map(row)) : h("p", { class: "small muted" }, "Nothing is waiting. Add books from the library."),
-      q.queued.length ? h("p", { class: "small muted" }, "\u23F5 analyses a book now (the current one keeps its progress and goes next). " +
+      q.queued.length ? h("p", { class: "small muted" }, "\u25B6\uFE0E analyses a book now (the current one keeps its progress and goes next). " +
         "Drag a book, or use \u2912 \u2191 \u2193 \u2913, to change the order. " +
         `Together about ${minutes(q.queued.reduce((a, b) => a + (b.words || 0), 0))} min with the whole GPU; longer while you read, ` +
         "and analysis pauses while you design voices.") : null,
