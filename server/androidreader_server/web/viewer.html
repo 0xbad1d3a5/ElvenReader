@@ -22,6 +22,7 @@
   .grid .serieshead { grid-column:1/-1; font-size:15px; margin:6px 0 -8px; display:flex; gap:8px; align-items:baseline; }
   .grid .serieshead:not(:first-child) { margin-top:14px; }
   .seriessel { max-width:18em; font-size:12.5px; padding:2px 4px; } dialog .seriessel { max-width:none; width:100%; }
+  .selbtn { position:fixed; z-index:30; font-size:12.5px; box-shadow:0 2px 8px #0003; }
   .serieslist { padding:12px 18px; max-width:900px; }
   .serieslist .sr { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
   .serieslist .sr h3 { margin:0 0 4px; font-size:16px; display:flex; gap:8px; align-items:center; }
@@ -296,6 +297,8 @@ async function seriesView() {
       el.append(h("div", { class: "sr" },
         h("h3", {}, g.name, h("span", { class: "grow" }),
           h("button", { class: "small", onclick: rename }, "Rename\u2026"),
+          h("button", { class: "small", title: "Fix how names and words are said in every book of this series",
+            onclick: () => pronunciationsDialog({ series: g.name }).catch(e => alert(e.message)) }, "Pronunciations\u2026"),
           others.length ? h("button", { class: "small", onclick: merge }, "Merge into\u2026") : null),
         h("div", { class: "small muted" }, `${g.volumes.length} book${g.volumes.length === 1 ? "" : "s"} \u00b7 ` +
           (g.cast ? `cast of ${g.cast} (${g.voiced} with voices)` : "no cast remembered yet")),
@@ -516,6 +519,111 @@ async function settingsView() {
     if (st.loading) timer = setTimeout(render, 3000);
   }
   render().catch(e => tokenScreen.shown || $("#settings").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
+/* ------------------------------------------------------------------ pronunciations */
+
+/* Fix how words and names are said, for a series (every book of it), one book or all books. Each fix is a
+   respelling ("MY-nuh") applied before synthesis, so it works with any speech model; listen before saving.
+   opts: {book?, series?, term?, sample?, voice?, names?: [..], onChange?} */
+async function pronunciationsDialog(opts = {}) {
+  const d = $("#dlg");
+  d.onclose = null;
+  const q = opts.book ? `book=${encodeURIComponent(opts.book)}` : `series=${encodeURIComponent(opts.series || "")}`;
+  let list = await get(`/api/pronunciations?${q}`);
+  const series = list.series_name || opts.series || "";
+  let names = opts.names;
+  if (!names && series) {
+    const g = (await get("/api/series").catch(() => ({ series: [] }))).series.find(x => x.name.toLowerCase() === series.toLowerCase());
+    names = g ? Object.values(g.characters || {}).filter(e => !e.unnamed).map(e => e.name) : [];
+  }
+  const term = h("input", { placeholder: "Word or name as written, e.g. Myne", value: opts.term || "" });
+  const resp = h("input", { placeholder: "How it sounds, e.g. MY-nuh" });
+  const phon = h("input", { placeholder: "e.g. M AY1 N AH0 (optional, ARPAbet)" });
+  const cased = h("input", { type: "checkbox", style: { width: "auto" } });
+  const scope = h("select", {},
+    series ? h("option", { value: "series" }, `Every book of ${series}`) : null,
+    opts.book ? h("option", { value: "book" }, "Only this book") : null,
+    h("option", { value: "global" }, "All books"));
+  const note = h("span", { class: "small" });
+  let editing = null;  // the entry being changed
+  const sampleFor = (t) => {
+    // The sentence of the passage the word came from (short to synthesize), else a stock line.
+    const sentences = (opts.sample || "").match(/[^.!?\u2026]+[.!?\u2026]*["\u201d\u2019]?/g) || [];
+    const hit = t && sentences.find(s => s.toLowerCase().includes(t.toLowerCase()));
+    return hit && hit.length < 400 ? hit.trim() : `${t}. I said ${t}, didn't I?`;
+  };
+  async function say(text, extra) {
+    const body = { text, format: TTS_FORMAT || undefined };
+    if (opts.book) body.book = opts.book;
+    if (opts.voice) body.voice = opts.voice;
+    if (extra) body.extra_pronunciations = extra;
+    try { playUrl(speechUrl(await api("POST", "/api/tts", body))); } catch (e) { alert(e.message); }
+  }
+  const fix = () => [{ term: term.value.trim(), respelling: resp.value.trim(), phonemes: phon.value.trim(), case_sensitive: cased.checked }];
+  const reset = () => { editing = null; term.value = ""; resp.value = ""; phon.value = ""; cased.checked = false; save.textContent = "Save"; };
+  const save = h("button", { class: "primary", type: "button", onclick: async () => {
+    if (!term.value.trim() || (!resp.value.trim() && !phon.value.trim())) { note.textContent = "Type the word and how it sounds."; return; }
+    try {
+      if (editing && editing.scope === scope.value) {
+        await api("PATCH", `/api/pronunciations/${editing.id}`, { term: term.value.trim(), respelling: resp.value.trim(),
+          phonemes: phon.value.trim(), case_sensitive: cased.checked });
+      } else {
+        if (editing) await api("DELETE", `/api/pronunciations/${editing.id}`);
+        await api("POST", "/api/pronunciations", { ...fix()[0], scope: scope.value, book: opts.book, series: series || undefined });
+      }
+      note.textContent = `\u2713 Saved: ${term.value.trim()} \u2192 ${resp.value.trim() || phon.value.trim()}`;
+      reset(); await reload(); opts.onChange && opts.onChange();
+    } catch (e) { alert(e.message); }
+  } }, "Save");
+  async function reload() { list = await get(`/api/pronunciations?${q}`); render(); }
+  const row = (e) => h("div", { class: "line", style: { gap: "6px" } },
+    h("b", {}, e.term), h("span", { class: "muted" }, "\u2192"), h("span", {}, e.respelling || e.phonemes),
+    e.case_sensitive ? h("span", { class: "small muted" }, "(match case)") : null, h("span", { class: "grow" }),
+    h("button", { class: "iconbtn", type: "button", title: "Listen", onclick: () => say(sampleFor(e.term)) }, "\u25B6"),
+    h("button", { class: "iconbtn", type: "button", title: "Change", onclick: () => {
+      editing = e; term.value = e.term; resp.value = e.respelling; phon.value = e.phonemes || ""; cased.checked = e.case_sensitive;
+      scope.value = e.scope; save.textContent = "Save changes"; resp.focus();
+    } }, "\u270E"),
+    h("button", { class: "iconbtn", type: "button", title: "Delete", onclick: async () => {
+      if (!confirm(`Delete the pronunciation of \u201c${e.term}\u201d?`)) return;
+      await api("DELETE", `/api/pronunciations/${e.id}`); await reload(); opts.onChange && opts.onChange();
+    } }, "\uD83D\uDDD1"));
+  const group = (title, entries) => entries.length ? [h("h4", { style: { margin: "12px 0 4px" } }, `${title} (${entries.length})`),
+    ...entries.slice().sort((a, b) => a.term.localeCompare(b.term)).map(row)] : [];
+  function render() {
+    const known = new Set([...list.series, ...list.book, ...list.global].map(e => e.term.toLowerCase()));
+    const chips = (names || []).filter(n => n && !known.has(n.toLowerCase())).slice(0, 24);
+    d.replaceChildren(h("form", { method: "dialog",
+        // Enter in a field saves instead of closing the dialog.
+        onsubmit: (e) => { if (!e.submitter || e.submitter.value !== "close") { e.preventDefault(); save.click(); } } },
+      h("div", { class: "line" }, h("h3", { style: { margin: 0, flex: 1 } }, "Pronunciations" + (series ? ` \u2014 ${series}` : "")),
+        h("button", { value: "close" }, "Close")),
+      h("p", { class: "small muted", style: { margin: "4px 0 8px" } }, "Fix how a word or name is said: type it the way it sounds (CAPITALS for the " +
+        "stressed part, e.g. MY-nuh, BEN-oh), listen, save. Every voice and model uses it."),
+      h("label", {}, "Word or name"), term,
+      chips.length ? h("div", { class: "small", style: { margin: "4px 0", display: "flex", flexWrap: "wrap", gap: "4px" } },
+        h("span", { class: "muted" }, "Names:"), ...chips.map(n => h("button", { type: "button", class: "small",
+          onclick: () => { term.value = n; resp.focus(); } }, n))) : null,
+      h("label", {}, "Say it like"), resp,
+      h("div", { class: "line", style: { marginTop: "6px" } },
+        h("button", { type: "button", title: "Hear how it is said now", onclick: () => term.value.trim() && say(sampleFor(term.value.trim())) }, "\u25B6 Now"),
+        h("button", { type: "button", title: "Hear it with this fix (not saved yet)", onclick: () => {
+          if (term.value.trim() && (resp.value.trim() || phon.value.trim())) say(sampleFor(term.value.trim()), fix());
+        } }, "\u25B6 With the fix"),
+        h("span", { class: "grow" }), scope, save),
+      h("details", {}, h("summary", { class: "small" }, "Advanced"),
+        h("label", {}, "Phonemes (used by models that read them, like OmniVoice; the respelling otherwise)"), phon,
+        h("label", { class: "small", style: { display: "flex", gap: "6px", alignItems: "center" } }, cased, "Match case (e.g. \u201cMay\u201d the name, not \u201cmay\u201d)")),
+      note,
+      ...group(series ? `Every book of ${series}` : "Series", list.series),
+      ...group("Only this book", list.book),
+      ...group("All books", list.global),
+      !list.series.length && !list.book.length && !list.global.length ? h("p", { class: "small muted" }, "No pronunciations yet.") : null));
+    if (!d.open) d.showModal();
+  }
+  render();
+  if (opts.term) resp.focus(); else term.focus();
 }
 
 /* ------------------------------------------------------------------ voices */
@@ -886,10 +994,19 @@ async function bookView(id) {
         onclick: (e) => { e.stopPropagation(); playSample(c.voice); } }, "\u25B6") : h("span", { class: "gap", title: "No voice yet" }));
   }
 
+  /* Pronunciations for this book's series (or this book); the audio fetched ahead is dropped after a change. */
+  function openPronunciations(term, sample, voice) {
+    const names = st.script.characters.filter(c => !c.unnamed).sort((a, b) => b.lines - a.lines).map(c => c.name);
+    pronunciationsDialog({ book: st.id, term, sample, voice: voice || st.narrator || undefined, names, onChange: flushAudio })
+      .catch(e => alert(e.message));
+  }
+
   function bookMenu(anchor) {
     const hi = (value, text) => ({ text, on: st.tierHi === value,
       run: () => { st.tierHi = value; localStorage.setItem("tierHi", value); renderText(); } });
     popMenu(anchor, [
+      { text: "Pronunciations\u2026", title: "Fix how names and words are said in this series (or this book)", run: () => openPronunciations() },
+      "-",
       { text: "Sort cast into tiers", title: "Ask the LLM to sort the cast into main, supporting and extras (your choices are kept)", run: sortCast },
       { text: "Create missing voices", run: () => castVoices() },
       { text: "Give supporting characters their own voices", title: "Supporting characters who share a pooled voice get a designed voice of their own",
@@ -978,7 +1095,7 @@ async function bookView(id) {
           const narrator = chars[narratorAt(ci, pi)];
           units.push({ text: piece.text.trim(), voice: narrator ? narrator.voice : null, delivery: null, el: span, ci, pi });
           span.title = "Click to play from here";
-          span.addEventListener("click", () => playFrom(idx));
+          span.addEventListener("click", () => { if (getSelection().isCollapsed) playFrom(idx); });  // not while selecting text
         }
         p.append(span);
         return;
@@ -993,7 +1110,7 @@ async function bookView(id) {
       // Quotations given to the narrator (signs, titles) are read in the narration's voice.
       const nv = line && !c ? chars[narratorAt(ci, pi)] : null;
       units.push({ text: piece.text, voice: c ? c.voice : nv ? nv.voice : null, delivery: line ? line.delivery : null, el: span, ci, pi, qid: piece.qid });
-      span.addEventListener("click", () => playFrom(idx));
+      span.addEventListener("click", () => { if (getSelection().isCollapsed) playFrom(idx); });  // not while selecting text
       p.append(span);
       // One tag per speaker turn: skip it when the next piece continues the same quotation ("Yes," he said, "I will.").
       const between = ps[k + 1], next = ps[k + 2];
@@ -1218,6 +1335,7 @@ async function bookView(id) {
         h("div", { class: "dh" }, h("span", { class: "sw", style: { background: color(cid) } }), h("h2", { title: c.name }, c.name),
           h("button", { class: "iconbtn", title: "More", onclick: (e) => popMenu(e.currentTarget, [
             { text: "Rename\u2026", run: () => { const n = prompt("Name", c.name); if (n && n.trim() && n.trim() !== c.name) patch({ name: n.trim() }); } },
+            { text: "How the name is said\u2026", title: "Fix the pronunciation of this name for the series", run: () => { d.close(); openPronunciations(c.name, null, c.voice); } },
             { text: "Same person as\u2026 (merge)", run: () => merge(c) },
           ]) }, "\u22EF"),
           h("button", { class: "iconbtn", title: "Close", onclick: () => d.close() }, "\u2715")),
@@ -1334,6 +1452,34 @@ async function bookView(id) {
   get("/api/voices?all=1").then(v => { st.voices = v.voices; st.defaultVoice = v.default; renderSelectors(); renderCast(); }).catch(() => {});
   showSeries().catch(() => {});
   follow();
+
+  // Select a word or name in the text to fix how it is said.
+  const selBtn = h("button", { class: "selbtn", type: "button", title: "Fix how this is said (for the series)" }, "\uD83D\uDDE3 Pronunciation\u2026");
+  selBtn.style.display = "none";
+  document.body.append(selBtn);
+  const hideSel = () => { selBtn.style.display = "none"; };
+  const checkSel = () => {
+    const sel = getSelection();
+    if (!sel.rangeCount || !$("#text") || !$("#text").contains(sel.anchorNode)) return hideSel();
+    const word = sel.toString().replace(/[\u201c\u201d"\u2018.,;:!?()]+/g, " ").replace(/[\u2019']s?\s*$/, "").trim();
+    if (!word || word.length > 40 || word.split(/\s+/).length > 4 || !/\p{L}/u.test(word)) return hideSel();
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    const para = node && node.closest("p");
+    selBtn.style.left = Math.max(8, Math.min(r.left, innerWidth - 180)) + "px";
+    selBtn.style.top = (r.top > 50 ? r.top - 38 : r.bottom + 8) + "px";
+    selBtn.style.display = "";
+    selBtn.onclick = () => {
+      hideSel();
+      const text = para ? [...para.childNodes].filter(n => !(n.classList && n.classList.contains("tag"))).map(n => n.textContent).join("") : "";
+      openPronunciations(word, text);
+    };
+  };
+  $("#text").addEventListener("mouseup", () => setTimeout(checkSel));
+  let selTimer = null;  // phones select by long-press: no mouseup
+  document.addEventListener("selectionchange", () => { clearTimeout(selTimer); selTimer = setTimeout(checkSel, 500); });
+  document.addEventListener("mousedown", (e) => { if (e.target !== selBtn) hideSel(); });
+  $("main").addEventListener("scroll", hideSel);
 }
 </script>
 </body>

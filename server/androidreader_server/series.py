@@ -444,6 +444,9 @@ async def rename_series(request: web.Request) -> web.Response:
     store.save(dst)
     if not same:
         store.path(src_name).unlink(missing_ok=True)
+    from .app import PRON_KEY
+
+    app[PRON_KEY].rename_series(src_name, dst_name)  # the series' pronunciations follow it
     return web.json_response({"series": dst_name, "books": books, "merged": not same and bool(src["characters"]),
                               "data": dst})
 

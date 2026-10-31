@@ -1,7 +1,7 @@
 """User-corrected pronunciations ("Hermione" -> "her-MY-oh-nee").
 
-Entries are global or belong to one book; a book entry wins over a global
-entry for the same term. They are applied on the server before synthesis, so
+Entries are global, belong to a series (every book of it) or to one book; for the same term
+the narrower one wins (book over series over global). They are applied on the server before synthesis, so
 they work with every engine and are part of the audio cache key.
 
 A respelling works with every engine. An entry may also carry ARPAbet
@@ -32,12 +32,13 @@ class Entry:
     phonemes: str = ""
     case_sensitive: bool = False
     book: str | None = None  # None = global
+    series: str | None = None  # the series' name; matched like series names are (case and punctuation aside)
     id: str = field(default_factory=lambda: secrets.token_hex(5))
     updated: float = field(default_factory=time.time)
 
     @property
     def scope(self) -> str:
-        return "book" if self.book else "global"
+        return "book" if self.book else "series" if self.series else "global"
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -68,19 +69,30 @@ def _term_pattern(term: str) -> str:
     return r"\s+".join(words)
 
 
-def effective_entries(entries: Iterable[Entry], book: str | None) -> list[Entry]:
-    """Global entries plus this book's entries; the book's win on the same term."""
+def series_key(name: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+
+
+def effective_entries(entries: Iterable[Entry], book: str | None, series: str | None = None) -> list[Entry]:
+    """Global entries, then the book's series' entries, then the book's own; on the same term the later
+    (narrower) one wins."""
+    entries = list(entries)
+    skey = series_key(series)
+    layers = [
+        [e for e in entries if e.book is None and not e.series],
+        [e for e in entries if e.book is None and e.series and skey and series_key(e.series) == skey],
+        [e for e in entries if book and e.book == book],
+    ]
     chosen: dict[str, Entry] = {}
-    for e in entries:
-        if e.book is None:
-            chosen.setdefault(e.key(), e)
-    for e in entries:
-        if book and e.book == book:
-            chosen[e.key()] = e
-            # A case-insensitive book entry also overrides a case-sensitive global one.
+    origin: dict[str, int] = {}
+    for depth, layer in enumerate(layers):
+        for e in layer:
+            # A case-insensitive entry also overrides case-sensitive ones of a wider scope.
             if not e.case_sensitive:
-                for k in [k for k, v in chosen.items() if v.book is None and v.term.casefold() == e.key()]:
+                for k in [k for k, v in chosen.items() if v.term.casefold() == e.key() and origin[k] < depth]:
                     del chosen[k]
+            chosen[e.key()] = e
+            origin[e.key()] = depth
     return list(chosen.values())
 
 
@@ -152,18 +164,41 @@ class PronunciationStore:
     def all(self) -> list[Entry]:
         return list(self._entries)
 
-    def for_book(self, book: str | None) -> list[Entry]:
-        return effective_entries(self._entries, book)
+    def for_book(self, book: str | None, series: str | None = None) -> list[Entry]:
+        return effective_entries(self._entries, book, series)
 
-    def listing(self, book: str | None) -> dict:
+    def listing(self, book: str | None, series: str | None = None) -> dict:
+        skey = series_key(series)
         return {
-            "global": [e.to_json() for e in self._entries if e.book is None],
+            "global": [e.to_json() for e in self._entries if e.book is None and not e.series],
+            "series": [e.to_json() for e in self._entries
+                       if e.book is None and e.series and skey and series_key(e.series) == skey],
             "book": [e.to_json() for e in self._entries if book and e.book == book],
-            "version": entries_version(self.for_book(book)),
+            "series_name": series or "",
+            "version": entries_version(self.for_book(book, series)),
         }
 
+    def rename_series(self, old: str, new: str) -> int:
+        """A renamed (or merged) series keeps its entries; on a clash the target series' entry stays."""
+        okey, nkey = series_key(old), series_key(new)
+        with self._lock:
+            target = {e.key() for e in self._entries if e.book is None and series_key(e.series) == nkey}
+            kept, n = [], 0
+            for e in self._entries:
+                if e.book is None and e.series and series_key(e.series) == okey and okey != nkey:
+                    if e.key() in target:
+                        continue
+                    e.series = new
+                    n += 1
+                elif e.book is None and e.series and series_key(e.series) == nkey:
+                    e.series = new
+                kept.append(e)
+            self._entries = kept
+            self._save()
+        return n
+
     def add(self, term: str, respelling: str, *, phonemes: str = "", case_sensitive: bool = False,
-            book: str | None = None) -> Entry:
+            book: str | None = None, series: str | None = None) -> Entry:
         term = " ".join(term.split())
         if not term or not any(ch.isalnum() for ch in term):
             raise ValueError("term must contain a letter or digit")
@@ -171,10 +206,13 @@ class PronunciationStore:
         if not respelling.strip() and not phonemes:
             raise ValueError("give a respelling or phonemes")
         entry = Entry(term=term, respelling=respelling.strip(), phonemes=phonemes,
-                      case_sensitive=bool(case_sensitive), book=book or None)
+                      case_sensitive=bool(case_sensitive), book=book or None,
+                      series=None if book else (" ".join((series or "").split()) or None))
         with self._lock:
             # Re-adding the same term in the same scope replaces the old entry.
-            self._entries = [e for e in self._entries if not (e.book == entry.book and e.key() == entry.key())]
+            self._entries = [e for e in self._entries
+                             if not (e.book == entry.book and series_key(e.series) == series_key(entry.series)
+                                     and e.key() == entry.key())]
             self._entries.append(entry)
             self._save()
         return entry

@@ -126,3 +126,30 @@ def test_audio_cache_roundtrip_and_prune(tmp_path):
     cache.put(k2, 16000, b"\x02\x00" * 1000)  # over the limit: oldest goes
     assert cache.get(k2) == (16000, b"\x02\x00" * 1000)
     assert cache.stats()["bytes"] <= 3000
+
+
+def test_series_entries_sit_between_global_and_book():
+    entries = [
+        E("Myne", "mine"),
+        E("myne", "my-nuh", series="Ascendance of a Bookworm"),
+        E("Myne", "MEE-nuh", book="v3", case_sensitive=True),
+        E("Lutz", "loots", series="ascendance-of-a-bookworm!"),  # matched like series names are
+        E("Lutz", "lutts", series="Another Series"),
+    ]
+    say = lambda book, series: {e.term.casefold(): e.respelling for e in effective_entries(entries, book, series)}
+    assert say("v1", "Ascendance of a Bookworm") == {"myne": "my-nuh", "lutz": "loots"}
+    assert say("v3", "Ascendance of a Bookworm") == {"myne": "MEE-nuh", "lutz": "loots"}
+    assert say("x", "Sasaki and Peeps") == {"myne": "mine"}
+    assert say(None, None) == {"myne": "mine"}
+
+
+def test_series_entries_follow_a_rename_or_merge(tmp_path):
+    store = PronunciationStore(tmp_path / "p.json")
+    store.add("Myne", "my-nuh", series="Bookworm")
+    store.add("Lutz", "loots", series="Bookworm")
+    store.add("Lutz", "lootz", series="Ascendance of a Bookworm")
+    assert store.add("Benno", "ben-oh", series="Bookworm", book="v1").scope == "book"  # a book is narrower
+    assert store.rename_series("Bookworm", "Ascendance of a Bookworm") == 1  # Myne moves; Lutz keeps the target's
+    listing = store.listing(None, "ascendance of a bookworm")
+    assert sorted((e["term"], e["respelling"]) for e in listing["series"]) == [("Lutz", "lootz"), ("Myne", "my-nuh")]
+    assert listing["global"] == [] and all(e["scope"] == "series" for e in listing["series"])

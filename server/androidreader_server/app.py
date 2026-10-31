@@ -324,17 +324,40 @@ async def voice_design(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------- pronunciations
 
 
+def _series_of(app: web.Application, book: str | None) -> str:
+    """The series a book belongs to ("" without a book or a library)."""
+    if not book:
+        return ""
+    try:
+        from .series import book_series
+
+        return book_series(app, book)
+    except (KeyError, ValueError, OSError):
+        return ""
+
+
 async def pronunciations(request: web.Request) -> web.Response:
-    return web.json_response(request.app[PRON_KEY].listing(request.query.get("book") or None))
+    """?book= (that book's entries, its series' and the global ones) or ?series= (a series' and global)."""
+    book = request.query.get("book") or None
+    series = request.query.get("series") or _series_of(request.app, book)
+    return web.json_response(request.app[PRON_KEY].listing(book, series or None))
 
 
 async def pronunciation_add(request: web.Request) -> web.Response:
+    """{term, respelling?, phonemes?, case_sensitive?, scope: "book"|"series"|"global", book?, series?}.
+    scope "series" with a book means that book's series."""
     body = await _json_body(request)
-    book = _str(body, "book") if _str(body, "scope") != "global" else ""
+    scope = _str(body, "scope") or ("book" if _str(body, "book") else "series" if _str(body, "series") else "global")
+    book = _str(body, "book") if scope == "book" else ""
+    series = (_str(body, "series") or _series_of(request.app, _str(body, "book"))) if scope == "series" else ""
+    if scope == "book" and not book:
+        return _json_error(400, "Say which book")
+    if scope == "series" and not series:
+        return _json_error(400, "Say which series (or a book of it)")
     try:
         entry = request.app[PRON_KEY].add(
             _str(body, "term"), _str(body, "respelling"), phonemes=_str(body, "phonemes"),
-            case_sensitive=bool(body.get("case_sensitive")), book=book or None,
+            case_sensitive=bool(body.get("case_sensitive")), book=book or None, series=series or None,
         )
     except ValueError as exc:
         return _json_error(400, str(exc))
@@ -402,7 +425,7 @@ class SynthesisPlan:
         if self.voice is None:
             raise EngineError("No voices on the PC yet. Import or upload one first.", 503)
         book = _str(body, "book") or None
-        entries = app[PRON_KEY].for_book(book)
+        entries = app[PRON_KEY].for_book(book, _series_of(app, book) or None)
         extra = _extra_entries(body)
         if extra:
             keys = {e.key() for e in extra}

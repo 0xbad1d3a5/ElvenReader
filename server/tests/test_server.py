@@ -542,3 +542,26 @@ async def test_compressed_speech_for_the_website(client):
     resp, body = await tts(client, text="alpha beta gamma delta", format="mp3")
     assert resp.headers["Content-Type"] == "audio/mpeg" and resp.headers["X-Cache"] == "hit"
     assert body[:3] == b"ID3" or body[0] == 0xFF
+
+async def test_series_pronunciations_apply_to_every_book_of_the_series(client):
+    from androidreader_server.dramatize import DRAMA_STORE_KEY
+
+    store = client.server.app[DRAMA_STORE_KEY]
+    for book, title in (("bw1", "Bookworm, Vol. 1"), ("bw2", "Bookworm, Vol. 2"), ("other", "Other Tale")):
+        store.save_book(book, {"title": title, "chapters": []})
+    r = await client.post("/api/pronunciations", json={"term": "Myne", "respelling": "my nuh",
+                                                       "scope": "series", "book": "bw1"}, headers=AUTH)
+    assert r.status == 201 and (await r.json())["series"] == "Bookworm"
+    for book, words in (("bw1", 2), ("bw2", 2), ("other", 1)):
+        _, body = await tts(client, text="Myne", book=book, cache=False)
+        assert len(body) == words * WORD_BYTES, book
+    listing = await (await client.get("/api/pronunciations?book=bw2", headers=AUTH)).json()
+    assert listing["series_name"] == "Bookworm" and [e["term"] for e in listing["series"]] == ["Myne"]
+    listing = await (await client.get("/api/pronunciations?series=Bookworm", headers=AUTH)).json()
+    assert [e["term"] for e in listing["series"]] == ["Myne"]
+    # renaming the series keeps them
+    await client.post("/api/series/rename", json={"from": "Bookworm", "to": "Ascendance of a Bookworm"}, headers=AUTH)
+    _, body = await tts(client, text="Myne", book="bw2", cache=False)
+    assert len(body) == 2 * WORD_BYTES
+    assert (await client.post("/api/pronunciations", json={"term": "X", "respelling": "y", "scope": "series"},
+                              headers=AUTH)).status == 400

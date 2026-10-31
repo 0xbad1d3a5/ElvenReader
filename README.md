@@ -572,14 +572,25 @@ cached audio, and undoing an edit finds the old clips again.
 
 ## 7. Pronunciations
 
-The server keeps a pronunciation dictionary and applies it before synthesis. Each entry has a
-respelling such as `her-MY-oh-nee`, which works with every model; stress capitals are lower-cased.
-It can also have CMU/ARPAbet phonemes such as `HH ER0 M AY1 AH0 N IY0`, used by OmniVoice and
-IndexTTS. An entry applies to one book or to all books, and book entries win. Matching is
-whole-word and case-insensitive unless an entry says otherwise. It covers possessives and plurals
-(*Hermione's*) and multi-word names. Entries are part of the audio cache key, so a changed fix never
-reuses stale audio. The website doesn't edit them yet; use `GET/POST /api/pronunciations` and
-`PATCH/DELETE /api/pronunciations/{id}` (see *API*). Entries made with the Android app still apply.
+When the voice says a name or word wrong, fix it for the whole series:
+
+* **Select the word** in a book's text: a *🗣 Pronunciation…* button appears next to it. Or use
+  *Pronunciations…* in the cast's ⋯ menu, *How the name is said…* in a character's ⋯ menu, or
+  *Pronunciations…* on the **Series** page.
+* Type how it sounds (`MY-nuh`, `BEN-oh`; capitals mark the stressed part), press **▶ With the
+  fix** to hear it in the sentence it came from (**▶ Now** plays it as it is said today), and
+  **Save**. The dialog offers the series' character names as one-click starting points.
+* Choose where it applies: **every book of the series** (default), **only this book**, or **all
+  books**. For the same word, the narrower one wins (book over series over all books).
+  Renaming or merging a series keeps its pronunciations.
+
+How it works: the fixes are applied to the text before synthesis, so they work with every voice and
+model. A respelling works everywhere (stress capitals are lower-cased before speaking); *Advanced*
+also takes CMU/ARPAbet phonemes such as `HH ER0 M AY1 AH0 N IY0`, used by OmniVoice and IndexTTS.
+Matching is whole-word and case-insensitive unless *Match case* is ticked (*May* the name, not
+*may*), and covers possessives and plurals (*Hermione's*) and multi-word names. Fixes are part of
+the audio cache key, so a changed fix never reuses stale audio. The API is `GET/POST
+/api/pronunciations` and `PATCH/DELETE /api/pronunciations/{id}` (see *API*).
 
 ## Troubleshooting
 
@@ -610,7 +621,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET/POST /api/voices` · `DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store (`?all=1` adds character voices, `?details=1` everything with who uses it). |
 | `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?, age?}` (`age` -1/1: one age group younger/older; returns the new `description`, `age_from`, `age_to`) · listen · keep one · Whisper transcript of an uploaded clip. |
-| `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
+| `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary: `GET ?book=` (that book's, its series' and the global entries) or `?series=`; `POST {term, respelling?, phonemes?, case_sensitive?, scope: "series"\|"book"\|"global", book?, series?}` (`series` scope with a `book` = that book's series). |
 | `POST /api/tts` | Body `{text, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?, format?}`. By default chunked **PCM16LE mono** as it is made, rate in `X-Sample-Rate`; `format: "opus"` (Ogg Opus 64 kbit/s, what the website uses) or `"mp3"` (96 kbit/s, for browsers without Opus) returns the whole passage compressed, about 18% / 25% of the PCM size. `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `POST /api/library/import` | Add a book: multipart `epub` file (any device; what the website uses), or `{"path": ...}` (from the PC only, for `process_book.py`); options `analyze`, `cast` (default true), `reanalyze`, `engine`, `series` (default: from the title). |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Books with analysis/cast status · a book's paragraphs, quotations and pictures · its cover. |
