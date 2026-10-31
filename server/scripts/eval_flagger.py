@@ -199,8 +199,8 @@ def cmd_route(args) -> None:
     sys.path.insert(0, str(SERVER / "scripts"))
     import aiohttp
 
-    from androidreader_server import dramatize as dz
-    from androidreader_server.config import load_config
+    from elvenreader_server import dramatize as dz
+    from elvenreader_server.config import load_config
     from eval_dossier import score
 
     cfg = load_config()

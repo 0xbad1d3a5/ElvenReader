@@ -15,9 +15,9 @@ function Get-Uv {
 }
 
 function Get-ModelsDir {
-    # Same rule as the server: ANDROIDREADER_MODELS, else "models_dir" in data\config.json, else data\models.
-    if ($env:ANDROIDREADER_MODELS) { return $env:ANDROIDREADER_MODELS }
-    $data = if ($env:ANDROIDREADER_DATA) { $env:ANDROIDREADER_DATA } else { Join-Path (Split-Path $PSScriptRoot) "data" }
+    # Same rule as the server: ELVENREADER_MODELS, else "models_dir" in data\config.json, else data\models.
+    if ($env:ELVENREADER_MODELS) { return $env:ELVENREADER_MODELS }
+    $data = if ($env:ELVENREADER_DATA) { $env:ELVENREADER_DATA } else { Join-Path (Split-Path $PSScriptRoot) "data" }
     $config = Join-Path $data "config.json"
     if (Test-Path $config) {
         $cfg = Get-Content $config -Raw | ConvertFrom-Json

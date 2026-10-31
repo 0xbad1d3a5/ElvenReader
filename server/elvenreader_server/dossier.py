@@ -19,7 +19,7 @@ import logging
 import re
 import time
 
-logger = logging.getLogger("androidreader.dossier")
+logger = logging.getLogger("elvenreader.dossier")
 
 FIELDS = ["gender", "apparent_age", "form", "true_nature", "personality", "speech_style", "relationships",
           "introduced_as", "voice"]

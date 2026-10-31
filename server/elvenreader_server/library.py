@@ -17,7 +17,7 @@ from aiohttp import web
 
 from . import epub
 
-logger = logging.getLogger("androidreader.drama")
+logger = logging.getLogger("elvenreader.drama")
 _LOOPBACK = {"127.0.0.1", "::1"}
 
 

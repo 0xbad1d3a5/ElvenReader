@@ -2,11 +2,11 @@ import asyncio
 
 import pytest
 
-from androidreader_server import dramatize as dz
-from androidreader_server.app import make_app
+from elvenreader_server import dramatize as dz
+from elvenreader_server.app import make_app
 from test_server import AUTH, SPECS, make_cfg
-from androidreader_server.audio import wav_bytes
-from androidreader_server.voices import VoiceStore
+from elvenreader_server.audio import wav_bytes
+from elvenreader_server.voices import VoiceStore
 
 PARAS = [
     "Chapter One",
@@ -194,7 +194,7 @@ async def test_book_list_text_cover_and_viewer(drama_client):
     # On this PC the viewer pages carry the token for their API calls.
     for path in ("/books", "/books/book1"):
         page = await (await c.get(path)).text()
-        assert "AndroidReader books" in page and '"testtoken"' in page and "__TOKEN__" not in page
+        assert "ElvenReader books" in page and '"testtoken"' in page and "__TOKEN__" not in page
 
 
 async def test_viewer_is_served_on_the_lan_without_the_token(drama_client):
@@ -203,7 +203,7 @@ async def test_viewer_is_served_on_the_lan_without_the_token(drama_client):
     from aiohttp import web
     from aiohttp.test_utils import make_mocked_request
 
-    from androidreader_server.app import auth_middleware, viewer_page
+    from elvenreader_server.app import auth_middleware, viewer_page
 
     app = drama_client.server.app
     lan = mock.Mock(get_extra_info=lambda *a, **k: ("192.168.1.9", 1234))
@@ -405,7 +405,7 @@ def test_mixed_tense_books_are_chunked_by_tense_and_hint_the_narrator():
 
 
 def test_dossier_merge_revises_and_tracks_narrator_and_scenes():
-    from androidreader_server import dossier as ds
+    from elvenreader_server import dossier as ds
 
     script = {"characters": {}, "lines": {}}
     first = {"narrator": "Sasaki", "present": ["Sasaki", "the old woman"], "characters": [
@@ -476,7 +476,7 @@ async def test_two_pass_analysis_uses_the_dossier_and_keeps_user_edits(aiohttp_c
 
 
 def test_series_name_from_titles():
-    from androidreader_server.series import series_name
+    from elvenreader_server.series import series_name
 
     assert series_name("Sasaki and Peeps, Vol. 10") == "Sasaki and Peeps"
     assert series_name("Sasaki and Peeps v10 [Yen Press]") == "Sasaki and Peeps"
@@ -486,7 +486,7 @@ def test_series_name_from_titles():
 
 
 async def test_series_memory_carries_cast_and_voices_to_the_next_volume(drama_client):
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     c = drama_client
     app = c.server.app
@@ -501,7 +501,7 @@ async def test_series_memory_carries_cast_and_voices_to_the_next_volume(drama_cl
 
     store = app[DRAMA_STORE_KEY]
     store.save_book("vol2", {**book_payload(), "title": "Tea Saga, Vol. 2"})
-    from androidreader_server import series as sr
+    from elvenreader_server import series as sr
 
     s2 = store.script("vol2")
     assert sr.seed(app, "vol2", s2) >= 1
@@ -526,7 +526,7 @@ def test_prune_keeps_speakers_narrators_user_edits_and_chosen_voices():
 
 
 def test_consolidation_merges_duplicates_drops_groups_and_fills_gaps():
-    from androidreader_server import dossier as ds
+    from elvenreader_server import dossier as ds
 
     script = {"characters": {}, "lines": {}, "corrections": {}}
     ds.merge_update(script, {"narrator": "", "present": ["Robot Girl"], "characters": [
@@ -746,7 +746,7 @@ def test_later_passages_may_revise_earlier_lines_but_never_corrections():
 
 
 def test_tiers_follow_the_model_within_guard_rails_and_the_reader_wins():
-    from androidreader_server import roles
+    from elvenreader_server import roles
 
     ev = {"name": "X", "lines": 10, "share": 0.002, "chapters_with_lines": 1, "chapters_mentioned": 1,
           "first": 1, "last": 1, "named": True, "narrates": False, "chapters": 10}
@@ -787,8 +787,8 @@ def test_casting_plan_by_tier():
 
 
 async def test_tiers_from_analysis_override_series_and_bulk_voices(drama_client):
-    from androidreader_server import series as sr
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server import series as sr
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     c = drama_client
     app = c.server.app
@@ -836,7 +836,7 @@ async def test_tiers_from_analysis_override_series_and_bulk_voices(drama_client)
 
 
 def test_series_tier_floor_comes_from_other_volumes_only():
-    from androidreader_server.series import _higher
+    from elvenreader_server.series import _higher
 
     assert _higher("extra", "main") == "main"  # main in an earlier volume stays main
     assert _higher("main", "supporting") == "main"
@@ -863,7 +863,7 @@ def test_descriptive_names_are_shown_capitalised_and_still_match():
     assert dz.normalize_names(old) == 1
     assert old["characters"]["guard"] == {"name": "Guard", "aliases": ["a guard"], "unnamed": True}
     assert old["characters"]["akutsu"]["name"] == "Mr. Akutsu" and "unnamed" not in old["characters"]["akutsu"]
-    from androidreader_server import roles
+    from elvenreader_server import roles
 
     ev = roles.evidence({"chapters": []}, {**old, "characters": old["characters"]})
     assert ev["guard"]["named"] is False and ev["akutsu"]["named"] is True
@@ -927,7 +927,7 @@ async def test_characters_are_described_by_their_own_voice(drama_client):
 
 
 def test_profile_updates_merge_specifics_and_never_touch_the_readers_fields():
-    from androidreader_server import profile as pf
+    from elvenreader_server import profile as pf
 
     c = {"name": "F"}
     assert pf.merge(c, {"gender": "female", "apparent_age": "unknown", "appearance": "young girl",
@@ -950,7 +950,7 @@ def test_profile_updates_merge_specifics_and_never_touch_the_readers_fields():
 
 
 def test_old_dossiers_become_profiles():
-    from androidreader_server import profile as pf
+    from elvenreader_server import profile as pf
 
     s = {"characters": {
         "f": {"name": "Futarishizuka", "temperament": "calm, perceptive", "accent": "neutral",
@@ -1015,7 +1015,7 @@ async def test_an_uploaded_epub_is_parsed_analysed_and_cast(drama_client, tmp_pa
     r = await c.post("/api/library/import", data=form, headers=AUTH)
     assert r.status == 200, await r.text()
     book = await r.json()
-    from androidreader_server import epub
+    from elvenreader_server import epub
 
     assert book["id"] == epub.book_id(path) and book["title"] == "Tea Party"
     s = await wait_done(c, book["id"])
@@ -1124,7 +1124,7 @@ def test_canonical_names_follow_the_text():
     assert s["characters"][typed]["name"] == "Mother dear"
 
 def test_profile_placeholders_are_not_descriptions():
-    from androidreader_server import profile
+    from elvenreader_server import profile
 
     for t in ("none described", "Not mentioned", "N/A", "unknown", "nothing specified", "No details given"):
         assert profile.blank(t), t
@@ -1136,7 +1136,7 @@ def test_profile_placeholders_are_not_descriptions():
     assert "appears as" not in profile.voice_description({"profile": {"appearance": "none described"}})
 
 def test_volume_key_orders_volumes():
-    from androidreader_server.series import volume_key
+    from elvenreader_server.series import volume_key
 
     assert volume_key("Sasaki and Peeps, Vol. 10") == [10]
     assert volume_key("Ascendance of a Bookworm: Part 2 Volume 3") == [2, 3]
@@ -1147,8 +1147,8 @@ def test_volume_key_orders_volumes():
 
 
 def test_applying_a_series_keeps_voices_the_reader_chose():
-    from androidreader_server import series as sr
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server import series as sr
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     data = {"name": "Saga", "books": {"v1": "Saga 1"}, "characters": {
         "alice": {"name": "Alice", "aliases": [], "voice": "series-alice", "books": ["v1"]},
@@ -1187,7 +1187,7 @@ async def wait_cast(c, book):
 
 
 async def test_series_can_be_changed_applied_renamed_and_merged(drama_client):
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     c = drama_client
     app = c.server.app
@@ -1242,7 +1242,7 @@ async def test_series_can_be_changed_applied_renamed_and_merged(drama_client):
     assert (await c.post("/api/series/rename", json={"from": "", "to": "x"}, headers=AUTH)).status == 400
 
 async def test_setting_a_series_keeps_the_title_of_a_book_without_meta(drama_client):
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     c = drama_client
     store = c.server.app[DRAMA_STORE_KEY]
@@ -1253,8 +1253,8 @@ async def test_setting_a_series_keeps_the_title_of_a_book_without_meta(drama_cli
     assert store.summary("old")["title"] == "Old Tale, Vol. 3"
 
 async def test_a_characters_voice_follows_across_the_series(drama_client):
-    from androidreader_server.app import VOICES_KEY
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server.app import VOICES_KEY
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     c = drama_client
     app = c.server.app
@@ -1294,11 +1294,11 @@ async def test_a_characters_voice_follows_across_the_series(drama_client):
 async def test_automatic_casting_waits_while_someone_listens(drama_client, monkeypatch):
     import time
 
-    from androidreader_server.app import ENGINES_KEY
+    from elvenreader_server.app import ENGINES_KEY
 
     app = drama_client.server.app
     manager = app[ENGINES_KEY]
-    from androidreader_server.app import CONFIG_KEY
+    from elvenreader_server.app import CONFIG_KEY
 
     monkeypatch.setattr(app[CONFIG_KEY], "llm_mode", "shared")  # the listening wait of the other modes
     monkeypatch.setattr(dz, "LISTEN_QUIET_S", 0.6)
@@ -1320,7 +1320,7 @@ async def _fast_sleep(s):
 
 
 async def test_analysis_runs_while_reading_and_waits_while_designing(drama_client):
-    from androidreader_server.activity import ACTIVITY_KEY
+    from elvenreader_server.activity import ACTIVITY_KEY
 
     c = drama_client
     analyzer = c.server.app[dz.ANALYZER_KEY]
@@ -1340,7 +1340,7 @@ async def test_analysis_runs_while_reading_and_waits_while_designing(drama_clien
 
 
 async def test_steps_follow_the_state_of_the_site(drama_client):
-    from androidreader_server.activity import ACTIVITY_KEY
+    from elvenreader_server.activity import ACTIVITY_KEY
 
     app = drama_client.server.app
     analyzer, activity = app[dz.ANALYZER_KEY], app[ACTIVITY_KEY]
@@ -1369,7 +1369,7 @@ async def test_steps_follow_the_state_of_the_site(drama_client):
 
 
 async def test_using_the_site_is_tracked(drama_client):
-    from androidreader_server.activity import ACTIVITY_KEY
+    from elvenreader_server.activity import ACTIVITY_KEY
 
     c = drama_client
     activity = c.server.app[ACTIVITY_KEY]

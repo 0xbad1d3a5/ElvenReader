@@ -1,4 +1,4 @@
-"""Engine worker process: ``python -m androidreader_server.engines.worker --engine ID``.
+"""Engine worker process: ``python -m elvenreader_server.engines.worker --engine ID``.
 
 Loads one model and synthesizes requests sent by the server over stdin,
 streaming results back over a private copy of stdout (see protocol.py).
@@ -22,7 +22,7 @@ from . import protocol
 
 def _prepare_environment(models_dir: str) -> None:
     if models_dir:
-        os.environ["ANDROIDREADER_MODELS"] = models_dir
+        os.environ["ELVENREADER_MODELS"] = models_dir
         os.environ.setdefault("HF_HOME", os.path.join(models_dir, "hf"))
         os.environ.setdefault("MODELSCOPE_CACHE", os.path.join(models_dir, "modelscope"))
         os.environ.setdefault("TORCH_HOME", os.path.join(models_dir, "torch"))

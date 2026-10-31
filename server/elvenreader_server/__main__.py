@@ -1,4 +1,4 @@
-"""Entry point: ``python -m androidreader_server``."""
+"""Entry point: ``python -m elvenreader_server``."""
 from __future__ import annotations
 
 import argparse
@@ -22,7 +22,7 @@ VOICESTUDIO_VOICES = Path(os.path.expandvars(r"%APPDATA%\OmniVoice\voices"))
 
 def _print_addresses(cfg) -> None:
     urls = server_urls(cfg.port, cfg.extra_urls)
-    print(f"\nAndroidReader server {__version__}")
+    print(f"\nElvenReader server {__version__}")
     print(f"  Listening on   : {cfg.host}:{cfg.port}")
     print(f"  Models         : {cfg.models_path}")
     print(f"  Default engine : {cfg.default_engine}")
@@ -48,7 +48,7 @@ def _print_addresses(cfg) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="androidreader_server", description=__doc__)
+    parser = argparse.ArgumentParser(prog="elvenreader_server", description=__doc__)
     parser.add_argument("--host", help="bind address (default from config: 0.0.0.0)")
     parser.add_argument("--port", type=int, help="port (default from config: 3950)")
     parser.add_argument("--engine", help=f"default engine ({', '.join(ENGINES)})")

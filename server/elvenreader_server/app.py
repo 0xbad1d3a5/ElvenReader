@@ -1,4 +1,4 @@
-"""aiohttp application: the AndroidReader server's API and web pages."""
+"""aiohttp application: the ElvenReader server's API and web pages."""
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +37,7 @@ from .text import (
 )
 from .voices import VoiceStore
 
-logger = logging.getLogger("androidreader")
+logger = logging.getLogger("elvenreader")
 
 CONFIG_KEY = web.AppKey("config", ServerConfig)
 ENGINES_KEY = web.AppKey("engines", EngineManager)
@@ -97,7 +97,7 @@ def _str(body: dict, key: str) -> str:
 
 
 async def ping(request: web.Request) -> web.Response:
-    return web.json_response({"service": "androidreader-server", "version": __version__})
+    return web.json_response({"service": "elvenreader-server", "version": __version__})
 
 
 async def health(request: web.Request) -> web.Response:
@@ -652,10 +652,10 @@ async def index(request: web.Request) -> web.Response:
     cfg = request.app[CONFIG_KEY]
     urls = server_urls(cfg.port, cfg.extra_urls)
     parts = [
-        "<!doctype html><html><head><title>AndroidReader server</title>"
+        "<!doctype html><html><head><title>ElvenReader server</title>"
         "<style>body{font-family:sans-serif;margin:2em}.card{display:inline-block;margin:1em;"
         "padding:1em;border:1px solid #ccc;border-radius:.5em;vertical-align:top}</style></head><body>",
-        "<h2>AndroidReader server</h2>",
+        "<h2>ElvenReader server</h2>",
         "<p><a href=\"/books\">Open the library</a> on this PC.</p>",
     ]
     if not urls:

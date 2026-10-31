@@ -1,4 +1,4 @@
-# AndroidReader
+# ElvenReader
 
 Listen to your EPUBs read by high-quality voice models running on **your own PC**, in your browser,
 at home or away. No cloud service: a PC server plus its website.
@@ -16,7 +16,7 @@ at home or away. No cloud service: a PC server plus its website.
 flowchart LR
     B[Browser<br/>library + reader] -- "HTTP + token<br/>home network or your VPN" --> S
     subgraph PC
-      S[androidreader_server<br/>port 3950] --> W[engine worker<br/>one TTS model on the GPU]
+      S[elvenreader_server<br/>port 3950] --> W[engine worker<br/>one TTS model on the GPU]
       S --> V[(books, voices, pronunciations,<br/>audio cache)]
       S --> L[llama.cpp LLM<br/>book analysis]
     end
@@ -101,8 +101,8 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `voice_design_engine`, `designer_idle_s` | `qwen3tts`, `180` | Creates character voices (must follow free-text descriptions; Qwen3-TTS); the designer is unloaded after this many seconds without designs. |
 | `cast_supporting_voices` | `12` | How many supporting characters (most lines first) get a designed voice of their own; main characters and narrators always do, extras share pool voices. |
 
-Environment overrides: `ANDROIDREADER_PORT`, `ANDROIDREADER_HOST`, `ANDROIDREADER_TOKEN`,
-`ANDROIDREADER_DATA`, `ANDROIDREADER_MODELS`. Every request is logged with its engine, audio
+Environment overrides: `ELVENREADER_PORT`, `ELVENREADER_HOST`, `ELVENREADER_TOKEN`,
+`ELVENREADER_DATA`, `ELVENREADER_MODELS`. Every request is logged with its engine, audio
 length, time to first audio and RTF in `server\data\server.log`.
 
 ### Voices
@@ -127,7 +127,7 @@ reach the PC through it). Without this rule other devices can't open the library
 
 ```powershell
 $a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File D:\Dev\AndroidReader\server\run-server.ps1"
-Register-ScheduledTask -TaskName "AndroidReader server" -Action $a -Trigger (New-ScheduledTaskTrigger -AtLogOn)
+Register-ScheduledTask -TaskName "ElvenReader server" -Action $a -Trigger (New-ScheduledTaskTrigger -AtLogOn)
 ```
 
 
@@ -183,7 +183,7 @@ cast size, and can **rename** a series (for all its books) or **merge** it into 
 characters become one; the other series' voices win).
 
 Book IDs are the first 16 hex digits of the EPUB file's SHA-1, and each quotation's ID is
-`c<chapter>p<paragraph>q<offset>`. The parser (`androidreader_server/epub.py`) is a port of the
+`c<chapter>p<paragraph>q<offset>`. The parser (`elvenreader_server/epub.py`) is a port of the
 retired Android app's parser and gives identical chapters, paragraphs, quotation IDs and pictures.
 Chapters follow the book's own table of contents: a chapter that a publisher split into several
 files (often at every illustration) is joined back into one. Pictures are attached to the paragraph

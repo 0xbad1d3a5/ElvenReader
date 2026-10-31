@@ -17,7 +17,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from androidreader_server.dramatize import quote_regions  # noqa: E402
+from elvenreader_server.dramatize import quote_regions  # noqa: E402
 
 
 class Paras(HTMLParser):

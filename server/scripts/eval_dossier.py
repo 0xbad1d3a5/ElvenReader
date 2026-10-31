@@ -24,9 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import aiohttp  # noqa: E402
 
-from androidreader_server import dossier as ds  # noqa: E402
-from androidreader_server import dramatize as dz  # noqa: E402
-from androidreader_server.config import load_config  # noqa: E402
+from elvenreader_server import dossier as ds  # noqa: E402
+from elvenreader_server import dramatize as dz  # noqa: E402
+from elvenreader_server.config import load_config  # noqa: E402
 
 
 def _norm(x: str) -> str:

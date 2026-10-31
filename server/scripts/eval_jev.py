@@ -32,8 +32,8 @@ sys.path.insert(0, str(SERVER))
 
 import aiohttp  # noqa: E402
 
-from androidreader_server import dramatize as dz  # noqa: E402
-from androidreader_server.config import load_config  # noqa: E402
+from elvenreader_server import dramatize as dz  # noqa: E402
+from elvenreader_server.config import load_config  # noqa: E402
 
 OTHER, NOBODY = "someone else (not listed)", "nobody (a sign, a title or quoted words)"
 QUESTION = "Who says the quotation marked with \u27e6 \u27e7?"

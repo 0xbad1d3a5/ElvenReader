@@ -53,7 +53,7 @@ ENGINES: dict[str, EngineSpec] = {
         EngineSpec(
             id="omnivoice",
             label="OmniVoice",
-            module="androidreader_server.engines.omnivoice_engine",
+            module="elvenreader_server.engines.omnivoice_engine",
             description="k2-fsa diffusion-LM TTS, 600+ languages; the model VoiceStudio uses, "
             "so imported voices sound the same. 32 decoding steps (quality preset).",
             licence="Apache-2.0",
@@ -69,7 +69,7 @@ ENGINES: dict[str, EngineSpec] = {
         EngineSpec(
             id="fish_s2",
             label="Fish Audio S2 Pro",
-            module="androidreader_server.engines.fish_s2_engine",
+            module="elvenreader_server.engines.fish_s2_engine",
             description="4.4B dual-AR model; best measured clarity and expressiveness. Free-form "
             "inline delivery tags such as [shouting] or [whispers]. 44.1 kHz.",
             licence="Fish Audio Research License (non-commercial)",
@@ -83,7 +83,7 @@ ENGINES: dict[str, EngineSpec] = {
         EngineSpec(
             id="indextts",
             label="IndexTTS 2.5",
-            module="androidreader_server.engines.indextts_engine",
+            module="elvenreader_server.engines.indextts_engine",
             description="bilibili's expressive cloning model; emotion from a delivery text, "
             "CMU phoneme overrides. en/zh/ja/es/ar.",
             licence="bilibili IndexTTS licence (non-commercial)",
@@ -97,7 +97,7 @@ ENGINES: dict[str, EngineSpec] = {
         EngineSpec(
             id="qwen3tts",
             label="Qwen3-TTS 1.7B",
-            module="androidreader_server.engines.qwen3tts_engine",
+            module="elvenreader_server.engines.qwen3tts_engine",
             description="Alibaba Qwen3-TTS Base for cloning, plus the VoiceDesign model to create "
             "character voices from a description. 10 languages.",
             licence="Apache-2.0",
@@ -116,7 +116,7 @@ ENGINES: dict[str, EngineSpec] = {
 FAKE_ENGINE = EngineSpec(
     id="fake",
     label="Test tone",
-    module="androidreader_server.engines.fake_engine",
+    module="elvenreader_server.engines.fake_engine",
     description="Generates a tone per character; used by the tests.",
     delivery="instruct",
     phonemes="cmu_brackets",

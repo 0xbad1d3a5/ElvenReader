@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 
-logger = logging.getLogger("androidreader.drama")
+logger = logging.getLogger("elvenreader.drama")
 
 FIELDS = ("gender", "apparent_age", "appearance", "speech_style", "notes")
 GENDERS = ("male", "female", "unknown")

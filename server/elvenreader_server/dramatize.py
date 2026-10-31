@@ -27,7 +27,7 @@ from pathlib import Path
 
 from aiohttp import ClientConnectionError, web
 
-logger = logging.getLogger("androidreader.drama")
+logger = logging.getLogger("elvenreader.drama")
 
 NARRATOR = "NARRATOR"
 # In "auto" mode the LLM uses the GPU only after this long without speech requests.

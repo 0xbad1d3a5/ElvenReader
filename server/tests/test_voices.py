@@ -1,9 +1,9 @@
 import sqlite3
 import struct
 
-from androidreader_server.audio import wav_bytes
-from androidreader_server.text import split_for_synthesis, trailing_pause_ms
-from androidreader_server.voices import VoiceStore
+from elvenreader_server.audio import wav_bytes
+from elvenreader_server.text import split_for_synthesis, trailing_pause_ms
+from elvenreader_server.voices import VoiceStore
 
 WAV = wav_bytes(b"\x10\x00" * 2400, 24000)
 

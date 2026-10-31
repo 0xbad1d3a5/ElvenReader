@@ -23,8 +23,8 @@ sys.path.insert(0, str(SERVER / "scripts"))
 
 import aiohttp  # noqa: E402
 
-from androidreader_server import dramatize as dz  # noqa: E402
-from androidreader_server.config import load_config  # noqa: E402
+from elvenreader_server import dramatize as dz  # noqa: E402
+from elvenreader_server.config import load_config  # noqa: E402
 from eval_attribution import gold_book, names_for  # noqa: E402
 from eval_dossier import score as score_book  # noqa: E402
 

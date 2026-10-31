@@ -27,7 +27,7 @@ class Engine(BaseEngine):
 
         # fish-speech resolves some resources relative to the project root.
         src = self.options.get("source_dir") or os.path.join(
-            os.environ.get("ANDROIDREADER_MODELS", "."), "src", "fish-speech"
+            os.environ.get("ELVENREADER_MODELS", "."), "src", "fish-speech"
         )
         if os.path.isdir(src):
             os.chdir(src)

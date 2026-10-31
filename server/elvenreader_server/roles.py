@@ -13,7 +13,7 @@ import time
 
 from aiohttp import web
 
-logger = logging.getLogger("androidreader.drama")
+logger = logging.getLogger("elvenreader.drama")
 
 ROLES = ("main", "supporting", "extra")
 RANK = {r: i for i, r in enumerate(reversed(ROLES))}  # extra 0, supporting 1, main 2

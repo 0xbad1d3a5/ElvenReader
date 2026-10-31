@@ -1,4 +1,4 @@
-# Starts the AndroidReader server, creating its virtual environment on first run.
+# Starts the ElvenReader server, creating its virtual environment on first run.
 # Extra arguments are passed through, e.g.:  .\run-server.ps1 --port 3960 --engine fish_s2
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -12,4 +12,4 @@ if (-not (Test-Path $python)) {
     & $uv pip install --python $python -e ".[test]"
 }
 
-& $python -m androidreader_server @args
+& $python -m elvenreader_server @args

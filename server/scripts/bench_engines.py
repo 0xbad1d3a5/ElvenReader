@@ -16,11 +16,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from androidreader_server.audio import trim_silence, wav_bytes  # noqa: E402
-from androidreader_server.config import load_config  # noqa: E402
-from androidreader_server.engines.manager import AudioChunk, EngineManager, StreamStart  # noqa: E402
-from androidreader_server.engines.registry import ENGINES  # noqa: E402
-from androidreader_server.voices import VoiceStore  # noqa: E402
+from elvenreader_server.audio import trim_silence, wav_bytes  # noqa: E402
+from elvenreader_server.config import load_config  # noqa: E402
+from elvenreader_server.engines.manager import AudioChunk, EngineManager, StreamStart  # noqa: E402
+from elvenreader_server.engines.registry import ENGINES  # noqa: E402
+from elvenreader_server.voices import VoiceStore  # noqa: E402
 
 PASSAGE = [
     ("The rain had not stopped for three days, and the river was rising faster than anyone in the village remembered.", None),

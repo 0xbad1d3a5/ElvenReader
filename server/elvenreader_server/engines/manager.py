@@ -24,7 +24,7 @@ from pathlib import Path
 from . import protocol
 from .registry import EngineSpec
 
-logger = logging.getLogger("androidreader.engines")
+logger = logging.getLogger("elvenreader.engines")
 
 SERVER_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -298,7 +298,7 @@ class EngineManager:
         cwd = self.models_dir / "work" / spec.id
         cwd.mkdir(parents=True, exist_ok=True)
         args = [
-            str(python), "-m", "androidreader_server.engines.worker",
+            str(python), "-m", "elvenreader_server.engines.worker",
             "--module", spec.module,
             "--options", json.dumps(options),
             "--models-dir", str(self.models_dir),

@@ -18,8 +18,13 @@ def generate_token() -> str:
     return "".join(secrets.choice(_TOKEN_ALPHABET) for _ in range(_TOKEN_LENGTH))
 
 
+def _env(name: str) -> str | None:
+    """ELVENREADER_<name>, or the ANDROIDREADER_<name> of the project's old name."""
+    return os.environ.get(f"ELVENREADER_{name}") or os.environ.get(f"ANDROIDREADER_{name}")
+
+
 def default_data_dir() -> Path:
-    env = os.environ.get("ANDROIDREADER_DATA")
+    env = _env("DATA")
     if env:
         return Path(env)
     return Path(__file__).resolve().parent.parent / "data"
@@ -162,14 +167,14 @@ def load_config(data_dir: Path | None = None) -> ServerConfig:
     cfg.data_dir = str(data_dir)
 
     # Environment overrides are applied after saving so they never get persisted.
-    if os.environ.get("ANDROIDREADER_TOKEN"):
-        cfg.token = os.environ["ANDROIDREADER_TOKEN"]
-    if os.environ.get("ANDROIDREADER_HOST"):
-        cfg.host = os.environ["ANDROIDREADER_HOST"]
-    if os.environ.get("ANDROIDREADER_PORT"):
-        cfg.port = int(os.environ["ANDROIDREADER_PORT"])
-    if os.environ.get("ANDROIDREADER_MODELS"):
-        cfg.models_dir = os.environ["ANDROIDREADER_MODELS"]
+    if _env("TOKEN"):
+        cfg.token = _env("TOKEN")
+    if _env("HOST"):
+        cfg.host = _env("HOST")
+    if _env("PORT"):
+        cfg.port = int(_env("PORT"))
+    if _env("MODELS"):
+        cfg.models_dir = _env("MODELS")
     return cfg
 
 

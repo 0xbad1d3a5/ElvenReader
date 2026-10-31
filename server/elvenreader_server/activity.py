@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 
 from aiohttp import web
 
-logger = logging.getLogger("androidreader")
+logger = logging.getLogger("elvenreader")
 
 READING, DESIGNING, IDLE = "reading", "designing", "idle"
 

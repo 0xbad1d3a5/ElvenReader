@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AndroidReader books</title>
+<title>ElvenReader books</title>
 <style>
   :root { --bg:#fafafa; --fg:#1d1d1f; --muted:#6b6b70; --line:#e2e2e6; --accent:#3557d6; --card:#fff; --hl:#fff3b0; }
   @media (prefers-color-scheme: dark) {
@@ -131,7 +131,7 @@
 <script>
 "use strict";
 const EMBEDDED_TOKEN = __TOKEN__;  // only filled in for requests from the PC itself
-const TOKEN_KEY = "androidreader-token";
+const TOKEN_KEY = "elvenreader-token";
 const TOKEN = (() => {
   const m = location.hash.match(/(?:^#|&)token=([^&]+)/);
   if (m) {
@@ -140,7 +140,7 @@ const TOKEN = (() => {
     history.replaceState(null, "", location.pathname + location.search);  // keep it out of the address bar
     return t;
   }
-  return EMBEDDED_TOKEN || localStorage.getItem(TOKEN_KEY) || "";
+  return EMBEDDED_TOKEN || localStorage.getItem(TOKEN_KEY) || localStorage.getItem("androidreader-token") || "";  // the old name's key
 })();
 const $ = (sel, el = document) => el.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
@@ -403,7 +403,7 @@ function popMenu(anchor, items) {
 
 async function libraryView() {
   $("#app").replaceChildren(
-    h("header", {}, h("h1", {}, "AndroidReader \u2014 library"), h("span", { class: "grow" }),
+    h("header", {}, h("h1", {}, "ElvenReader \u2014 library"), h("span", { class: "grow" }),
       h("button", { class: "primary", onclick: () => addBook(refresh) }, "+ Add book"),
       h("a", { href: "/books/series" }, "Series"),
       h("a", { href: "/books/voices" }, "Voices"),

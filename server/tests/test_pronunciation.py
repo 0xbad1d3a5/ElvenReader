@@ -1,7 +1,7 @@
 import pytest
 
-from androidreader_server.cache import AudioCache, cache_key
-from androidreader_server.pronunciation import (
+from elvenreader_server.cache import AudioCache, cache_key
+from elvenreader_server.pronunciation import (
     PHONEME_FORMATS,
     Entry,
     PronunciationStore,

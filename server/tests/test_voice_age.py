@@ -1,7 +1,7 @@
 """Ageing a voice description up or down (voice_age.shift_age)."""
 import pytest
 
-from androidreader_server.voice_age import current_age, shift_age
+from elvenreader_server.voice_age import current_age, shift_age
 
 
 @pytest.mark.parametrize("text,step,expected", [

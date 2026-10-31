@@ -3,7 +3,7 @@
 # Run once from an elevated PowerShell:  .\allow-firewall.ps1
 param([int]$Port = 3950)
 
-$name = "AndroidReader server (TCP $Port)"
+$name = "ElvenReader server (TCP $Port)"
 Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName $name -Direction Inbound -Protocol TCP -LocalPort $Port `
     -Action Allow -Profile Domain, Private | Out-Null

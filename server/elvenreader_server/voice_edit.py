@@ -28,7 +28,7 @@ from .audio import SilenceTrimmer, wav_bytes
 from .engines.manager import EngineError
 from .voices import Voice, VoiceStore
 
-logger = logging.getLogger("androidreader.voices")
+logger = logging.getLogger("elvenreader.voices")
 
 MAX_REF_SECONDS = 60
 CANDIDATE_TTL_S = 24 * 3600

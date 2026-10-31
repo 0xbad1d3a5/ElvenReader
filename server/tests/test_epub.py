@@ -4,8 +4,8 @@ import io
 import zipfile
 from pathlib import Path
 
-from androidreader_server import epub
-from androidreader_server.dramatize import quote_regions
+from elvenreader_server import epub
+from elvenreader_server.dramatize import quote_regions
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

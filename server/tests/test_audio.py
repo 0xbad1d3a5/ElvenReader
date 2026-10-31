@@ -3,7 +3,7 @@ import random
 
 import pytest
 
-from androidreader_server.audio import SilenceTrimmer, time_stretch
+from elvenreader_server.audio import SilenceTrimmer, time_stretch
 
 SR = 1000  # 1 sample per ms keeps the arithmetic readable
 

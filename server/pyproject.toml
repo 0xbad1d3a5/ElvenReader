@@ -1,7 +1,7 @@
 [project]
-name = "androidreader-server"
+name = "elvenreader-server"
 version = "0.2.0"
-description = "AndroidReader: a PC server and web reader that dramatizes books with local LLM and TTS models"
+description = "ElvenReader: a PC server and web reader that dramatizes books with local LLM and TTS models"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
@@ -14,17 +14,17 @@ dependencies = [
 test = ["pytest>=8", "pytest-aiohttp>=1.0"]
 
 [project.scripts]
-androidreader-server = "androidreader_server.__main__:main"
+elvenreader-server = "elvenreader_server.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["androidreader_server", "androidreader_server.engines"]
+packages = ["elvenreader_server", "elvenreader_server.engines"]
 
 [tool.setuptools.package-data]
-androidreader_server = ["web/*.html"]
+elvenreader_server = ["web/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

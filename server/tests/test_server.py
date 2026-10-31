@@ -4,12 +4,12 @@ import json
 
 import pytest
 
-from androidreader_server.app import make_app, viewer_url
-from androidreader_server.audio import wav_bytes
-from androidreader_server.config import ServerConfig, load_config
-from androidreader_server.engines.manager import EngineError, EngineManager
-from androidreader_server.engines.registry import FAKE_ENGINE
-from androidreader_server.voices import VoiceStore
+from elvenreader_server.app import make_app, viewer_url
+from elvenreader_server.audio import wav_bytes
+from elvenreader_server.config import ServerConfig, load_config
+from elvenreader_server.engines.manager import EngineError, EngineManager
+from elvenreader_server.engines.registry import FAKE_ENGINE
+from elvenreader_server.voices import VoiceStore
 
 TOKEN = "testtoken"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -46,7 +46,7 @@ async def tts(client, **body):
 
 async def test_ping_is_public(client):
     resp = await client.get("/api/ping")
-    assert (await resp.json())["service"] == "androidreader-server"
+    assert (await resp.json())["service"] == "elvenreader-server"
 
 
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer nope"}, {"Authorization": TOKEN}])
@@ -64,7 +64,7 @@ def test_viewer_links_carry_the_token_in_the_fragment():
 
 
 def test_server_urls_put_private_addresses_first_and_add_extras(monkeypatch):
-    from androidreader_server import app as app_module
+    from elvenreader_server import app as app_module
 
     monkeypatch.setattr(app_module, "lan_addresses", lambda: [
         {"ip": "203.0.113.5", "kind": "other"}, {"ip": "192.168.1.5", "kind": "lan"},
@@ -89,17 +89,17 @@ async def test_voices_listing(client):
 
 
 def test_config_creates_and_persists_token(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANDROIDREADER_TOKEN", raising=False)
+    monkeypatch.delenv("ELVENREADER_TOKEN", raising=False)
     first = load_config(tmp_path)
     assert len(first.token) == 16
     assert load_config(tmp_path).token == first.token
-    monkeypatch.setenv("ANDROIDREADER_TOKEN", "override")
+    monkeypatch.setenv("ELVENREADER_TOKEN", "override")
     assert load_config(tmp_path).token == "override"
     assert json.loads((tmp_path / "config.json").read_text())["token"] == first.token
 
 
 def test_config_tolerates_bom(tmp_path, monkeypatch):
-    monkeypatch.delenv("ANDROIDREADER_TOKEN", raising=False)
+    monkeypatch.delenv("ELVENREADER_TOKEN", raising=False)
     (tmp_path / "config.json").write_bytes(b'\xef\xbb\xbf{"token": "abc", "default_engine": "fish_s2"}')
     cfg = load_config(tmp_path)
     assert (cfg.token, cfg.default_engine) == ("abc", "fish_s2")
@@ -257,7 +257,7 @@ async def test_designing_with_another_model_keeps_the_speech_model_loaded(tmp_pa
     manager.before_designer = make_room
     try:
         await manager.preload("fake")
-        from androidreader_server.engines.manager import AudioChunk
+        from elvenreader_server.engines.manager import AudioChunk
 
         chunks = [ev async for ev in manager.design("fake_slow", "deep", "a b", 1) if isinstance(ev, AudioChunk)]
         assert chunks and manager.active == "fake" and manager.designer == "fake_slow" and freed == [1]
@@ -309,7 +309,7 @@ async def test_manager_reports_missing_venv(tmp_path):
 
 
 async def test_gpu_lease_holds_tts_until_released(tmp_path):
-    from androidreader_server.engines.manager import AudioChunk
+    from elvenreader_server.engines.manager import AudioChunk
 
     manager = EngineManager(SPECS, tmp_path)
 
@@ -387,7 +387,7 @@ async def test_voice_patch_history_and_revert(client):
 
 
 async def test_replace_reference_trims_converts_and_transcribes(client):
-    from androidreader_server.voice_edit import TRANSCRIBE_KEY
+    from elvenreader_server.voice_edit import TRANSCRIBE_KEY
 
     heard = []
 
@@ -427,7 +427,7 @@ async def test_design_candidates_then_keep_one(client):
 
 
 async def test_used_by_and_duplicate_for_one_character(client):
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     store = client.server.app[DRAMA_STORE_KEY]
     store.save_book("book1", {"title": "A Book", "chapters": []})
@@ -552,7 +552,7 @@ async def test_compressed_speech_for_the_website(client):
     assert body[:3] == b"ID3" or body[0] == 0xFF
 
 async def test_series_pronunciations_apply_to_every_book_of_the_series(client):
-    from androidreader_server.dramatize import DRAMA_STORE_KEY
+    from elvenreader_server.dramatize import DRAMA_STORE_KEY
 
     store = client.server.app[DRAMA_STORE_KEY]
     for book, title in (("bw1", "Bookworm, Vol. 1"), ("bw2", "Bookworm, Vol. 2"), ("other", "Other Tale")):

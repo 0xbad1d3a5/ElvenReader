@@ -20,7 +20,7 @@ class Engine(BaseEngine):
         from huggingface_hub import snapshot_download
 
         model_dir = self.options.get("model_dir") or os.path.join(
-            os.environ.get("ANDROIDREADER_MODELS", "."), "checkpoints", "IndexTTS-2.5"
+            os.environ.get("ELVENREADER_MODELS", "."), "checkpoints", "IndexTTS-2.5"
         )
         model_dir = os.path.abspath(model_dir)
         if not os.path.exists(os.path.join(model_dir, "config.yaml")):
