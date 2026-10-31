@@ -219,7 +219,10 @@ after them, so they never shift the text.
   (Effa, Gunther), and anyone takes an alias the book uses at least three times as often ("Myne"
   over her past-life name "Urano"); the old names stay aliases. Names you type are kept
   exactly. The speaker filter (top) also offers *quotes given to the narrator*; search finds text.
-  On a narrow screen (phone), ☰ shows the chapters and the cast.
+  On a narrow screen (phone), ☰ shows the chapters and the cast. **⛶ Reading mode** (or the F
+  key) goes full screen with just the text: the header, sidebar and player go away, and a small
+  ▶/■ and *Exit reading mode* float in the corner, fading when you don't move. Esc, the button
+  or leaving full screen ends it.
 * **Playback:** click any line or narration to play from there through the chapter with each
   speaker's voice and delivery, using the chosen narrator voice and the site's speech model
   (Settings). Sentences already

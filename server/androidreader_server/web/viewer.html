@@ -27,6 +27,14 @@
     background:var(--card); color:var(--fg); border:1px solid var(--accent); border-radius:10px; padding:8px 14px; box-shadow:0 4px 16px #0003;
     font-size:13px; }
   #gpubanner .bar { margin:6px 0 2px; } #gpubanner.ok { border-color:#3cb44b; }
+  /* Reading mode: just the text; header, sidebar and player go away. */
+  .readctl { display:none; }
+  body.reading header, body.reading aside, body.reading .player { display:none !important; }
+  body.reading .layout { grid-template-columns:1fr; height:100vh; }
+  body.reading main { padding:48px 24px 96px; }
+  body.reading .readctl { display:flex; gap:8px; position:fixed; right:18px; bottom:18px; z-index:35; transition:opacity .5s; }
+  body.reading .readctl button { box-shadow:0 2px 10px #0003; padding:6px 12px; }
+  body.reading .readctl.faded { opacity:0; pointer-events:none; }
   .serieslist { padding:12px 18px; max-width:900px; }
   .serieslist .sr { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
   .serieslist .sr h3 { margin:0 0 4px; font-size:16px; display:flex; gap:8px; align-items:center; }
@@ -110,6 +118,7 @@
     aside { display:none; border-right:0; border-bottom:1px solid var(--line); padding-bottom:16px; }
     aside.open { display:block; }
     main { padding:16px 16px 160px; overflow:visible; min-width:0; } body { overflow-x:hidden; } main .text { font-size:16px; }
+    body.reading .layout { height:auto; } body.reading main { padding:28px 16px 96px; }
     .player { left:0; }
   }
 </style>
@@ -1019,7 +1028,9 @@ async function bookView(id) {
       h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
       h("a", { href: "/books/voices" }, "Voices"),
       h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),
-      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); renderCast(); } })),
+      h("select", { id: "charFilter", onchange: (e) => { st.filterChar = e.target.value; renderText(); renderCast(); } }),
+      h("button", { class: "iconbtn", title: "Reading mode: full screen, just the text (F; Esc to leave)",
+        onclick: () => setReading(true) }, "\u26F6")),
     h("div", { class: "layout" },
       h("aside", {},
         h("h3", {}, "Chapters"), h("div", { id: "chapters" }),
@@ -1033,7 +1044,45 @@ async function bookView(id) {
       h("button", { class: "primary", id: "playBtn", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6 Play"),
       h("span", { class: "small muted" }, "Narrator voice"),
       h("select", { id: "narrator", onchange: (e) => { st.narrator = e.target.value; localStorage.setItem("narrator:" + id, st.narrator); flushAudio(); } }),
-      h("span", { class: "small", id: "playStatus" })));
+      h("span", { class: "small", id: "playStatus" })),
+    // Reading mode: only these float over the text, and fade when the pointer is still.
+    h("div", { class: "readctl", id: "readctl" },
+      h("button", { id: "readPlay", title: "Play / stop", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6"),
+      h("button", { title: "Leave reading mode (Esc)", onclick: () => setReading(false) }, "\u2715 Exit reading mode")));
+
+  /* Full-screen reading: header, sidebar and player go away; Esc, the button or leaving full screen ends it. */
+  let ctlTimer = null;
+  function wakeControls() {
+    const c = $("#readctl");
+    if (!c || !document.body.classList.contains("reading")) return;
+    c.classList.remove("faded");
+    clearTimeout(ctlTimer);
+    ctlTimer = setTimeout(() => c.classList.add("faded"), 2500);
+  }
+  function setReading(on) {
+    document.body.classList.toggle("reading", on);
+    const el = document.documentElement;
+    if (on && el.requestFullscreen && !document.fullscreenElement) el.requestFullscreen().catch(() => {});
+    if (!on && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    const cur = document.querySelector(".cur");  // keep the place
+    if (cur) setTimeout(() => cur.scrollIntoView({ block: "center" }), 100);
+    if (on) wakeControls();
+  }
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement && document.body.classList.contains("reading")) setReading(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.target.closest("input, textarea, select, [contenteditable]") || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (document.querySelector("dialog[open]")) return;
+    const reading = document.body.classList.contains("reading");
+    if (e.key === "Escape" && reading) setReading(false);
+    else if ((e.key === "f" || e.key === "F") && !e.repeat) setReading(!reading);
+  });
+  ["pointermove", "pointerdown", "keydown", "wheel"].forEach(ev => document.addEventListener(ev, wakeControls, { passive: true }));
+  const playLabel = (playing) => {
+    const b = $("#playBtn"); if (b) b.textContent = playing ? "\u25A0 Stop" : "\u25B6 Play";
+    const r = $("#readPlay"); if (r) r.textContent = playing ? "\u25A0" : "\u25B6";
+  };
 
   function renderAll() { renderStatus(); renderCast(); renderSelectors(); renderText(); }
 
@@ -1297,7 +1346,7 @@ async function bookView(id) {
   async function playFrom(i) {
     stopPlayback();
     const session = (st.session = Symbol("play"));
-    $("#playBtn").textContent = "\u25A0 Stop";
+    playLabel(true);
     for (let k = i; k < st.units.length; k++) {
       if (st.session !== session) return;
       const u = st.units[k];
@@ -1311,7 +1360,7 @@ async function bookView(id) {
         url = await fetchUnit(k);
         fetchUnit(k + 1); fetchUnit(k + 2);
       } catch (e) {
-        $("#playStatus").textContent = "Error: " + e.message; st.session = null; $("#playBtn").textContent = "\u25B6 Play"; return;
+        $("#playStatus").textContent = "Error: " + e.message; st.session = null; playLabel(false); return;
       }
       if (st.session !== session) return;
       $("#playStatus").textContent = u.qid ? "Playing a line" : "Playing narration";
@@ -1325,7 +1374,7 @@ async function bookView(id) {
   function stopPlayback() {
     st.session = null;
     st.audio.pause();
-    const b = $("#playBtn"); if (b) b.textContent = "\u25B6 Play";
+    playLabel(false);
     const s = $("#playStatus"); if (s) s.textContent = "";
   }
 
