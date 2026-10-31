@@ -365,6 +365,15 @@ function byVolume(a, b) {
   return (a.title || "").localeCompare(b.title || "");
 }
 
+/* Rename a book; resolves to the new title (null if cancelled). The volume order in a series follows the title. */
+async function renameBook(id, title) {
+  const to = (prompt("Book title. Volumes of a series are ordered by the number after \u201cVol.\u201d, \u201cVolume\u201d, " +
+    "\u201cBook\u201d or \u201cPart\u201d, e.g. \u201cSword Art Online, Vol. 19: Moon Cradle\u201d.", title) || "").trim();
+  if (!to || to === title) return null;
+  try { await api("PATCH", `/api/books/${id}`, { title: to }); } catch (e) { alert(e.message); return null; }
+  return to;
+}
+
 async function seriesView() {
   $("#app").replaceChildren(
     h("header", {}, h("a", { href: "/books" }, "\u2190 Books"), h("h1", {}, "Series"), h("span", { class: "grow" })),
@@ -400,7 +409,10 @@ async function seriesView() {
         h("div", { class: "small muted" }, `${g.volumes.length} book${g.volumes.length === 1 ? "" : "s"} \u00b7 ` +
           (g.cast ? `cast of ${g.cast} (${g.voiced} with voices)` : "no cast remembered yet")),
         g.volumes.length ? h("ol", {}, ...g.volumes.slice().sort(byVolume).map(v => h("li", {},
-          h("a", { href: `/books/${v.id}` }, v.title), v.auto ? null : h("span", { class: "small muted" }, " (set by hand)")))) : null));
+          h("a", { href: `/books/${v.id}` }, v.title), v.auto ? null : h("span", { class: "small muted" }, " (set by hand)"),
+          v.volume && v.volume.length ? null : h("span", { class: "small muted", title: "No volume number in the title, so it is listed last" }, " (no volume number)"),
+          h("button", { class: "iconbtn", title: "Rename the book (the title sets its place in the series)",
+            onclick: async () => { if (await renameBook(v.id, v.title)) render(); } }, "\u270E")))) : null));
     }
   }
   render().catch(e => tokenScreen.shown || $("#slist").replaceChildren(h("p", {}, "Error: " + e.message)));
@@ -1137,7 +1149,15 @@ async function bookView(id) {
     h("header", {},
       h("a", { href: "/books" }, "\u2190 Books"),
       h("button", { class: "iconbtn narrowonly", title: "Chapters and cast", onclick: () => setSide(!$("aside").classList.contains("open")) }, "\u2630"),
-      h("h1", {}, st.book.title), h("span", { class: "small muted", id: "seriesInfo" }),
+      h("h1", { id: "bookTitle" }, st.book.title),
+      h("button", { class: "iconbtn", title: "Rename the book (the title sets its place in its series)", onclick: async () => {
+        const to = await renameBook(st.id, st.book.title);
+        if (!to) return;
+        st.book.title = to; $("#bookTitle").textContent = to; document.title = to;
+        const t = document.querySelector("aside .sidehead strong"); if (t) t.textContent = to;
+        showSeries();
+      } }, "\u270E"),
+      h("span", { class: "small muted", id: "seriesInfo" }),
       h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
       h("a", { href: "/books/voices" }, "Voices"),
       h("input", { id: "search", placeholder: "Search text\u2026", onchange: (e) => { st.search = e.target.value.trim(); renderText(); } }),

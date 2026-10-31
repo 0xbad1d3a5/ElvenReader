@@ -1457,4 +1457,28 @@ async def test_queue_api_reorders_removes_and_survives_a_restart(aiohttp_client,
         await asyncio.sleep(0.02)
     assert q["current"]["id"] == "b1"
     assert [b["id"] for b in q["queued"]] == ["b4", "b3", "b2"]
+
+    # A series volume queues ahead of its later volumes (they inherit its cast), not at the back.
+    for b, title in (("s3", "Saga, Vol. 3"), ("s1", "Saga, Vol. 1"), ("s2", "Saga, Vol. 2: The Middle")):
+        await c.post(f"/api/books/{b}", json={**book_payload(), "title": title, "analyze": True}, headers=AUTH)
+    q = await (await c.get("/api/queue", headers=AUTH)).json()
+    assert [b["id"] for b in q["queued"]] == ["b4", "b3", "b2", "s1", "s2", "s3"]
     release.set()
+
+async def test_rename_book_sets_volume_order_keeps_series_and_survives_reupload(drama_client):
+    c = drama_client
+    for b, title in (("v1", "Saga, Vol. 1"), ("v2", "Saga 2: The Middle")):
+        await c.post(f"/api/books/{b}", json={**book_payload(), "title": title}, headers=AUTH)
+    await c.post("/api/books/v2/series", json={"series": "Saga"}, headers=AUTH)
+    assert (await c.patch("/api/books/v2", json={"title": "  "}, headers=AUTH)).status == 400
+    r = await c.patch("/api/books/v2", json={"title": "Saga, Vol. 2: The Middle"}, headers=AUTH)
+    info = await r.json()
+    assert info["title"] == "Saga, Vol. 2: The Middle" and info["volume"] == [2] and info["series"] == "Saga"
+    assert (await (await c.get("/api/books/v2", headers=AUTH)).json())["title"] == "Saga, Vol. 2: The Middle"
+    # An auto-detected series isn't lost when the new title wouldn't detect it.
+    r = await c.patch("/api/books/v1", json={"title": "The Beginning"}, headers=AUTH)
+    assert (await r.json())["series"] == "Saga"
+    # Uploading the same file again keeps the reader's title.
+    await c.post("/api/books/v2", json={**book_payload(), "title": "Saga 2: The Middle"}, headers=AUTH)
+    books = {b["id"]: b for b in (await (await c.get("/api/books", headers=AUTH)).json())["books"]}
+    assert books["v2"]["title"] == "Saga, Vol. 2: The Middle" and books["v2"]["series"] == "Saga"

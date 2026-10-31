@@ -426,9 +426,13 @@ class ScriptStore:
         keep = {}
         if meta_path.exists():
             try:
-                keep = {k: v for k, v in json.loads(meta_path.read_text(encoding="utf-8")).items() if k == "series"}
+                old = json.loads(meta_path.read_text(encoding="utf-8"))
+                keep = {k: v for k, v in old.items() if k == "series" or (old.get("title_user") and k in ("title", "title_user"))}
             except ValueError:
                 pass
+        if keep.get("title_user"):  # the reader renamed it: uploading the file again keeps their title
+            payload["title"] = keep["title"]
+            (d / "book.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         meta_path.write_text(json.dumps(book_summary(payload) | {"uploaded": time.time()} | keep,
                                         ensure_ascii=False), encoding="utf-8")
 
@@ -1477,9 +1481,12 @@ class BookQueue:
         except (OSError, ValueError):
             return []
 
-    async def put(self, book_id: str) -> None:
+    async def put(self, book_id: str, before: str | None = None) -> None:
         if book_id not in self.items:
-            self.items.append(book_id)
+            if before in self.items:
+                self.items.insert(self.items.index(before), book_id)
+            else:
+                self.items.append(book_id)
             self._save()
         self._changed.set()
 
@@ -1545,14 +1552,27 @@ class Analyzer:
             self.task.cancel()
         await self.llm.stop()
 
-    async def enqueue(self, book_id: str) -> None:
+    async def enqueue(self, book_id: str, keep_order: bool = False) -> None:
         async with self.store.lock(book_id):
             s = self.store.script(book_id)
             if s["status"] in ("queued", "running"):
                 return
             s.update(status="queued", detail="waiting for the analyser")
             self.store.save_script(book_id, s)
-        await self.queue.put(book_id)
+        await self.queue.put(book_id, before=None if keep_order else self._later_volume(book_id))
+
+    def _later_volume(self, book_id: str) -> str | None:
+        """The first waiting book that is a later volume of the same series: a volume is analysed before the
+        ones after it, so they inherit its cast and voices."""
+        from .series import book_series, volume_key
+
+        def key(b: str):
+            return book_series(self.app, b).lower(), volume_key((self.store.summary(b) or {}).get("title", ""))
+
+        series, vol = key(book_id)
+        if not vol:
+            return None
+        return next((b for b in self.queue.items if (k := key(b))[0] == series and k[1] and k[1] > vol), None)
 
     async def _run(self) -> None:
         import aiohttp
@@ -2181,6 +2201,37 @@ async def list_pictures(request: web.Request) -> web.Response:
     return web.json_response({"have": have, "need": need})
 
 
+async def rename_book(request: web.Request) -> web.Response:
+    """{"title": "..."} renames a book. Volume order in a series follows the title ("Vol. 19", "Book 3",
+    "Part 2 Volume 1"). The book stays in its series, and uploading the file again keeps the new title."""
+    from .series import book_series, series_info, series_name
+
+    store = request.app[DRAMA_STORE_KEY]
+    book_id = request.match_info["book"]
+    try:
+        book = store.book(book_id)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if book is None:
+        return web.json_response({"error": "book not uploaded"}, status=404)
+    body = await request.json() if request.can_read_body else {}
+    title = " ".join(str(body.get("title") or "").split()) if isinstance(body, dict) else ""
+    if not title:
+        return web.json_response({"error": "Give the book a title"}, status=400)
+    async with store.lock(book_id):
+        series = book_series(request.app, book_id)
+        meta_path = store.dir(book_id) / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else dict(store.summary(book_id) or {})
+        shared = any(b != book_id and book_series(request.app, b).lower() == series.lower() for b in store.ids())
+        if not meta.get("series") and shared and series_name(title).lower() != series.lower():
+            meta["series"] = series  # the new title alone wouldn't say which series: keep the one it's in
+        meta.update(title=title, title_user=True)
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        book["title"] = title
+        (store.dir(book_id) / "book.json").write_text(json.dumps(book, ensure_ascii=False), encoding="utf-8")
+    return web.json_response(series_info(request.app, book_id))
+
+
 async def _picture_target(request: web.Request) -> tuple[Path | None, web.Response | None]:
     store = request.app[DRAMA_STORE_KEY]
     path = request.query.get("path", "")
@@ -2559,7 +2610,7 @@ def setup(app: web.Application) -> None:
             s = waiting[book_id]
             s["status"] = "none"
             store.save_script(book_id, s)
-            await analyzer.enqueue(book_id)
+            await analyzer.enqueue(book_id, keep_order=book_id in saved)
         yield
         for t in app[CAST_TASKS_KEY]:
             t.cancel()
@@ -2581,6 +2632,7 @@ def setup(app: web.Application) -> None:
     r.add_get("/api/books/{book}/pictures", list_pictures)
     r.add_get("/api/books/{book}/picture", get_picture)
     r.add_post("/api/books/{book}", upload_book)
+    r.add_patch("/api/books/{book}", rename_book)
     r.add_get("/api/books/{book}/script", get_script)
     r.add_post("/api/books/{book}/analyze", analyze)
     r.add_patch("/api/books/{book}/lines/{line}", patch_line)

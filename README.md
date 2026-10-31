@@ -189,6 +189,14 @@ book also leaves its old series' memory. The **Series** page lists each series w
 cast size, and can **rename** a series (for all its books) or **merge** it into another (the same
 characters become one; the other series' voices win).
 
+**Volume order** follows each book's title: the number after *Vol.*, *Volume*, *V*, *Book* or *Part*
+(*Part 2 Volume 3* sorts as 2, 3), or a number at the very end. A book without one is listed last
+and marked *(no volume number)* on the Series page. Rename it with ✎ (next to the title on the
+book's page, or on the Series page), e.g. *Sword Art Online 19: Moon Cradle* → *Sword Art Online,
+Vol. 19: Moon Cradle*. The book stays in its series, and uploading the file again keeps your
+title. A book added for analysis queues ahead of later volumes of its series that are still
+waiting, so they inherit its cast.
+
 Book IDs are the first 16 hex digits of the EPUB file's SHA-1, and each quotation's ID is
 `c<chapter>p<paragraph>q<offset>`. The parser (`elvenreader_server/epub.py`) is a port of the
 retired Android app's parser and gives identical chapters, paragraphs, quotation IDs and pictures.
@@ -652,6 +660,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `POST /api/tts` | Body `{text, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?, format?}`. By default chunked **PCM16LE mono** as it is made, rate in `X-Sample-Rate`; `format: "opus"` (Ogg Opus 64 kbit/s, what the website uses) or `"mp3"` (96 kbit/s, for browsers without Opus) returns the whole passage compressed, about 18% / 25% of the PCM size. `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `POST /api/library/import` | Add a book: multipart `epub` file (any device; what the website uses), or `{"path": ...}` (from the PC only, for `process_book.py`); options `analyze`, `cast` (default true), `reanalyze`, `engine`, `series` (default: from the title). |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Books with analysis/cast status · a book's paragraphs, quotations and pictures · its cover. |
+| `PATCH /api/books/{id}` `{title}` | Rename a book (sets its volume order; it keeps its series; a re-upload keeps the title). Returns its series info. |
 | `GET /api/books/{id}/pictures` · `GET /api/books/{id}/picture?path=` | The book's pictures · one picture (by its path in the EPUB; only pictures the book's text refers to). |
 | `POST /api/books/{id}` · `GET /api/books/{id}/script` · `POST /api/books/{id}/analyze` | Store already-parsed book text (+`analyze`, `reanalyze`, optional base64 `cover`) · dramatization status and lines · analyse (`{relabel}` labels lines again; `{reanalyze}` starts over, your edits kept). |
 | `PATCH /api/books/{id}/lines/{quote}` · `PATCH /api/books/{id}/characters/{id}` · `POST /api/books/{id}/cast` | Corrections · rename/merge/voice/`profile`/`aliases`/`role` (`main`, `supporting`, `extra`; `null` = automatic) · create character voices (`{"own_voices_for": ["supporting"]}` also replaces those tiers' pool voices). |
