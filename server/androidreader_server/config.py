@@ -112,7 +112,7 @@ class ServerConfig:
     whisper_venv: str = "indextts"
     whisper_model: str = "whisper/large-v3-turbo.pt"
     # Version of the settings below the defaults written to config.json (for one-time migrations).
-    settings_v: int = 2
+    settings_v: int = 3
 
     data_dir: str = field(default="", repr=False)
 
@@ -151,6 +151,11 @@ def load_config(data_dir: Path | None = None) -> ServerConfig:
         if raw.get("llm_mode", "shared") == "shared":
             raw["llm_mode"] = "adaptive"
         raw["settings_v"] = 2
+    if raw and int(raw.get("settings_v") or 0) < 3:
+        # v3: OmniVoice no longer designs voices (it only takes fixed tags, not descriptions).
+        if raw.get("voice_design_engine") == "omnivoice":
+            raw["voice_design_engine"] = "qwen3tts"
+        raw["settings_v"] = 3
     known = set(ServerConfig.__dataclass_fields__) - {"data_dir"}
     cfg = ServerConfig(**{k: v for k, v in raw.items() if k in known})
     path.write_text(json.dumps(cfg.to_json(), indent=2), encoding="utf-8")

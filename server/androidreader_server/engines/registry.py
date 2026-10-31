@@ -61,7 +61,8 @@ ENGINES: dict[str, EngineSpec] = {
             vram_gb=4.0,
             delivery="tags",
             phonemes="cmu_brackets",
-            voice_design=True,
+            # It can design from fixed tags only ("male, low pitch"); voices are designed with Qwen3-TTS.
+            voice_design=False,
             languages="600+",
             defaults={"num_step": 32, "guidance_scale": 2.0},
         ),

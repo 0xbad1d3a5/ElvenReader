@@ -548,9 +548,7 @@ async function settingsView() {
     const speed = (e) => e.stats && e.stats.rtf ? ` \u00b7 ${e.stats.rtf < 1 ? (1 / e.stats.rtf).toFixed(1) + "\u00d7 real time" : "slower than real time"}` : "";
     const speech = h("select", {}, ...s.engines.map(e => h("option", { value: e.id }, e.label + speed(e))));
     speech.value = s.speech_engine;
-    const DESIGN_NOTES = { omnivoice: " (basic: only gender, age, pitch and accent)", qwen3tts: " (recommended: follows the whole description)" };
-    const design = h("select", {}, ...s.engines.filter(e => e.voice_design).map(e => h("option", { value: e.id }, e.label + (DESIGN_NOTES[e.id] || ""))));
-    design.value = s.voice_design_engine;
+    const design = s.engines.find(e => e.id === s.voice_design_engine);
     const modes = [["adaptive", "Follow what I'm doing (recommended)"],
       ["shared", "Always share the GPU: analysis next to the speech model, even while designing"],
       ["auto", "Whole GPU when nobody has listened for 2 minutes, otherwise CPU"],
@@ -572,7 +570,7 @@ async function settingsView() {
         "Everything is read with it from now on; cached sentences from the old model aren't reused. It takes about a minute to load.")) return;
       save.disabled = true;
       try {
-        await api("PUT", "/api/settings", { speech_engine: speech.value, voice_design_engine: design.value, llm_mode: mode.value,
+        await api("PUT", "/api/settings", { speech_engine: speech.value, llm_mode: mode.value,
           idle_after_s: Math.max(1, Number(idle.value) || 5) * 60, design_pause_s: Math.max(1, Number(pause.value) || 10) * 60 });
         note.textContent = "\u2713 Saved";
       } catch (e) { alert(e.message); }
@@ -584,9 +582,10 @@ async function settingsView() {
         h("p", { class: "small muted" }, "The one model the whole site reads with: books, previews and voice tests. " +
           "Only an idle site unloads it, for book analysis; it comes back when you do."), speech, h("p", { class: "small" }, state)),
       h("div", { class: "sr" }, h("h3", {}, "Voice design"),
-        h("p", { class: "small muted" }, "Makes new character voices from a description (casting, Make 3 options, Younger/Older). " +
-          "If it isn't the speech model, it is loaded next to it while you design and unloaded after a few minutes without designs."),
-        design, st.designer ? h("p", { class: "small" }, `Designer loaded: ${st.designer}`) : null),
+        h("p", { class: "small muted" }, `New character voices (casting, Make 3 options, Younger/Older) are designed with ` +
+          `${design ? design.label : s.voice_design_engine}, which follows the whole description. It loads next to the reading voice ` +
+          "when you design and unloads after a few minutes without designs; a design waits for it to load."),
+        st.designer ? h("p", { class: "small" }, `Designer loaded: ${st.designer}`) : null),
       h("div", { class: "sr" }, h("h3", {}, "Book analysis"),
         h("p", { class: "small muted" }, "How the LLM that works out who says what uses the GPU."), mode,
         mode.value === "adaptive" || s.llm_mode === "adaptive" ? h("ul", { class: "small", style: { margin: "8px 0 0", paddingLeft: "18px" } },

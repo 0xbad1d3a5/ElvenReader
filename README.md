@@ -31,9 +31,9 @@ the **speech model** chosen on the **Settings** page (default OmniVoice). It is 
 with, and requests can't swap it for another; it makes way only for book analysis while nobody
 uses the site (see *How analysis shares the GPU*). Voice design with another model (Qwen3-TTS by
 default) runs as a separate, design-only worker next to it (about 4 GB) while you design and is
-unloaded after three minutes without designs. OmniVoice can design too, but only from its fixed
-tags (gender, age, pitch, accent), so a description is reduced to those; Qwen3-TTS follows the whole
-description. Measured on this PC with `scripts\bench_engines.py` (five
+unloaded after three minutes without designs; a design waits for it to load. Voices are always
+designed with Qwen3-TTS, which follows the whole description (OmniVoice only takes fixed tags such
+as "male, low pitch"). Measured on this PC with `scripts\bench_engines.py` (five
 sentences, two with a delivery, imported voice *The Documentarian*, after one warm-up sentence).
 *RTF* is generation time ÷ audio length, so below 1.0 is faster than real time. *WER* is
 Whisper-turbo's word error rate on the output (intelligibility).
@@ -98,7 +98,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `llm_label_profiles` | `true` | The labelling pass also notes each speaker's voice profile (see *Voice profiles*). |
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
 | `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
-| `voice_design_engine`, `designer_idle_s` | `qwen3tts`, `180` | Creates character voices (Settings page); a designer that isn't the speech model is unloaded after this many idle seconds. |
+| `voice_design_engine`, `designer_idle_s` | `qwen3tts`, `180` | Creates character voices (must follow free-text descriptions; Qwen3-TTS); the designer is unloaded after this many seconds without designs. |
 | `cast_supporting_voices` | `12` | How many supporting characters (most lines first) get a designed voice of their own; main characters and narrators always do, extras share pool voices. |
 
 Environment overrides: `ANDROIDREADER_PORT`, `ANDROIDREADER_HOST`, `ANDROIDREADER_TOKEN`,
