@@ -1452,12 +1452,72 @@ async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_ch
 # ----------------------------------------------------------------- analysis job
 
 
+class BookQueue:
+    """The books waiting for analysis, in order. It can be reordered (the Queue page) and is kept in a file, so
+    a restart resumes in the same order."""
+
+    def __init__(self, path: Path | None = None):
+        self.items: list[str] = []
+        self.path = path
+        self.current = None  # the book being analysed (saved first, so a restart resumes it first)
+        self._changed = asyncio.Event()
+
+    def _save(self) -> None:
+        if self.path is None:
+            return
+        order = ([self.current] if self.current else []) + self.items
+        try:
+            self.path.write_text(json.dumps({"order": order}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def saved_order(self) -> list[str]:
+        try:
+            return list(json.loads(self.path.read_text(encoding="utf-8")).get("order", [])) if self.path else []
+        except (OSError, ValueError):
+            return []
+
+    async def put(self, book_id: str) -> None:
+        if book_id not in self.items:
+            self.items.append(book_id)
+            self._save()
+        self._changed.set()
+
+    async def get(self) -> str:
+        while not self.items:
+            self._changed.clear()
+            await self._changed.wait()
+        book_id = self.items.pop(0)
+        self._save()
+        return book_id
+
+    def empty(self) -> bool:
+        return not self.items
+
+    def remove(self, book_id: str) -> bool:
+        if book_id not in self.items:
+            return False
+        self.items.remove(book_id)
+        self._save()
+        return True
+
+    def reorder(self, ids: list[str]) -> None:
+        """`ids` first, in that order; books not named keep their order after them."""
+        wanted = [i for i in dict.fromkeys(ids) if i in self.items]
+        self.items = wanted + [i for i in self.items if i not in wanted]
+        self._save()
+
+    def set_current(self, book_id: str | None) -> None:
+        self.current = book_id
+        self._save()
+
+
 class Analyzer:
     def __init__(self, app: web.Application, store: ScriptStore, llm: LocalLlm):
         self.app = app
         self.store = store
         self.llm = llm
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.queue = BookQueue(Path(store.root).parent / "analysis-queue.json")
         self.task: asyncio.Task | None = None
         self.current: str | None = None
         # Background GPU work while the site is idle runs one thing at a time (an LLM step, or a book's
@@ -1501,6 +1561,7 @@ class Analyzer:
             while True:
                 book_id = await self.queue.get()
                 self.current = book_id
+                self.queue.set_current(book_id)
                 try:
                     await self.analyse(session, book_id)
                     s = self.store.script(book_id)
@@ -1514,6 +1575,7 @@ class Analyzer:
                         # next book's analysis goes on meanwhile.
                         self._spawn_cast(book_id, engine)
                 except asyncio.CancelledError:
+                    self.current = None  # the server stops: the book stays first in the saved order, so it resumes first
                     raise
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("analysis of %s failed", book_id)
@@ -1521,10 +1583,10 @@ class Analyzer:
                         s = self.store.script(book_id)
                         s.update(status="error", detail=str(exc)[:300])
                         self.store.save_script(book_id, s)
-                finally:
-                    self.current = None
-                    if self.queue.empty():
-                        await self.llm.stop()  # free RAM/VRAM when idle
+                self.current = None  # finished or failed
+                self.queue.set_current(None)
+                if self.queue.empty():
+                    await self.llm.stop()  # free RAM/VRAM when idle
 
     def _spawn_cast(self, book_id: str, engine: str) -> None:
         tasks = self.app[CAST_TASKS_KEY] if CAST_TASKS_KEY in self.app else set()
@@ -2015,6 +2077,54 @@ async def gpu_status(request: web.Request) -> web.Response:
     })
 
 
+def _queue_json(app: web.Application) -> dict:
+    """The analysis queue for the Queue page: the book being analysed, the books waiting (in order) and the
+    books whose voices are still to be created."""
+    store = app[DRAMA_STORE_KEY]
+    analyzer = app[ANALYZER_KEY]
+    from .series import book_series
+
+    def item(book_id: str) -> dict:
+        summary = store.summary(book_id) or {}
+        s = store.script(book_id)
+        return {"id": book_id, "title": summary.get("title", book_id), "author": summary.get("author", ""),
+                "words": summary.get("words", 0), "series": book_series(app, book_id),
+                "status": s.get("status", "none"), "progress": s.get("progress", 0.0), "detail": s.get("detail", ""),
+                "lines": len(s.get("lines", {})), "cover": store.cover(book_id) is not None}
+
+    casting = [b for b in store.ids() if store.script(b).get("status") == "casting"]
+    return {"current": item(analyzer.current) if analyzer.current else None,
+            "queued": [item(b) for b in analyzer.queue.items],
+            "casting": [item(b) for b in casting]}
+
+
+async def queue_get(request: web.Request) -> web.Response:
+    return web.json_response(_queue_json(request.app))
+
+
+async def queue_put(request: web.Request) -> web.Response:
+    """{"order": [book ids]}: those books first, in that order (the others keep theirs after them)."""
+    body = await request.json() if request.can_read_body else {}
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list) or not all(isinstance(b, str) for b in order):
+        return web.json_response({"error": "Send {\"order\": [book ids]}"}, status=400)
+    request.app[ANALYZER_KEY].queue.reorder(order)
+    return web.json_response(_queue_json(request.app))
+
+
+async def queue_delete(request: web.Request) -> web.Response:
+    """Take a waiting book out of the queue. Its analysis so far is kept; analysing it again continues it."""
+    store = request.app[DRAMA_STORE_KEY]
+    book_id = request.match_info["book"]
+    if not request.app[ANALYZER_KEY].queue.remove(book_id):
+        return web.json_response({"error": "That book isn't waiting in the queue"}, status=404)
+    async with store.lock(book_id):
+        s = store.script(book_id)
+        s.update(status="none", detail="taken out of the analysis queue")
+        store.save_script(book_id, s)
+    return web.json_response(_queue_json(request.app))
+
+
 async def list_books(request: web.Request) -> web.Response:
     from .series import series_name as _series_name, volume_key
 
@@ -2436,15 +2546,20 @@ def setup(app: web.Application) -> None:
 
     async def _ctx(app: web.Application):
         analyzer.start()
-        # Resume analyses interrupted by a restart.
+        # Resume analyses interrupted by a restart, in the queue's saved order (the one being analysed first).
+        waiting = {}
         for d in store.root.iterdir() if store.root.exists() else []:
             s = store.script(d.name) if (d / "script.json").exists() else None
             if s and s.get("status") in ("queued", "running"):
-                s["status"] = "none"
-                store.save_script(d.name, s)
-                await analyzer.enqueue(d.name)
+                waiting[d.name] = s
             elif s and s.get("status") == "casting":  # automatic casting cut short by a restart: carry on
                 analyzer._spawn_cast(d.name, s.get("auto_cast_engine") or cfg.voice_design_engine)
+        saved = [b for b in analyzer.queue.saved_order() if b in waiting]
+        for book_id in saved + [b for b in waiting if b not in saved]:
+            s = waiting[book_id]
+            s["status"] = "none"
+            store.save_script(book_id, s)
+            await analyzer.enqueue(book_id)
         yield
         for t in app[CAST_TASKS_KEY]:
             t.cancel()
@@ -2453,6 +2568,9 @@ def setup(app: web.Application) -> None:
     app.cleanup_ctx.append(_ctx)
     r = app.router
     r.add_get("/api/gpu", gpu_status)
+    r.add_get("/api/queue", queue_get)
+    r.add_put("/api/queue", queue_put)
+    r.add_delete("/api/queue/{book}", queue_delete)
     r.add_get("/api/books", list_books)
     r.add_post("/api/books/{book}/characters/{character}/voice-from-dossier", voice_from_dossier)
     from . import series

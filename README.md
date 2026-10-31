@@ -167,6 +167,13 @@ The library shows progress, with the books of a series grouped under its name in
 **Re-analyse** on a book starts its analysis again from scratch; your corrections, cast and voices
 are kept. Adding a book that is already in the library keeps its analysis.
 
+**Queue** (in the library header, with the number of books waiting) shows the book being analysed
+with its progress, the books next in line with a rough time each (about 1,800 words a minute with
+the whole GPU), and the books whose voices are still to be created. Drag a book, or use ⤒ (next),
+↑ and ↓, to change the order; ✕ takes a book out of the queue, keeping what's done. **Continue
+analysis** on its library card puts it back at the end. The order is saved, so a restart resumes
+the same way, the interrupted book first.
+
 From the command line (which can also add a file by its path on the PC), the same thing is
 `.\.venv\Scripts\python.exe scripts\process_book.py "E:\...\Book.epub"` (options `--no-cast`,
 `--engine qwen3tts`, `--reanalyze`). It prints progress until the book is done, then the cast by
@@ -219,7 +226,8 @@ after them, so they never shift the text.
   (Effa, Gunther), and anyone takes an alias the book uses at least three times as often ("Myne"
   over her past-life name "Urano"); the old names stay aliases. Names you type are kept
   exactly. The speaker filter (top) also offers *quotes given to the narrator*; search finds text.
-  On a narrow screen (phone), ☰ shows the chapters and the cast. **⛶ Reading mode** (or the F
+  On a narrow screen (phone), ☰ slides the chapters and the cast over the text, wherever you are
+  in the book; picking a chapter, tapping outside, ✕ or Esc closes it. **⛶ Reading mode** (or the F
   key) goes full screen with just the text: the header, sidebar and player go away, and a small
   ▶/■ and *Exit reading mode* float in the corner, fading when you don't move. Esc, the button
   or leaving full screen ends it.
@@ -636,6 +644,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/engines` · `POST /api/engines/{id}/load` · `POST /api/engines/unload` | Engines with capabilities, licence and measured RTF; make one the site's speech model; free the GPU. |
 | `GET/PUT /api/settings` `{speech_engine?, voice_design_engine?, llm_mode?, idle_after_s?, design_pause_s?}` | Site settings (the Settings page). `POST /api/tts` reads with the speech model; naming another `engine` is refused (409). |
 | `POST /api/activity` · `GET /api/gpu` | An open page says someone is using the site (pages send it while you interact or audio plays) · what's on the GPU: the state (`reading`, `designing`, `idle`), the speech model and voice designer with loading progress, the analysis LLM (for the banner). |
+| `GET/PUT /api/queue` · `DELETE /api/queue/{book}` | Analysis queue: `{current, queued, casting}` · `PUT {order: [book ids]}` puts those first, in that order · take a waiting book out (its status becomes `none`; `POST /api/books/{id}/analyze` continues it). Saved in `data/analysis-queue.json`. |
 | `GET/POST /api/voices` · `DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store (`?all=1` adds character voices, `?details=1` everything with who uses it). |
 | `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?, age?}` (`age` -1/1: one age group younger/older; returns the new `description`, `age_from`, `age_to`) · listen · keep one · Whisper transcript of an uploaded clip. |

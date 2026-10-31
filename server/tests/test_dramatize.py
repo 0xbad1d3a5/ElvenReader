@@ -1390,3 +1390,71 @@ async def test_gpu_status_for_the_banner(drama_client):
     assert g["mode"] == "adaptive" and g["activity"]["state"] == "idle"
     assert set(g["engines"]["speech"]) >= {"state", "loading_s", "expected_s"} and "voice_designer" in g["engines"]
     assert g["llm"]["state"] == "stopped" and g["llm"]["book"] is None
+
+def test_book_queue_reorders_removes_and_persists(tmp_path):
+    q = dz.BookQueue(tmp_path / "q.json")
+
+    async def fill():
+        for b in ("a", "b", "c", "d"):
+            await q.put(b)
+        await q.put("b")  # already waiting: no duplicate
+
+    asyncio.run(fill())
+    assert q.items == ["a", "b", "c", "d"]
+    q.reorder(["c", "zzz", "a"])  # named ones first; unknown ids ignored; the rest keep their order
+    assert q.items == ["c", "a", "b", "d"]
+    assert q.remove("b") and not q.remove("b")
+    q.set_current("x")
+    assert dz.BookQueue(tmp_path / "q.json").saved_order() == ["x", "c", "a", "d"]
+    assert asyncio.run(q.get()) == "c"
+    assert q.saved_order() == ["x", "a", "d"]
+
+
+async def test_queue_api_reorders_removes_and_survives_a_restart(aiohttp_client, tmp_path, monkeypatch):
+    release = asyncio.Event()
+
+    async def slow(self, *a, **k):  # the first book stays "being analysed"
+        await release.wait()
+        raise dz.LlmError("stop")
+
+    monkeypatch.setattr(dz.LocalLlm, "complete", slow)
+    cfg = make_cfg(tmp_path)
+    c = await aiohttp_client(make_app(cfg, specs=SPECS))
+    for b in ("b1", "b2", "b3", "b4"):
+        r = await c.post(f"/api/books/{b}", json={**book_payload(), "title": f"Book {b}", "analyze": True}, headers=AUTH)
+        assert r.status == 200
+    for _ in range(50):
+        q = await (await c.get("/api/queue", headers=AUTH)).json()
+        if q["current"]:
+            break
+        await asyncio.sleep(0.02)
+    assert q["current"]["id"] == "b1" and q["current"]["title"] == "Book b1"
+    assert [b["id"] for b in q["queued"]] == ["b2", "b3", "b4"]
+
+    r = await c.put("/api/queue", json={"order": ["b4", "b2"]}, headers=AUTH)
+    assert [b["id"] for b in (await r.json())["queued"]] == ["b4", "b2", "b3"]
+    assert (await c.put("/api/queue", json={"order": "b4"}, headers=AUTH)).status == 400
+
+    r = await c.delete("/api/queue/b2", headers=AUTH)
+    assert [b["id"] for b in (await r.json())["queued"]] == ["b4", "b3"]
+    assert (await c.delete("/api/queue/b2", headers=AUTH)).status == 404
+    s = await (await c.get("/api/books/b2/script", headers=AUTH)).json()
+    assert s["status"] == "none"
+    books = {b["id"]: b for b in (await (await c.get("/api/books", headers=AUTH)).json())["books"]}
+    assert books["b2"]["status"] == "none"
+    # Analysing it again puts it at the back of the queue.
+    assert (await c.post("/api/books/b2/analyze", headers=AUTH)).status == 200
+    q = await (await c.get("/api/queue", headers=AUTH)).json()
+    assert [b["id"] for b in q["queued"]] == ["b4", "b3", "b2"]
+
+    # A restart resumes in the same order, the interrupted book first.
+    await c.close()
+    c = await aiohttp_client(make_app(cfg, specs=SPECS))
+    for _ in range(50):
+        q = await (await c.get("/api/queue", headers=AUTH)).json()
+        if q["current"]:
+            break
+        await asyncio.sleep(0.02)
+    assert q["current"]["id"] == "b1"
+    assert [b["id"] for b in q["queued"]] == ["b4", "b3", "b2"]
+    release.set()

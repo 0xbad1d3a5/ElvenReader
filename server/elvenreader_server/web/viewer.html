@@ -39,6 +39,16 @@
   .serieslist .sr { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
   .serieslist .sr h3 { margin:0 0 4px; font-size:16px; display:flex; gap:8px; align-items:center; }
   .serieslist ol { margin:6px 0 0; padding-left:22px; }
+  .qrow { display:flex; gap:10px; align-items:center; background:var(--card); border:1px solid var(--line); border-radius:8px;
+    padding:6px 10px; margin-bottom:6px; }
+  .qrow.drag { opacity:.4; } .qrow.over { border-top:3px solid var(--accent); }
+  .qrow .qhandle { cursor:grab; color:var(--muted); font-size:18px; user-select:none; }
+  .qrow .qpos { width:1.6em; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .qrow .qcover { width:34px; height:50px; flex:none; background:#8883; border-radius:3px; overflow:hidden; }
+  .qrow .qcover img { width:100%; height:100%; object-fit:cover; }
+  .qrow .qinfo { min-width:0; flex:1 1 auto; } .qrow .qtitle { font-weight:600; color:inherit; }
+  .qrow.now { border-color:var(--accent); }
+  .qrow .qbtns { display:flex; gap:10px; flex:none; } .qrow .qbtns .iconbtn { font-size:16px; padding:4px 8px; }
   .book { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; color:inherit; }
   .book .cover { aspect-ratio:2/3; background:#8883; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; font-weight:600; }
   .book .cover img { width:100%; height:100%; object-fit:cover; }
@@ -108,18 +118,29 @@
   .line input[type=number] { width:6.5em; }
   .banner { background:var(--hl); border-radius:8px; padding:8px 12px; margin:8px 0; }
   table.vt { border-collapse:collapse; width:100%; } table.vt td, table.vt th { border-bottom:1px solid var(--line); padding:6px; text-align:left; vertical-align:top; }
-  .narrowonly { display:none; }
+  .narrowonly, .scrim, aside .sidehead { display:none; }
   @media (max-width: 760px) {
     .narrowonly { display:inline-block; }
     header { gap:8px; padding:8px 10px; } header h1 { font-size:15px; } #status, header .grow { display:none; }
     header #search, header #charFilter { flex:1 1 140px; min-width:0; }
     #seriesInfo .seriessel { max-width:12em; }
     .layout { grid-template-columns:1fr; height:auto; }
-    aside { display:none; border-right:0; border-bottom:1px solid var(--line); padding-bottom:16px; }
-    aside.open { display:block; }
+    aside { position:fixed; top:0; bottom:0; left:0; width:min(340px,86vw); z-index:40; border-right:1px solid var(--line);
+      padding:0 12px 24px; transform:translateX(-105%); visibility:hidden; transition:transform .2s, visibility .2s;
+      overscroll-behavior:contain; box-shadow:4px 0 24px #0005; }
+    aside.open { transform:none; visibility:visible; }
+    aside .sidehead { position:sticky; top:0; z-index:1; background:var(--card); display:flex; align-items:center;
+      padding:10px 0 4px; border-bottom:1px solid var(--line); }
+    aside .sidehead strong { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    body.sideopen .scrim { display:block; position:fixed; inset:0; z-index:39; background:#0006; }
+    body.sideopen { overflow:hidden; }
     main { padding:16px 16px 160px; overflow:visible; min-width:0; } body { overflow-x:hidden; } main .text { font-size:16px; }
     body.reading .layout { height:auto; } body.reading main { padding:28px 16px 96px; }
     .player { left:0; }
+    .qrow { flex-wrap:wrap; gap:8px; } .qrow .qhandle, .qrow .grow { display:none; }
+    .qrow .qinfo { flex:1 1 calc(100% - 90px); }
+    .qrow .qbtns { flex:1 1 100%; display:flex; justify-content:flex-end; gap:14px; margin-top:-4px; }
+    .qrow .qbtns .iconbtn { font-size:17px; padding:4px 8px; }
   }
 </style>
 </head>
@@ -294,6 +315,7 @@ if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");
 else if (routeMatch && routeMatch[1] === "voices") voicesView();
 else if (routeMatch && routeMatch[1] === "series") seriesView();
 else if (routeMatch && routeMatch[1] === "settings") settingsView();
+else if (routeMatch && routeMatch[1] === "queue") queueView();
 else if (routeMatch) bookView(routeMatch[1]); else libraryView();
 if (TOKEN) { pollGpu(true); beat(); }  // opening a page is using the site
 
@@ -405,6 +427,7 @@ async function libraryView() {
   $("#app").replaceChildren(
     h("header", {}, h("h1", {}, "ElvenReader \u2014 library"), h("span", { class: "grow" }),
       h("button", { class: "primary", onclick: () => addBook(refresh) }, "+ Add book"),
+      h("a", { href: "/books/queue", id: "queueLink", title: "Books waiting for analysis; change their order" }, "Queue"),
       h("a", { href: "/books/series" }, "Series"),
       h("a", { href: "/books/voices" }, "Voices"),
       h("a", { href: "/books/settings", title: "The speech model the whole site uses, and how book analysis shares the GPU" }, "Settings"),
@@ -414,6 +437,8 @@ async function libraryView() {
   let timer = null;
   async function refresh() {
     const { books } = await get("/api/books");
+    const waiting = books.filter(b => b.status === "queued" || b.status === "running").length;
+    if ($("#queueLink")) $("#queueLink").textContent = waiting ? `Queue (${waiting})` : "Queue";
     const grid = $("#grid");
     grid.replaceChildren(...(books.length ? [] : [h("p", { class: "muted" },
       "No books yet. Use \u201c+ Add book\u201d to upload an EPUB; it is analysed and cast automatically.")]));
@@ -453,6 +478,13 @@ async function libraryView() {
         BUSY.includes(b.status) ? h("div", { class: "bar" }, h("div", { style: { width: (b.status === "casting" ? 100 : b.progress * 100) + "%" } })) : null,
         h("div", { class: "small" }, statusText(b)),
         h("div", { class: "small muted" }, `${b.lines} lines \u00b7 ${b.characters} characters \u00b7 ${b.voiced} voiced`),
+        b.status === "none" || b.status === "error" ? h("button", { class: "small", style: { marginTop: "6px", marginRight: "4px" },
+          title: "Put it back in the analysis queue; it continues where it stopped",
+          onclick: async (e) => {
+            e.preventDefault(); e.stopPropagation();
+            try { await api("POST", `/api/books/${b.id}/analyze`); } catch (err) { alert(err.message); }
+            refresh();
+          } }, b.lines ? "Continue analysis" : "Analyse") : null,
         BUSY.includes(b.status) ? null : h("button", { class: "small", style: { marginTop: "6px" },
           title: "Analyse the book again from the start (your corrections, cast and voices are kept)",
           onclick: async (e) => {
@@ -540,6 +572,87 @@ async function addBook(onDone) {
     h("div", { class: "bar" }, bar), status,
     h("div", { class: "row" }, h("button", { value: "cancel" }, "Cancel"), go)));
   d.showModal();
+}
+
+/* ------------------------------------------------------------------ analysis queue */
+
+/* The books waiting for analysis, in order: drag them (or use the buttons) to change it. */
+async function queueView() {
+  $("#app").replaceChildren(
+    h("header", {}, h("a", { href: "/books" }, "\u2190 Books"), h("h1", {}, "Analysis queue"), h("span", { class: "grow" })),
+    h("div", { class: "serieslist", id: "queue" }, h("p", { class: "muted" }, "Loading\u2026")));
+  const covers = {};
+  let timer = null, dragging = null;
+  const minutes = (words) => Math.max(1, Math.round((words || 0) / 1800));  // ~1,800 words a minute with the whole GPU
+  const cover = (b) => {
+    const el = h("div", { class: "qcover" });
+    if (b.cover) {
+      covers[b.id] = covers[b.id] || authBlobUrl(`/api/books/${b.id}/cover`);
+      covers[b.id].then(u => u && el.replaceChildren(h("img", { src: u, alt: "" })));
+    }
+    return el;
+  };
+  async function send(order) {
+    clearTimeout(timer);
+    try { render((await api("PUT", "/api/queue", { order })).data); } catch (e) { alert(e.message); refresh(); }
+  }
+  function render(q) {
+    const el = $("#queue");
+    const ids = q.queued.map(b => b.id);
+    const move = (from, to) => { const o = ids.slice(); o.splice(to, 0, o.splice(from, 1)[0]); send(o); };
+    const row = (b, i) => {
+      const r = h("div", { class: "qrow", draggable: "true", "data-id": b.id },
+        h("span", { class: "qhandle", title: "Drag to reorder" }, "\u2817"),
+        h("span", { class: "qpos" }, String(i + 1)), cover(b),
+        h("div", { class: "qinfo" },
+          h("a", { href: `/books/${b.id}`, class: "qtitle" }, b.title),
+          h("div", { class: "small muted" }, [b.series && b.series !== b.title ? b.series : null, `${(b.words || 0).toLocaleString()} words`,
+            `about ${minutes(b.words)} min`, b.lines ? `${b.lines} lines done` : null].filter(Boolean).join(" \u00b7 "))),
+        h("span", { class: "grow" }),
+        h("span", { class: "qbtns" },
+        h("button", { class: "iconbtn", title: "Analyse it next", disabled: i === 0, onclick: () => move(i, 0) }, "\u2912"),
+        h("button", { class: "iconbtn", title: "Move up", disabled: i === 0, onclick: () => move(i, i - 1) }, "\u2191"),
+        h("button", { class: "iconbtn", title: "Move down", disabled: i === ids.length - 1, onclick: () => move(i, i + 1) }, "\u2193"),
+        h("button", { class: "iconbtn", title: "Take it out of the queue (what's done is kept; \u201cContinue analysis\u201d in the library puts it back)",
+          onclick: async () => {
+            if (!confirm(`Take \u201c${b.title}\u201d out of the analysis queue?`)) return;
+            try { render((await api("DELETE", `/api/queue/${b.id}`)).data); } catch (e) { alert(e.message); }
+          } }, "\u2715")));
+      r.addEventListener("dragstart", (e) => { dragging = b.id; r.classList.add("drag"); e.dataTransfer.effectAllowed = "move"; });
+      r.addEventListener("dragend", () => { dragging = null; r.classList.remove("drag"); refreshSoon(); });
+      r.addEventListener("dragover", (e) => { if (dragging && dragging !== b.id) { e.preventDefault(); r.classList.add("over"); } });
+      r.addEventListener("dragleave", () => r.classList.remove("over"));
+      r.addEventListener("drop", (e) => {
+        e.preventDefault(); r.classList.remove("over");
+        if (!dragging || dragging === b.id) return;
+        move(ids.indexOf(dragging), ids.indexOf(b.id));
+      });
+      return r;
+    };
+    const cur = q.current;
+    el.replaceChildren(
+      h("h3", {}, "Analysing now"),
+      cur ? h("div", { class: "qrow now" }, cover(cur),
+        h("div", { class: "qinfo" }, h("a", { href: `/books/${cur.id}`, class: "qtitle" }, cur.title),
+          h("div", { class: "bar" }, h("div", { style: { width: Math.round((cur.progress || 0) * 100) + "%" } })),
+          h("div", { class: "small muted" }, `${Math.round((cur.progress || 0) * 100)}% \u00b7 ${cur.detail || ""}`)))
+        : h("p", { class: "small muted" }, "Nothing."),
+      h("h3", {}, `Next up (${q.queued.length})`),
+      q.queued.length ? h("div", {}, ...q.queued.map(row)) : h("p", { class: "small muted" }, "Nothing is waiting. Add books from the library."),
+      q.queued.length > 1 ? h("p", { class: "small muted" }, "Drag a book, or use \u2912 \u2191 \u2193, to change the order. " +
+        `Together about ${minutes(q.queued.reduce((a, b) => a + (b.words || 0), 0))} min with the whole GPU; longer while you read, ` +
+        "and analysis pauses while you design voices.") : null,
+      q.casting.length ? h("h3", {}, `Voices still to create (${q.casting.length})`) : null,
+      ...q.casting.map(b => h("div", { class: "qrow" }, cover(b), h("div", { class: "qinfo" },
+        h("a", { href: `/books/${b.id}`, class: "qtitle" }, b.title), h("div", { class: "small muted" }, b.detail || "")))));
+    refreshSoon();
+  }
+  function refreshSoon() { clearTimeout(timer); timer = setTimeout(refresh, 5000); }
+  async function refresh() {
+    if (dragging) return refreshSoon();
+    try { render(await get("/api/queue")); } catch (e) { if (!tokenScreen.shown) $("#queue").replaceChildren(h("p", {}, "Error: " + e.message)); }
+  }
+  refresh();
 }
 
 /* ------------------------------------------------------------------ settings */
@@ -1023,7 +1136,7 @@ async function bookView(id) {
   app.replaceChildren(
     h("header", {},
       h("a", { href: "/books" }, "\u2190 Books"),
-      h("button", { class: "iconbtn narrowonly", title: "Chapters and cast", onclick: () => $("aside").classList.toggle("open") }, "\u2630"),
+      h("button", { class: "iconbtn narrowonly", title: "Chapters and cast", onclick: () => setSide(!$("aside").classList.contains("open")) }, "\u2630"),
       h("h1", {}, st.book.title), h("span", { class: "small muted", id: "seriesInfo" }),
       h("span", { class: "muted small", id: "status" }), h("span", { class: "grow" }),
       h("a", { href: "/books/voices" }, "Voices"),
@@ -1033,6 +1146,8 @@ async function bookView(id) {
         onclick: () => setReading(true) }, "\u26F6")),
     h("div", { class: "layout" },
       h("aside", {},
+        h("div", { class: "sidehead" }, h("strong", {}, st.book.title),
+          h("button", { class: "iconbtn", title: "Close (Esc)", onclick: () => setSide(false) }, "\u2715")),
         h("h3", {}, "Chapters"), h("div", { id: "chapters" }),
         h("div", { class: "casthead" }, h("h3", {}, "Cast"), h("span", { class: "small muted", id: "castBusy" }),
           h("button", { class: "iconbtn", title: "Cast actions", onclick: (e) => bookMenu(e.currentTarget) }, "\u22EF")),
@@ -1040,6 +1155,7 @@ async function bookView(id) {
           oninput: (e) => { st.castQuery = e.target.value.trim().toLowerCase(); renderCast(); } }),
         h("div", { id: "cast" })),
       h("main", {}, h("div", { class: "text", id: "text" }))),
+    h("div", { class: "scrim", onclick: () => setSide(false) }),
     h("div", { class: "player" },
       h("button", { class: "primary", id: "playBtn", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6 Play"),
       h("span", { class: "small muted" }, "Narrator voice"),
@@ -1059,7 +1175,16 @@ async function bookView(id) {
     clearTimeout(ctlTimer);
     ctlTimer = setTimeout(() => c.classList.add("faded"), 2500);
   }
+  /* Phones: chapters and cast slide over the text (wherever you've scrolled to) and close when you pick a chapter. */
+  function setSide(open) {
+    const a = $("aside");
+    if (a) a.classList.toggle("open", open);
+    document.body.classList.toggle("sideopen", open);
+    const on = open && document.querySelector(".chap.on");
+    if (on) on.scrollIntoView({ block: "center" });
+  }
   function setReading(on) {
+    if (on) setSide(false);
     document.body.classList.toggle("reading", on);
     const el = document.documentElement;
     if (on && el.requestFullscreen && !document.fullscreenElement) el.requestFullscreen().catch(() => {});
@@ -1075,7 +1200,8 @@ async function bookView(id) {
     if (e.target.closest("input, textarea, select, [contenteditable]") || e.ctrlKey || e.metaKey || e.altKey) return;
     if (document.querySelector("dialog[open]")) return;
     const reading = document.body.classList.contains("reading");
-    if (e.key === "Escape" && reading) setReading(false);
+    if (e.key === "Escape" && document.body.classList.contains("sideopen")) setSide(false);
+    else if (e.key === "Escape" && reading) setReading(false);
     else if ((e.key === "f" || e.key === "F") && !e.repeat) setReading(!reading);
   });
   ["pointermove", "pointerdown", "keydown", "wheel"].forEach(ev => document.addEventListener(ev, wakeControls, { passive: true }));
@@ -1092,7 +1218,7 @@ async function bookView(id) {
     const lines = st.script.lines;
     $("#chapters").replaceChildren(...st.book.chapters.map((c, i) => {
       const done = c.quotes.filter(q => lines[q[0]]).length;
-      return h("button", { class: "chap" + (i === st.chapter && !filtering() ? " on" : ""), onclick: () => gotoChapter(i) },
+      return h("button", { class: "chap" + (i === st.chapter && !filtering() ? " on" : ""), onclick: () => { gotoChapter(i); setSide(false); } },
         c.title, h("span", { class: "cnt" }, c.quotes.length ? `${done}/${c.quotes.length}` : ""));
     }));
   }
@@ -1515,7 +1641,7 @@ async function bookView(id) {
           h("div", { class: "rowx" }, h("button", { type: "button", class: "primary", onclick: saveProfile }, "Save profile"), design))),
         section("Lines",
           h("button", { type: "button", onclick: () => {
-            st.filterChar = cid; $("#charFilter").value = cid; renderText(); renderCast(); d.close(); $("aside").classList.remove("open");
+            st.filterChar = cid; $("#charFilter").value = cid; renderText(); renderCast(); d.close(); setSide(false);
           } }, "Show this character's lines")));
     }
     d.onclick = (e) => { if (e.target === d) d.close(); };  // click outside the drawer
