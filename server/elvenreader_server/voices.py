@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
@@ -63,16 +64,32 @@ class Voice:
         }
 
     def worker_spec(self) -> dict:
-        """What an engine worker needs to clone this voice."""
+        """What an engine worker needs to clone this voice. The reference is a copy named by the audio's hash:
+        engines cache what they derive from a reference file by its path, so an edited voice (same file name,
+        new audio) must come with a new path or they keep speaking with the old voice."""
         return {
             "id": self.id,
             "name": self.name,
-            "ref_audio": str(self.wav_path) if self.wav_path else None,
+            "ref_audio": self.reference_path(),
             "ref_text": self.ref_text,
             "language": self.language,
             "instruct": self.instruct,
             "seed": self.seed,
         }
+
+    def reference_path(self) -> str | None:
+        if not self.wav_path:
+            return None
+        sha = (self.audio_sha or "")[:16]
+        if not sha:
+            return str(self.wav_path)
+        copy = self.wav_path.parent / ".by-sha" / f"{sha}.wav"
+        if not copy.exists():
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            tmp = copy.with_suffix(f".{os.getpid()}.tmp")
+            shutil.copyfile(self.wav_path, tmp)
+            os.replace(tmp, copy)
+        return str(copy)
 
     @property
     def fingerprint(self) -> str:

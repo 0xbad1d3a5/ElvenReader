@@ -1,5 +1,6 @@
 import sqlite3
 import struct
+from pathlib import Path
 
 from elvenreader_server.audio import wav_bytes
 from elvenreader_server.text import split_for_synthesis, trailing_pause_ms
@@ -91,3 +92,16 @@ def test_trailing_pause():
     assert trailing_pause_ms("He said \u201cstop!\u201d", 300) == 300
     assert trailing_pause_ms("A clause,", 300) == 100
     assert trailing_pause_ms("no end", 300) == 0
+
+
+def test_an_edited_voice_reaches_the_engines_under_a_new_path(tmp_path):
+    """Engines cache what they derive from a reference by its path: new audio must come with a new path."""
+    store = VoiceStore(tmp_path)
+    v = store.add("Bishop", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="bishop")
+    first = v.worker_spec()["ref_audio"]
+    assert first != str(v.wav_path) and Path(first).read_bytes() == v.wav_path.read_bytes()
+    assert store.get("bishop").worker_spec()["ref_audio"] == first  # same audio, same path
+    store.replace_audio("bishop", wav_bytes(b"\x20\x00" * 2400, 24000), "Hello.")  # same file name and text
+    second = store.get("bishop").worker_spec()["ref_audio"]
+    assert second != first and Path(second).read_bytes() == store.get("bishop").wav_path.read_bytes()
+    assert [x.id for x in store.list()] == ["bishop"]  # the copies aren't voices

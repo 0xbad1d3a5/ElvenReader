@@ -462,7 +462,9 @@ class SynthesisPlan:
         options = {**self.spec.defaults, **cfg.engine_options.get(self.engine_id, {})}
         self.key = cache_key(
             engine=self.engine_id, options=options, voice=self.voice.fingerprint, language=self.language,
-            delivery=self.delivery, seed=self.seed, text=self.text, trim=cfg.trim_silence, v=2,
+            # v3: clips made after a voice was edited in place could still have the old voice (engines cached
+            # its reference by path); everything is made again.
+            delivery=self.delivery, seed=self.seed, text=self.text, trim=cfg.trim_silence, v=3,
         )
 
     def worker_payload(self, text: str) -> dict:
