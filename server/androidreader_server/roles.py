@@ -192,7 +192,7 @@ async def classify_route(request: web.Request) -> web.Response:
         try:
             async with aiohttp.ClientSession() as session:
                 work = store.script(book_id)
-                await analyzer._gpu(lambda: classify(analyzer.llm, session, book, work))
+                await analyzer._gpu(lambda: classify(analyzer.llm, session, book, work), interactive=True)
             async with store.lock(book_id):
                 fresh = store.script(book_id)
                 for cid, c in work["characters"].items():

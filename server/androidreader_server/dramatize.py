@@ -1020,6 +1020,10 @@ class LlmError(Exception):
     pass
 
 
+class LlmPreempted(Exception):
+    """The LLM was stopped because someone started using the site (llm_mode "adaptive"); the step is retried later."""
+
+
 class LocalLlm:
     """OpenAI-compatible chat endpoint (llama.cpp's llama-server), started on demand."""
 
@@ -1029,8 +1033,17 @@ class LocalLlm:
         self.model_name = Path(cfg.llm_model).stem if cfg.llm_model else ""
         # Where the next request should run; the server is restarted when this changes.
         self.gpu = cfg.llm_mode == "gpu"
+        # On the GPU next to the speech model (experts of llm_cpu_moe_shared layers in RAM), not on all of it.
+        self.shared = cfg.llm_mode == "shared"
+        self.preempted = False
+        self.starting_since: float | None = None
         self.running_gpu: bool | None = None
         self.running: tuple | None = None  # (model file, context) of the running server
+
+    async def preempt(self) -> None:
+        """Stop the LLM now to give the GPU back; a request in flight ends with LlmPreempted."""
+        self.preempted = True
+        await self.stop()
 
     @property
     def url(self) -> str:
@@ -1048,7 +1061,7 @@ class LocalLlm:
         context = context or self.cfg.llm_context
         budget = getattr(self.cfg, "llm_reasoning_budget", -1)
         # On the GPU next to the speech model ("shared"), or with the whole GPU to itself.
-        shared = self.gpu and self.cfg.llm_mode == "shared"
+        shared = self.gpu and self.shared
         cpu_moe = self.cfg.llm_cpu_moe_shared if shared else self.cfg.llm_cpu_moe
         if self.proc is not None and self.proc.returncode is None and (
                 self.running_gpu != self.gpu or self.running != (model_file, context, budget, cpu_moe)):
@@ -1079,13 +1092,26 @@ class LocalLlm:
                                                          creationflags=0x08000000)
         self.running_gpu = self.gpu
         self.running = (model_file, context, budget, cpu_moe)
-        for _ in range(600):
-            await asyncio.sleep(1)
-            if self.proc.returncode is not None:
-                raise LlmError("llama-server exited; see data/llm.log")
-            if await self._alive(session):
-                return
-        raise LlmError("llama-server did not start in 10 minutes")
+        self.starting_since = time.monotonic()
+        try:
+            for _ in range(600):
+                await asyncio.sleep(1)
+                if self.proc is None or self.proc.returncode is not None:  # stopped (preempted) or crashed
+                    if self.preempted:
+                        raise LlmPreempted()
+                    raise LlmError("llama-server exited; see data/llm.log")
+                if await self._alive(session):
+                    return
+            raise LlmError("llama-server did not start in 10 minutes")
+        finally:
+            self.starting_since = None
+
+    def info(self) -> dict:
+        """For the website's banner: whether the LLM is starting, running or stopped, and where."""
+        alive = self.proc is not None and self.proc.returncode is None
+        state = "starting" if alive and self.starting_since else "running" if alive else "stopped"
+        where = None if not alive else "cpu" if not self.running_gpu else "shared" if self.shared else "whole_gpu"
+        return {"state": state, "where": where}
 
     async def stop(self) -> None:
         if self.proc and self.proc.returncode is None:
@@ -1103,6 +1129,8 @@ class LocalLlm:
         """One chat completion constrained to `schema`. With `thinking`, reasoning models reason
         first (llama.cpp returns the reasoning separately and applies the schema to the answer)."""
         context = self.cfg.llm_dossier_context if thinking else None
+        if self.preempted:
+            raise LlmPreempted()
         await self.ensure(session, model, context)
         body = {
             "model": Path(model).stem if model else (self.model_name or "local"),
@@ -1123,6 +1151,8 @@ class LocalLlm:
             except asyncio.TimeoutError as exc:
                 raise LlmError("LLM timed out") from exc
             except (OSError, ClientConnectionError) as exc:
+                if self.preempted:  # stopped on purpose: someone started using the site
+                    raise LlmPreempted() from exc
                 # A local llama-server that crashed mid-request (seen once: a transient page-in
                 # fault) is restarted and the request retried, rather than failing the whole book.
                 if attempt == 2 or self.proc is None:
@@ -1430,16 +1460,24 @@ class Analyzer:
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.task: asyncio.Task | None = None
         self.current: str | None = None
+        # Background GPU work while the site is idle runs one thing at a time (an LLM step, or a book's
+        # automatic casting), so the LLM and the voice designer don't keep evicting each other.
+        self.background = asyncio.Lock()
 
     def start(self) -> None:
         from .app import ENGINES_KEY
 
-        async def make_room():  # the voice designer needs the VRAM a GPU LLM holds between steps
+        async def make_room():  # the voice designer needs the VRAM a GPU LLM holds
             if self.llm.running_gpu:
-                await self.llm.stop()
+                await self.llm.preempt()
 
         if ENGINES_KEY in self.app:
             self.app[ENGINES_KEY].before_designer = make_room
+        from .activity import ACTIVITY_KEY
+
+        if ACTIVITY_KEY in self.app:
+            self.app[ACTIVITY_KEY].on_use.append(self.on_use)
+            self.app[ACTIVITY_KEY].on_design.append(self.on_design)
         self.task = asyncio.ensure_future(self._run())
 
     async def stop(self) -> None:
@@ -1471,7 +1509,10 @@ class Analyzer:
                             s = self.store.script(book_id)
                             s.update(status="casting", detail="creating character voices")
                             self.store.save_script(book_id, s)
-                        await run_cast(self.app, book_id, s.get("auto_cast_engine") or self.llm.cfg.voice_design_engine)
+                        engine = s.get("auto_cast_engine") or self.llm.cfg.voice_design_engine
+                        # In the background: it waits until the site is idle (or nobody listens), and the
+                        # next book's analysis goes on meanwhile.
+                        self._spawn_cast(book_id, engine)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -1484,6 +1525,12 @@ class Analyzer:
                     self.current = None
                     if self.queue.empty():
                         await self.llm.stop()  # free RAM/VRAM when idle
+
+    def _spawn_cast(self, book_id: str, engine: str) -> None:
+        tasks = self.app[CAST_TASKS_KEY] if CAST_TASKS_KEY in self.app else set()
+        task = asyncio.ensure_future(run_cast(self.app, book_id, engine, background=True))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def _label(self, session, book: dict, script: dict, chunk: Chunk):
         thinking = self.llm.cfg.llm_label_thinking
@@ -1528,18 +1575,65 @@ class Analyzer:
                 d = s["characters"][cid].setdefault("dossier", {})
                 d["narrates"] = "yes" if key == "any" else f"the {key}-tense sections"
 
-    async def _gpu(self, make_coro):
-        """Runs one LLM step. "shared" (default): on the GPU next to the speech model, which stays loaded
-        (only a voice designer is unloaded). "auto": with the whole GPU when the speech model has been idle,
-        otherwise on the CPU alongside speech. "gpu": always the whole GPU. "cpu": never the GPU."""
+    async def _gpu(self, make_coro, interactive: bool = False):
+        """Runs one LLM step.
+
+        "adaptive" (default) follows what the site is used for (activity.py):
+        * reading: next to the speech model (experts of llm_cpu_moe_shared layers in RAM);
+        * designing (and design_pause_s after the last design): waits; steps someone asked for
+          (`interactive`, e.g. sorting the cast) still run, next to the speech model;
+        * idle: the whole GPU (the speech model is unloaded), one background thing at a time.
+        A step stopped because the state changed (LlmPreempted) is retried in the new state.
+        "shared": always next to the speech model. "auto": the whole GPU when the speech model has been idle,
+        otherwise the CPU. "gpu": always the whole GPU. "cpu": never the GPU."""
+        from .activity import ACTIVITY_KEY
         from .app import ENGINES_KEY
 
         manager = self.app[ENGINES_KEY]
         mode = self.llm.cfg.llm_mode
+        if mode == "adaptive" and ACTIVITY_KEY in self.app:
+            activity = self.app[ACTIVITY_KEY]
+            while True:
+                if not interactive:
+                    await activity.wait_for(lambda: not activity.designing, on_wait=self._note_designing)
+                if interactive or activity.in_use:
+                    async with manager.exclusive(evict=False):
+                        if activity.designing and not interactive:
+                            continue
+                        self.llm.gpu, self.llm.shared, self.llm.preempted = True, True, False
+                        try:
+                            return await make_coro()
+                        except LlmPreempted:
+                            logger.info("LLM stopped for the voice designer")
+                            continue
+                # Idle: take the background turn (a casting may hold it), unless someone comes back meanwhile.
+                got = False
+                while not activity.in_use:
+                    try:
+                        await asyncio.wait_for(self.background.acquire(), 2.0)
+                        got = True
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+                if not got:
+                    continue
+                try:
+                    async with manager.exclusive():
+                        if activity.in_use:
+                            continue
+                        self.llm.gpu, self.llm.shared, self.llm.preempted = True, False, False
+                        try:
+                            return await make_coro()
+                        except LlmPreempted:
+                            logger.info("LLM stopped: the site is in use")
+                            continue
+                finally:
+                    self.background.release()
         if mode == "shared":
-            self.llm.gpu = True
+            self.llm.gpu, self.llm.shared, self.llm.preempted = True, True, False
             async with manager.exclusive(evict=False):
                 return await make_coro()
+        self.llm.shared = False
         use_gpu = mode == "gpu" or (mode == "auto" and manager.idle_seconds() >= GPU_IDLE_S)
         self.llm.gpu = use_gpu
         if not use_gpu:
@@ -1550,6 +1644,37 @@ class Analyzer:
             finally:
                 if manager.tts_waiting:
                     await self.llm.stop()
+
+    async def _note_designing(self) -> None:
+        """Say on the book being analysed that it waits while voices are designed."""
+        book_id = self.current
+        if not book_id:
+            return
+        async with self.store.lock(book_id):
+            s = self.store.script(book_id)
+            if s.get("status") in ("running", "queued"):
+                s["detail"] = "paused while you design voices; continues 10 minutes after the last one"
+                self.store.save_script(book_id, s)
+
+    async def on_use(self) -> None:
+        """Someone started using the site ("adaptive"): an LLM on the whole GPU is stopped (its step goes on
+        next to the speech model) and the speech model loads."""
+        from .app import CONFIG_KEY, ENGINES_KEY
+
+        if self.llm.cfg.llm_mode != "adaptive":
+            return
+        if self.llm.running_gpu and not self.llm.shared:
+            await self.llm.preempt()
+        manager = self.app[ENGINES_KEY]
+        try:
+            await manager.preload(self.app[CONFIG_KEY].default_engine)
+        except Exception as exc:  # noqa: BLE001 - the first request will report it
+            logger.warning("could not load the speech model: %s", exc)
+
+    async def on_design(self) -> None:
+        """Someone started designing voices ("adaptive"): the LLM stops at once to make room for the designer."""
+        if self.llm.cfg.llm_mode == "adaptive" and self.llm.proc is not None:
+            await self.llm.preempt()
 
     async def analyse(self, session, book_id: str) -> None:
         book = self.store.book(book_id)
@@ -1655,7 +1780,7 @@ class Analyzer:
         from .engines.manager import EngineError
 
         try:
-            result = await cast_voices(self.app, book_id, self.llm.cfg.voice_design_engine)
+            result = await cast_voices(self.app, book_id, self.llm.cfg.voice_design_engine, background=True)
             logger.info("voices for new speakers in %s: %s", book_id, result["created"])
         except (EngineError, OSError) as exc:
             logger.warning("could not create voices for new speakers: %s", exc)
@@ -1762,10 +1887,47 @@ def own_voice_plan(s: dict, supporting_budget: int, main_lines: int = 5) -> set[
     return own
 
 
+LISTEN_QUIET_S = 60.0  # automatic casting waits until nobody has asked for speech this long
+
+
+async def _wait_for_background_turn(app: web.Application, book_id: str) -> None:
+    """Automatic casting gives way to people: in "adaptive" mode it waits until the site is idle,
+    otherwise while the speech model is being read with."""
+    from .activity import ACTIVITY_KEY
+    from .app import CONFIG_KEY, ENGINES_KEY
+
+    store = app[DRAMA_STORE_KEY]
+
+    async def note(text: str) -> None:
+        async with store.lock(book_id):
+            s = store.script(book_id)
+            if s.get("status") == "casting" and s.get("detail") != text:
+                s["detail"] = text
+                store.save_script(book_id, s)
+
+    if app[CONFIG_KEY].llm_mode == "adaptive" and ACTIVITY_KEY in app:
+        activity = app[ACTIVITY_KEY]
+        if activity.in_use:
+            await activity.wait_for(lambda: not activity.in_use,
+                                    on_wait=lambda: note("creating voices when the site is idle"))
+            await note("creating character voices")
+        return
+    manager = app[ENGINES_KEY]
+    noted = False
+    while manager.idle_seconds() < LISTEN_QUIET_S:
+        if not noted:
+            await note("creating voices when you stop listening")
+            noted = True
+        await asyncio.sleep(5)
+    if noted:
+        await note("creating character voices")
+
+
 async def cast_voices(app: web.Application, book_id: str, engine: str, main_lines: int = 5,
-                      upgrade_roles: set[str] | None = None) -> dict:
+                      upgrade_roles: set[str] | None = None, background: bool = False) -> dict:
     """Design voices for characters without one (see own_voice_plan); the others get pool voices.
-    `upgrade_roles` also gives characters of those tiers who share a pool voice one of their own."""
+    `upgrade_roles` also gives characters of those tiers who share a pool voice one of their own.
+    `background` (casting nobody asked for just now) designs only while nobody is listening."""
     from .app import CONFIG_KEY, VOICES_KEY, design_voice
 
     store: ScriptStore = app[DRAMA_STORE_KEY]
@@ -1773,6 +1935,31 @@ async def cast_voices(app: web.Application, book_id: str, engine: str, main_line
     s = store.script(book_id)
     own = own_voice_plan(s, app[CONFIG_KEY].cast_supporting_voices, main_lines)
     created = []
+
+    async def design(*args, **kwargs):
+        if background:
+            await _wait_for_background_turn(app, book_id)
+        else:
+            from .activity import touch
+
+            touch(app, design=True)  # casting someone asked for counts as designing while it runs
+        return await design_voice(*args, **kwargs)
+
+    # Automatic casting takes the background turn (one background thing at a time while the site is idle).
+    turn = (app[ANALYZER_KEY].background if background and app[CONFIG_KEY].llm_mode == "adaptive"
+            and ANALYZER_KEY in app else None)
+    if turn is not None:
+        await _wait_for_background_turn(app, book_id)
+        await turn.acquire()
+    try:
+        return await _cast(app, book_id, engine, s, own, voices, upgrade_roles, design, created)
+    finally:
+        if turn is not None:
+            turn.release()
+
+
+async def _cast(app, book_id, engine, s, own, voices, upgrade_roles, design, created) -> dict:
+    store: ScriptStore = app[DRAMA_STORE_KEY]
     for cid, c in s["characters"].items():
         pooled = (c.get("voice") or "").startswith("pool-")
         upgrade = bool(upgrade_roles) and c.get("role") in upgrade_roles and pooled
@@ -1780,7 +1967,7 @@ async def cast_voices(app: web.Application, book_id: str, engine: str, main_line
             continue
         if cid in own or upgrade:
             vid = f"ch-{book_id[:8]}-{cid}"[:64]
-            v = voices.get(vid) or await design_voice(
+            v = voices.get(vid) or await design(
                 app, engine, character_description(c), c["name"], source="character", voice_id=vid,
                 seed=zlib.crc32(cid.encode()) % 100000,
             )
@@ -1789,7 +1976,7 @@ async def cast_voices(app: web.Application, book_id: str, engine: str, main_line
         else:
             g, a = pool_key(c.get("gender", "unknown"), c.get("age", "unknown"))
             vid = f"pool-{g}-{a}".replace(" ", "")
-            v = voices.get(vid) or await design_voice(
+            v = voices.get(vid) or await design(
                 app, engine, POOL[(g, a)], f"Pool: {g} {a}", source="character", voice_id=vid, seed=7,
             )
             c["voice"] = v.id
@@ -1808,6 +1995,24 @@ async def cast_voices(app: web.Application, book_id: str, engine: str, main_line
 DRAMA_STORE_KEY = web.AppKey("drama_store", ScriptStore)
 ANALYZER_KEY = web.AppKey("analyzer", Analyzer)
 CAST_TASKS_KEY = web.AppKey("cast_tasks", set)
+
+
+async def gpu_status(request: web.Request) -> web.Response:
+    """What runs on the GPU right now, for the website's banner: the site's state (reading, designing, idle),
+    the speech model and voice designer (loading progress), and the analysis LLM."""
+    from .activity import ACTIVITY_KEY
+    from .app import ENGINES_KEY
+
+    app = request.app
+    analyzer = app[ANALYZER_KEY]
+    book = analyzer.current
+    title = ((app[DRAMA_STORE_KEY].summary(book) or {}).get("title", "") if book else "")
+    return web.json_response({
+        "mode": analyzer.llm.cfg.llm_mode,
+        "activity": app[ACTIVITY_KEY].json() if ACTIVITY_KEY in app else None,
+        "engines": app[ENGINES_KEY].status(),
+        "llm": {**analyzer.llm.info(), "book": book, "title": title},
+    })
 
 
 async def list_books(request: web.Request) -> web.Response:
@@ -2135,6 +2340,9 @@ async def voice_from_dossier(request: web.Request) -> web.Response:
     store = request.app[DRAMA_STORE_KEY]
     book_id, cid = request.match_info["book"], request.match_info["character"]
     body = await request.json() if request.can_read_body else {}
+    from .activity import touch
+
+    touch(request.app, design=True)
     s = store.script(book_id)
     c = s["characters"].get(cid)
     if c is None:
@@ -2164,21 +2372,23 @@ async def voice_from_dossier(request: web.Request) -> web.Response:
 
 
 async def run_cast(app: web.Application, book_id: str, engine: str, upgrade: set[str] | None = None,
-                   previous: str = "done") -> None:
-    """Creates the cast's voices (status "casting" while it runs) and stores the cast in the series."""
+                   previous: str = "done", background: bool = False) -> None:
+    """Creates the cast's voices (status "casting" while it runs) and stores the cast in the series.
+    `background`: casting after an analysis, which waits while someone is listening."""
     from .engines.manager import EngineError
     from .series import remember
 
     store = app[DRAMA_STORE_KEY]
     try:
-        result = await cast_voices(app, book_id, engine, upgrade_roles=upgrade)
+        result = await cast_voices(app, book_id, engine, upgrade_roles=upgrade, background=background)
         detail = f"{len(result['created'])} voices created"
         remember(app, book_id)
     except EngineError as exc:
-        detail = f"voice creation failed: {exc.detail}"
+        detail = "voice creation failed: " + exc.detail.strip().splitlines()[0][:200]
+        logger.warning("casting %s failed: %s", book_id, exc.detail)
     except Exception as exc:  # noqa: BLE001
         logger.exception("casting failed")
-        detail = f"voice creation failed: {exc}"
+        detail = f"voice creation failed: {str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__}"
     async with store.lock(book_id):
         fresh = store.script(book_id)
         fresh.update(status=previous if previous != "casting" else "done", detail=detail)
@@ -2233,6 +2443,8 @@ def setup(app: web.Application) -> None:
                 s["status"] = "none"
                 store.save_script(d.name, s)
                 await analyzer.enqueue(d.name)
+            elif s and s.get("status") == "casting":  # automatic casting cut short by a restart: carry on
+                analyzer._spawn_cast(d.name, s.get("auto_cast_engine") or cfg.voice_design_engine)
         yield
         for t in app[CAST_TASKS_KEY]:
             t.cancel()
@@ -2240,6 +2452,7 @@ def setup(app: web.Application) -> None:
 
     app.cleanup_ctx.append(_ctx)
     r = app.router
+    r.add_get("/api/gpu", gpu_status)
     r.add_get("/api/books", list_books)
     r.add_post("/api/books/{book}/characters/{character}/voice-from-dossier", voice_from_dossier)
     from . import series

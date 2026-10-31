@@ -141,16 +141,21 @@ async def engine_unload(request: web.Request) -> web.Response:
 
 # ---------------------------------------------------------------- site settings
 
-LLM_MODES = ("shared", "auto", "gpu", "cpu")
+LLM_MODES = ("adaptive", "shared", "auto", "gpu", "cpu")
 
 
 def settings_json(app: web.Application) -> dict:
+    from .activity import ACTIVITY_KEY
+
     cfg, manager = app[CONFIG_KEY], app[ENGINES_KEY]
     installed = [e for e in manager.engines() if e["installed"]]
     return {
         "speech_engine": cfg.default_engine,
         "voice_design_engine": cfg.voice_design_engine,
         "llm_mode": cfg.llm_mode,
+        "idle_after_s": cfg.idle_after_s,
+        "design_pause_s": cfg.design_pause_s,
+        "activity": app[ACTIVITY_KEY].json(),
         "engines": [{"id": e["id"], "label": e["label"], "voice_design": e["voice_design"], "stats": e["stats"]}
                     for e in installed],
         "status": manager.status(),
@@ -193,6 +198,19 @@ async def settings_put(request: web.Request) -> web.Response:
         if mode not in LLM_MODES:
             return _json_error(400, f"llm_mode must be one of {', '.join(LLM_MODES)}")
         changes["llm_mode"] = mode
+    from .activity import ACTIVITY_KEY
+
+    for key in ("idle_after_s", "design_pause_s"):
+        if body.get(key) is None:
+            continue
+        try:
+            seconds = float(body[key])
+        except (TypeError, ValueError):
+            return _json_error(400, f"{key} must be a number of seconds")
+        if not 30 <= seconds <= 24 * 3600:
+            return _json_error(400, f"{key} must be between 30 seconds and a day")
+        changes[key] = seconds
+        setattr(app[ACTIVITY_KEY], key, seconds)
     speech = _str(body, "speech_engine")
     if speech and speech != app[CONFIG_KEY].default_engine:
         spec = manager.specs.get(speech)
@@ -309,6 +327,9 @@ async def design_voice(app: web.Application, engine: str, description: str, name
 
 async def voice_design(request: web.Request) -> web.Response:
     body = await _json_body(request)
+    from .activity import touch
+
+    touch(request.app, design=True)
     description = _str(body, "description")
     if not description:
         return _json_error(400, "Describe the voice, e.g. 'female, young adult, warm, british accent'")
@@ -467,6 +488,9 @@ async def tts(request: web.Request) -> web.StreamResponse:
     app = request.app
     cfg = app[CONFIG_KEY]
     body = await _json_body(request)
+    from .activity import ACTIVITY_KEY
+
+    app[ACTIVITY_KEY].touch()  # someone is reading or listening
     text = clean_text(str(body.get("text") or ""))
     if len(text) > MAX_TEXT_CHARS:
         return _json_error(413, f"Text longer than {MAX_TEXT_CHARS} characters")
@@ -677,6 +701,9 @@ def make_app(
         designer_idle_s=cfg.designer_idle_s,
     )
     app[ENGINES_KEY].resident = app[ENGINES_KEY].resident or cfg.default_engine
+    from .activity import ACTIVITY_KEY, Activity
+
+    app[ACTIVITY_KEY] = Activity(cfg.idle_after_s, cfg.design_pause_s)
     app[VOICES_KEY] = VoiceStore(data / "voices")
     app[PRON_KEY] = PronunciationStore(data / "pronunciations.json")
     app[CACHE_KEY] = AudioCache(data / "cache", cfg.cache_max_mb * 1024 * 1024)
@@ -706,6 +733,9 @@ def make_app(
     r.add_get("/api/engines", engines)
     r.add_get("/api/settings", settings_get)
     r.add_put("/api/settings", settings_put)
+    from .activity import activity_route
+
+    r.add_post("/api/activity", activity_route)
     r.add_post("/api/engines/unload", engine_unload)
     r.add_post("/api/engines/{engine}/load", engine_load)
     r.add_get("/api/voices", voices)

@@ -1290,3 +1290,103 @@ async def test_a_characters_voice_follows_across_the_series(drama_client):
     assert r.status == 200
     assert store.script("v1")["characters"]["alice"]["voice"] == "other"
     assert store.script("v3")["characters"]["alice"]["voice"] == "my-v3-pick"
+
+async def test_automatic_casting_waits_while_someone_listens(drama_client, monkeypatch):
+    import time
+
+    from androidreader_server.app import ENGINES_KEY
+
+    app = drama_client.server.app
+    manager = app[ENGINES_KEY]
+    from androidreader_server.app import CONFIG_KEY
+
+    monkeypatch.setattr(app[CONFIG_KEY], "llm_mode", "shared")  # the listening wait of the other modes
+    monkeypatch.setattr(dz, "LISTEN_QUIET_S", 0.6)
+    monkeypatch.setattr(dz.asyncio, "sleep", _fast_sleep)
+    t0 = time.monotonic()
+    await dz._wait_for_background_turn(app, "nobook")  # nobody has listened: goes straight on
+    assert time.monotonic() - t0 < 0.2
+    manager._last_speech = time.monotonic()  # someone is listening
+    t0 = time.monotonic()
+    await dz._wait_for_background_turn(app, "nobook")
+    assert time.monotonic() - t0 >= 0.5
+
+
+_real_sleep = asyncio.sleep
+
+
+async def _fast_sleep(s):
+    await _real_sleep(min(s, 0.05))
+
+
+async def test_analysis_runs_while_reading_and_waits_while_designing(drama_client):
+    from androidreader_server.activity import ACTIVITY_KEY
+
+    c = drama_client
+    analyzer = c.server.app[dz.ANALYZER_KEY]
+    activity = c.server.app[ACTIVITY_KEY]
+    activity.idle_after_s, activity.design_pause_s = 30, 0.8
+    activity.touch()  # someone is reading: analysis goes on next to the speech model
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    s = await wait_done(c)
+    assert s["status"] == "done" and analyzer.llm.shared
+    activity.touch_design()  # someone designs voices: analysis waits until a pause after the last design
+    await c.post("/api/books/book1/analyze", json={"relabel": True}, headers=AUTH)
+    await asyncio.sleep(0.3)
+    s = await (await c.get("/api/books/book1/script", headers=AUTH)).json()
+    assert s["status"] in ("queued", "running") and "paused while you design voices" in s["detail"]
+    s = await wait_done(c)
+    assert s["status"] == "done"
+
+
+async def test_steps_follow_the_state_of_the_site(drama_client):
+    from androidreader_server.activity import ACTIVITY_KEY
+
+    app = drama_client.server.app
+    analyzer, activity = app[dz.ANALYZER_KEY], app[ACTIVITY_KEY]
+    activity.idle_after_s, activity.design_pause_s = 30, 0.4
+    calls = []
+
+    async def step():
+        calls.append(analyzer.llm.shared)
+        if len(calls) == 1:
+            activity.touch()  # idle -> someone comes back mid-step: the whole-GPU LLM is stopped
+            raise dz.LlmPreempted()
+        return 42
+
+    assert not activity.in_use
+    assert await analyzer._gpu(step) == 42
+    assert calls == [False, True]  # retried at once, next to the speech model
+    activity.touch_design()
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    assert await analyzer._gpu(lambda: asyncio.sleep(0, 7)) == 7
+    assert loop.time() - t0 >= 0.3  # waited for the design pause
+    activity.touch_design()
+    t0 = loop.time()
+    assert await analyzer._gpu(lambda: asyncio.sleep(0, 8), interactive=True) == 8  # asked for: no wait
+    assert loop.time() - t0 < 0.3
+
+
+async def test_using_the_site_is_tracked(drama_client):
+    from androidreader_server.activity import ACTIVITY_KEY
+
+    c = drama_client
+    activity = c.server.app[ACTIVITY_KEY]
+    activity.design_pause_s = 30
+    assert activity.state == "idle"
+    r = await c.post("/api/tts", json={"text": "Hello there."}, headers=AUTH)
+    await r.read()
+    s = await (await c.get("/api/settings", headers=AUTH)).json()
+    assert s["activity"]["state"] == "reading" and s["llm_mode"] == "adaptive"
+    await c.post("/api/voices/nar/design", json={"description": "deep", "engine": "fake", "count": 1}, headers=AUTH)
+    assert (await (await c.post("/api/activity", headers=AUTH)).json())["state"] == "designing"
+    r = await c.put("/api/settings", json={"design_pause_s": 120, "idle_after_s": 60}, headers=AUTH)
+    assert (await r.json())["design_pause_s"] == 120 and activity.idle_after_s == 60
+
+
+async def test_gpu_status_for_the_banner(drama_client):
+    g = await (await drama_client.get("/api/gpu", headers=AUTH)).json()
+    assert g["mode"] == "adaptive" and g["activity"]["state"] == "idle"
+    assert set(g["engines"]["speech"]) >= {"state", "loading_s", "expected_s"} and "voice_designer" in g["engines"]
+    assert g["llm"]["state"] == "stopped" and g["llm"]["book"] is None

@@ -27,10 +27,13 @@ The Android app that used to be the reader has been retired (see *The Android ap
 ## Voice models
 
 All four run on an RTX 5080 (16 GB) with PyTorch 2.8 + CUDA 12.8. The site reads with one of them,
-the **speech model** chosen on the **Settings** page (default OmniVoice): it is loaded at start-up
-and stays loaded, and nothing a reader does swaps it. Voice design with another model (Qwen3-TTS by
+the **speech model** chosen on the **Settings** page (default OmniVoice). It is what the site reads
+with, and requests can't swap it for another; it makes way only for book analysis while nobody
+uses the site (see *How analysis shares the GPU*). Voice design with another model (Qwen3-TTS by
 default) runs as a separate, design-only worker next to it (about 4 GB) while you design and is
-unloaded after three idle minutes. Measured on this PC with `scripts\bench_engines.py` (five
+unloaded after three minutes without designs. OmniVoice can design too, but only from its fixed
+tags (gender, age, pitch, accent), so a description is reduced to those; Qwen3-TTS follows the whole
+description. Measured on this PC with `scripts\bench_engines.py` (five
 sentences, two with a delivery, imported voice *The Documentarian*, after one warm-up sentence).
 *RTF* is generation time ÷ audio length, so below 1.0 is faster than real time. *WER* is
 Whisper-turbo's word error rate on the output (intelligibility).
@@ -90,7 +93,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `engine_options` | `{}` | Per engine, e.g. `{"omnivoice": {"num_step": 16}, "indextts": {"compile": true}}`. |
 | `sentence_pause_ms`, `trim_silence` | `300`, `true` | Pacing between sentences. |
 | `cache_max_mb` | `4096` | Sentence audio cache (`data\cache`). |
-| `llm_model`, `llm_mode`, `llm_cpu_moe_shared`, `llm_cpu_moe`, `llm_threads` | Qwen3.5-35B-A3B, `shared`, `32`, `20`, `12` | Dramatization LLM and how it shares the GPU (see below; `llm_mode` is on the Settings page). |
+| `llm_model`, `llm_mode`, `idle_after_s`, `design_pause_s`, `llm_cpu_moe_shared`, `llm_cpu_moe`, `llm_threads` | Qwen3.5-35B-A3B, `adaptive`, `300`, `600`, `32`, `20`, `12` | Dramatization LLM and how it shares the GPU (see below; the mode and both pauses are on the Settings page). |
 | `llm_label_context_words`, `llm_label_recent_lines` | `600`, `12` | Story text before each passage and earlier attributions shown when labelling; `0`, `6` = the old, slightly faster pass (see *What does more time per book buy?*). |
 | `llm_label_profiles` | `true` | The labelling pass also notes each speaker's voice profile (see *Voice profiles*). |
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
@@ -153,9 +156,10 @@ lets you fix it before the cast is created; books in a series share their cast a
 *Series* below).
 
 The server parses the EPUB, keeps a copy with its cover and pictures, and starts working:
-1. **Analysis:** who says each line and how, as described in section 5. It takes about 1.5 hours
-   per 100k words while sharing the GPU with the speech model (about an hour with the whole GPU,
-   see *How analysis shares the GPU*), and you can read and listen along as lines come in.
+1. **Analysis:** who says each line and how, as described in section 5. It takes about an hour
+   per 100k words while nobody uses the site, about 1.5 hours while you read or listen, and
+   pauses while you design voices (see *How analysis shares the GPU*). You can read and listen
+   along as lines come in.
 2. **Tiers:** the cast is sorted into main, supporting and extras.
 3. **Voices:** the cast's voices are created (untick *Create the cast's voices* to skip this).
 
@@ -428,15 +432,24 @@ removes those mistakes only by also removing most of the Nick fix, because the m
 which of several people a description such as "a prisoner" means. No variant gained on *Sasaki*,
 so it stays off (`0`). Correcting the Nick lines in the viewer remains the reliable fix.
 
-**How analysis shares the GPU** (Settings → *Book analysis*, `llm_mode`). `"shared"` (default) runs
-the LLM on the GPU next to the speech model, with the experts of 32 of its layers in RAM
-(`llm_cpu_moe_shared`), so the speech model is never unloaded and reading keeps working during an
-analysis (OmniVoice at 0.5–0.6 RTF instead of 0.2–0.35). Measured on this PC: the LLM generates
-about 37 tokens/s instead of 60 with the whole GPU, so analysis takes about 1.5× as long, and
-VRAM peaks around 13.3 of 16 GB while both work. While you design voices, analysis pauses until
-the designer has been idle for three minutes. `"auto"` (the old default) gives the LLM the whole
-GPU after two minutes without speech requests, unloading the speech model, which then takes about
-a minute to come back; `"gpu"` and `"cpu"` force one or the other.
+**How analysis shares the GPU** (Settings → *Book analysis*, `llm_mode`). `"adaptive"` (default)
+follows what the site is used for:
+
+| You are… | On the GPU | Book analysis | New books' voices |
+|---|---|---|---|
+| **reading or listening** (a page in use, or audio playing) | speech model, plus the LLM next to it (experts of 32 layers in RAM, `llm_cpu_moe_shared`) | runs, about 1.5× slower (37 instead of 60 tokens/s) | wait |
+| **designing voices** (and for `design_pause_s`, 10 min, after the last design) | speech model + voice designer (8.5 GB together) | paused | — |
+| **away** (nobody has used the site for `idle_after_s`, 5 min) | the LLM on the whole GPU, or the designer | full speed | created, one book at a time between analysis steps |
+
+Moving between them is quick: when you open a page after being away, the analysis LLM is stopped at
+once and the speech model loads (about 10 s); when you start designing, the LLM stops and the voice
+designer loads next to the speech model (10–30 s). A banner at the top of every page shows these
+loads with a progress bar (estimated from the previous load) and confirms when the model is ready.
+While both the speech model and the LLM work, speech stays faster than real time (OmniVoice at
+0.5–0.6 RTF instead of 0.2–0.35) and VRAM peaks around 13.3 of 16 GB. A step stopped by a change
+of state is retried, never lost. Things you ask for (sorting the cast into tiers, *Create missing
+voices*) run at once. Fixed alternatives: `"shared"` (always next to the speech model), `"auto"`
+(the whole GPU after two minutes without speech, otherwise the CPU), `"gpu"`, `"cpu"`.
 
 **Quoted terms are narration.** Words in quotation marks inside a sentence (*Chinese for “cat.”*,
 *all the “inspections” we did*, *labelled “DRINK ME,”*) are not dialogue. The prompt says so
@@ -617,7 +630,8 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/ping` | Liveness; no auth. |
 | `GET /api/health` | Version, default engine, loaded engine/state, voice count, cache stats. |
 | `GET /api/engines` · `POST /api/engines/{id}/load` · `POST /api/engines/unload` | Engines with capabilities, licence and measured RTF; make one the site's speech model; free the GPU. |
-| `GET/PUT /api/settings` `{speech_engine?, voice_design_engine?, llm_mode?}` | Site settings (the Settings page). `POST /api/tts` reads with the speech model; naming another `engine` is refused (409). |
+| `GET/PUT /api/settings` `{speech_engine?, voice_design_engine?, llm_mode?, idle_after_s?, design_pause_s?}` | Site settings (the Settings page). `POST /api/tts` reads with the speech model; naming another `engine` is refused (409). |
+| `POST /api/activity` · `GET /api/gpu` | An open page says someone is using the site (pages send it while you interact or audio plays) · what's on the GPU: the state (`reading`, `designing`, `idle`), the speech model and voice designer with loading progress, the analysis LLM (for the banner). |
 | `GET/POST /api/voices` · `DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store (`?all=1` adds character voices, `?details=1` everything with who uses it). |
 | `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?, age?}` (`age` -1/1: one age group younger/older; returns the new `description`, `age_from`, `age_to`) · listen · keep one · Whisper transcript of an uploaded clip. |

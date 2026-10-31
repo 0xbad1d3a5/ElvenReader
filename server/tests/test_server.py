@@ -21,6 +21,8 @@ SPECS = {s.id: s for s in (FAKE_ENGINE, SLOW, BROKEN)}
 
 
 def make_cfg(tmp_path, **kw) -> ServerConfig:
+    kw.setdefault("idle_after_s", 0.5)  # background work goes on half a second after the site was used
+    kw.setdefault("design_pause_s", 0.5)  # and analysis half a second after a voice was designed
     cfg = ServerConfig(token=TOKEN, default_engine="fake", preload=False, trim_silence=False,
                        sentence_pause_ms=0, synth_timeout_s=20, load_timeout_s=30, **kw)
     cfg.data_dir = str(tmp_path)
@@ -495,10 +497,13 @@ async def test_design_younger_or_older_options(client):
 def test_old_configs_move_the_llm_to_a_shared_gpu(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"token": "t", "llm_mode": "auto"}), encoding="utf-8")
     cfg = load_config(tmp_path)
-    assert cfg.llm_mode == "shared" and cfg.settings_v == 1
+    assert cfg.llm_mode == "adaptive" and cfg.settings_v == 2
     (tmp_path / "config.json").write_text(json.dumps({"token": "t", "llm_mode": "auto", "settings_v": 1}),
                                           encoding="utf-8")
     assert load_config(tmp_path).llm_mode == "auto"  # chosen after the migration: kept
+    (tmp_path / "config.json").write_text(json.dumps({"token": "t", "llm_mode": "shared", "settings_v": 1}),
+                                          encoding="utf-8")
+    assert load_config(tmp_path).llm_mode == "adaptive"  # v2: the shared default becomes not_reading
 
 async def test_the_llm_waits_for_a_designer_in_use(tmp_path):
     """An LLM step queued while a voice is being designed waits until the designer has been idle."""
@@ -565,3 +570,12 @@ async def test_series_pronunciations_apply_to_every_book_of_the_series(client):
     assert len(body) == 2 * WORD_BYTES
     assert (await client.post("/api/pronunciations", json={"term": "X", "respelling": "y", "scope": "series"},
                               headers=AUTH)).status == 400
+
+def test_omnivoice_designs_from_free_text_via_its_tags():
+    from androidreader_server.engines.omnivoice_engine import to_instruct
+
+    assert to_instruct("A deep, throaty, raspy adult male voice that sounds like a burping frog") == "male, low pitch"
+    assert to_instruct("male, middle-aged, low pitch, american accent") == "male, middle-aged, low pitch, american accent"
+    assert to_instruct("An elderly man with a low, rough voice, British.") == "male, elderly, low pitch, british accent"
+    assert to_instruct("A young girl's high, light voice, teasing like a grandmother") == "female, child, high pitch"
+    assert to_instruct("A warm, resonant voice") == "moderate pitch"  # never an unsupported item

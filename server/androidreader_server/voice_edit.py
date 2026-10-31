@@ -297,6 +297,9 @@ async def voice_design_candidates(request: web.Request) -> web.Response:
 
     voice = _voice_or_404(request)
     body = await _json_body(request)
+    from .activity import touch
+
+    touch(request.app, design=True)  # designing voices: analysis pauses while you do
     description = _str(body, "description") or voice.instruct or voice.description
     if not description:
         return _json_error(400, "Describe the voice, e.g. 'male, elderly, low pitch, british accent'")

@@ -1,6 +1,8 @@
 """OmniVoice (k2-fsa) adapter: zero-shot cloning, 600+ languages, CMU phoneme overrides."""
 from __future__ import annotations
 
+import re
+
 from .base import BaseEngine
 
 # OmniVoice has no free-form emotion control, only a few non-verbal sounds.
@@ -8,6 +10,58 @@ _NONVERBAL = (
     (("laugh", "giggl", "chuckl"), "[laughter]"),
     (("sigh",), "[sigh]"),
 )
+
+# OmniVoice designs voices only from a fixed set of tags ("male, low pitch, british accent").
+_TAGS = {"american accent", "australian accent", "british accent", "canadian accent", "child", "chinese accent",
+         "elderly", "female", "high pitch", "indian accent", "japanese accent", "korean accent", "low pitch", "male",
+         "middle-aged", "moderate pitch", "portuguese accent", "russian accent", "teenager", "very high pitch",
+         "very low pitch", "whisper", "young adult"}
+_AGE_TAG = {"child": "child", "teen": "teenager", "young adult": "young adult", "middle-aged": "middle-aged",
+            "elderly": "elderly"}
+_ACCENTS = {"british": "british", "english accent": "british", "england": "british", "american": "american",
+            "australian": "australian", "canadian": "canadian", "chinese": "chinese", "indian": "indian",
+            "japanese": "japanese", "korean": "korean", "portuguese": "portuguese", "brazilian": "portuguese",
+            "russian": "russian"}
+
+
+def to_instruct(description: str) -> str:
+    """A free-text voice description -> the OmniVoice tags it implies (gender, age, pitch, accent, whisper).
+    Tag-only descriptions pass through; what has no tag (timbre, manner) can't be expressed and is dropped."""
+    text = " ".join((description or "").split())
+    items = [i.strip().lower() for i in text.split(",") if i.strip()]
+    if items and all(i in _TAGS for i in items):
+        return ", ".join(items)
+    t = text.lower()
+    tags = []
+    female = re.search(r"\b(female|woman|women|girl|lady|she|her|mother|grandmother|queen|princess|maiden)\b", t)
+    male = re.search(r"\b(male|man|men|boy|gentleman|he|his|father|grandfather|king|prince|lord)\b", t)
+    if female and (not male or female.start() < male.start()):
+        tags.append("female")
+    elif male:
+        tags.append("male")
+    try:
+        from androidreader_server.voice_age import current_age
+
+        age = _AGE_TAG.get(current_age(text) or "")
+    except Exception:  # noqa: BLE001 - age is a nicety
+        age = None
+    if age:
+        tags.append(age)
+    if re.search(r"\bvery (deep|low)\b|\bbass\b", t):
+        tags.append("very low pitch")
+    elif re.search(r"\bvery high\b|\bsqueaky\b|\bshrill\b", t):
+        tags.append("very high pitch")
+    elif re.search(r"\b(deep|low|low-pitched|baritone|gravelly|husky)\b", t):
+        tags.append("low pitch")
+    elif re.search(r"\b(high|high-pitched)\b", t):
+        tags.append("high pitch")
+    for word, accent in _ACCENTS.items():
+        if word in t:
+            tags.append(f"{accent} accent")
+            break
+    if re.search(r"\bwhisper", t):
+        tags.append("whisper")
+    return ", ".join(tags) or "moderate pitch"
 
 
 class Engine(BaseEngine):
@@ -56,11 +110,11 @@ class Engine(BaseEngine):
         if voice.get("ref_audio"):
             kwargs["voice_clone_prompt"] = self._prompt(voice)
         elif voice.get("instruct"):
-            kwargs["instruct"] = voice["instruct"]
+            kwargs["instruct"] = to_instruct(voice["instruct"])
         audio = self.model.generate(text=text, **kwargs)
         yield audio[0]
 
     def design_voice(self, description: str, text: str, seed):
         self.seed_everything(seed)
-        audio = self.model.generate(text=text, instruct=description, **self._gen_kwargs())
+        audio = self.model.generate(text=text, instruct=to_instruct(description), **self._gen_kwargs())
         yield audio[0]

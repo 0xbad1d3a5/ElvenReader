@@ -23,6 +23,10 @@
   .grid .serieshead:not(:first-child) { margin-top:14px; }
   .seriessel { max-width:18em; font-size:12.5px; padding:2px 4px; } dialog .seriessel { max-width:none; width:100%; }
   .selbtn { position:fixed; z-index:30; font-size:12.5px; box-shadow:0 2px 8px #0003; }
+  #gpubanner { position:fixed; inset:auto; top:64px; left:50%; transform:translateX(-50%); margin:0; max-width:min(560px, 92vw);
+    background:var(--card); color:var(--fg); border:1px solid var(--accent); border-radius:10px; padding:8px 14px; box-shadow:0 4px 16px #0003;
+    font-size:13px; }
+  #gpubanner .bar { margin:6px 0 2px; } #gpubanner.ok { border-color:#3cb44b; }
   .serieslist { padding:12px 18px; max-width:900px; }
   .serieslist .sr { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
   .serieslist .sr h3 { margin:0 0 4px; font-size:16px; display:flex; gap:8px; align-items:center; }
@@ -214,6 +218,67 @@ function statusText(s) {
 }
 
 let SERIES_NAMES = null;  // cached for the series pickers (declared before the routing below runs a view)
+const PLAYERS = new Set();  // audio elements, to tell the server someone is listening
+
+/* ------------------------------------------------------------------ activity and GPU banner */
+
+/* The server keeps the GPU on what the site is used for (reading, designing voices, idle). Open pages say
+   when someone uses them: interacting with the page, or audio playing. */
+let lastInteract = 0, lastBeat = 0;
+const beat = () => { lastBeat = Date.now(); api("POST", "/api/activity").catch(() => {}); pollGpu(true); };
+["pointerdown", "keydown", "wheel", "touchstart"].forEach(ev => addEventListener(ev, () => {
+  const quiet = Date.now() - lastInteract > 30000;
+  lastInteract = Date.now();
+  if (quiet && TOKEN) beat();  // coming back: tell the server at once so it can get the speech model ready
+}, { passive: true, capture: true }));
+setInterval(() => {
+  const playing = [...PLAYERS].some(a => !a.paused);
+  if (TOKEN && (playing || (document.visibilityState === "visible" && Date.now() - lastInteract < 60000))) beat();
+}, 30000);
+
+/* A banner while models load or analysis makes room, with progress from how long the load took before. */
+let gpuTimer = null, gpuShown = null;
+async function pollGpu(soon) {
+  clearTimeout(gpuTimer);
+  if (!TOKEN || document.visibilityState !== "visible") { gpuTimer = setTimeout(pollGpu, 5000); return; }
+  let g = null;
+  try { g = (await api("GET", "/api/gpu")).data; } catch (_) {}
+  const msg = g ? gpuMessage(g) : null;
+  // A popover sits in the top layer, so the banner shows above open dialogs (the voice editor) too.
+  const el = $("#gpubanner") || document.body.appendChild(h("div", { id: "gpubanner", role: "status", popover: "manual" }));
+  const show = () => { if (el.matches(":popover-open")) el.hidePopover(); el.showPopover(); };
+  const hide = () => { if (el.matches(":popover-open")) el.hidePopover(); };
+  if (msg) {
+    el.className = "";
+    el.replaceChildren(...nonNull([h("div", {}, msg.text), msg.p != null ? h("div", { class: "bar" }, h("div", { style: { width: Math.round(msg.p * 100) + "%" } })) : null]));
+    show();
+    gpuShown = msg.done;
+  } else if (gpuShown) {
+    el.className = "ok"; el.replaceChildren(h("div", {}, "\u2713 " + gpuShown)); show();
+    gpuShown = null;
+    setTimeout(() => { if (!gpuShown) hide(); }, 3000);
+  } else if (el.className !== "ok") hide();
+  gpuTimer = setTimeout(pollGpu, msg ? 1000 : soon ? 1500 : 4000);
+}
+function gpuMessage(g) {
+  const sp = g.engines.speech || {}, dz = g.engines.voice_designer || {}, act = g.activity || {}, llm = g.llm || {};
+  const left = (x) => {
+    const s = Math.round((x.expected_s || 30) - (x.loading_s || 0));
+    return s > 1 ? `about ${s} s` : "nearly there";
+  };
+  const prog = (x) => Math.min(0.95, (x.loading_s || 0) / Math.max(1, x.expected_s || 30));
+  if (sp.state === "loading")
+    return { text: `Loading the reading voice (${sp.label})\u2026 ${left(sp)}`, p: prog(sp), done: "The reading voice is ready" };
+  if (dz.state === "loading")
+    return { text: `Loading the voice designer (${dz.label})\u2026 ${left(dz)}. Book analysis is paused while you design voices.`,
+      p: prog(dz), done: "The voice designer is ready" };
+  if (act.designing && llm.state !== "stopped")
+    return { text: "Pausing book analysis to make room for designing voices\u2026", p: null, done: "Ready to design voices" };
+  if (act.in_use && llm.where === "whole_gpu")
+    return { text: "Moving book analysis aside so you can read and listen\u2026", p: null, done: "Ready to read" };
+  return null;
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pollGpu(true); });
 const route = location.pathname.replace(/\/+$/, "");
 const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
 if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");
@@ -221,6 +286,7 @@ else if (routeMatch && routeMatch[1] === "voices") voicesView();
 else if (routeMatch && routeMatch[1] === "series") seriesView();
 else if (routeMatch && routeMatch[1] === "settings") settingsView();
 else if (routeMatch) bookView(routeMatch[1]); else libraryView();
+if (TOKEN) { pollGpu(true); beat(); }  // opening a page is using the site
 
 /* ------------------------------------------------------------------ series */
 
@@ -482,14 +548,22 @@ async function settingsView() {
     const speed = (e) => e.stats && e.stats.rtf ? ` \u00b7 ${e.stats.rtf < 1 ? (1 / e.stats.rtf).toFixed(1) + "\u00d7 real time" : "slower than real time"}` : "";
     const speech = h("select", {}, ...s.engines.map(e => h("option", { value: e.id }, e.label + speed(e))));
     speech.value = s.speech_engine;
-    const design = h("select", {}, ...s.engines.filter(e => e.voice_design).map(e => h("option", { value: e.id }, e.label)));
+    const DESIGN_NOTES = { omnivoice: " (basic: only gender, age, pitch and accent)", qwen3tts: " (recommended: follows the whole description)" };
+    const design = h("select", {}, ...s.engines.filter(e => e.voice_design).map(e => h("option", { value: e.id }, e.label + (DESIGN_NOTES[e.id] || ""))));
     design.value = s.voice_design_engine;
-    const modes = [["shared", "Share the GPU (recommended): the speech model stays loaded; analysis runs a bit slower"],
-      ["auto", "Use the whole GPU when nobody has listened for 2 minutes (faster analysis; the speech model is unloaded and takes about a minute to come back)"],
+    const modes = [["adaptive", "Follow what I'm doing (recommended)"],
+      ["shared", "Always share the GPU: analysis next to the speech model, even while designing"],
+      ["auto", "Whole GPU when nobody has listened for 2 minutes, otherwise CPU"],
       ["cpu", "CPU only (slowest; never touches the GPU)"]];
     if (s.llm_mode === "gpu") modes.push(["gpu", "Always the whole GPU (the speech model is unloaded during analysis)"]);
     const mode = h("select", {}, ...modes.map(([k, t]) => h("option", { value: k }, t)));
     mode.value = s.llm_mode;
+    const minutes = (secs) => h("input", { type: "number", min: 1, max: 1440, step: 1, value: Math.round(secs / 60), style: { width: "5em" } });
+    const idle = minutes(s.idle_after_s), pause = minutes(s.design_pause_s);
+    const act = s.activity || {};
+    const now = { reading: "Right now: someone is reading or listening \u2014 analysis runs next to the reading voice.",
+      designing: `Right now: voices are being designed \u2014 analysis is paused (about ${Math.ceil((act.design_pause_left_s || 0) / 60)} more min).`,
+      idle: "Right now: nobody is using the site \u2014 analysis has the whole GPU and new voices are being created." }[act.state] || "";
     const st = s.status;
     const state = st.loading ? `Loading ${st.loading}\u2026` : st.active ? `Loaded: ${st.active}` : st.state === "error" ? `\u26A0 ${st.detail}` : "Not loaded yet (it loads with the first sentence)";
     const note = h("span", { class: "small" });
@@ -498,7 +572,8 @@ async function settingsView() {
         "Everything is read with it from now on; cached sentences from the old model aren't reused. It takes about a minute to load.")) return;
       save.disabled = true;
       try {
-        await api("PUT", "/api/settings", { speech_engine: speech.value, voice_design_engine: design.value, llm_mode: mode.value });
+        await api("PUT", "/api/settings", { speech_engine: speech.value, voice_design_engine: design.value, llm_mode: mode.value,
+          idle_after_s: Math.max(1, Number(idle.value) || 5) * 60, design_pause_s: Math.max(1, Number(pause.value) || 10) * 60 });
         note.textContent = "\u2713 Saved";
       } catch (e) { alert(e.message); }
       save.disabled = false;
@@ -506,14 +581,21 @@ async function settingsView() {
     } }, "Save");
     el.replaceChildren(
       h("div", { class: "sr" }, h("h3", {}, "Speech model"),
-        h("p", { class: "small muted" }, "The one model the whole site reads with: books, previews and voice tests. It stays loaded; " +
-          "nothing else unloads it."), speech, h("p", { class: "small" }, state)),
+        h("p", { class: "small muted" }, "The one model the whole site reads with: books, previews and voice tests. " +
+          "Only an idle site unloads it, for book analysis; it comes back when you do."), speech, h("p", { class: "small" }, state)),
       h("div", { class: "sr" }, h("h3", {}, "Voice design"),
         h("p", { class: "small muted" }, "Makes new character voices from a description (casting, Make 3 options, Younger/Older). " +
-          "If it isn't the speech model, it is loaded next to it while you design and unloaded after a few idle minutes."),
+          "If it isn't the speech model, it is loaded next to it while you design and unloaded after a few minutes without designs."),
         design, st.designer ? h("p", { class: "small" }, `Designer loaded: ${st.designer}`) : null),
       h("div", { class: "sr" }, h("h3", {}, "Book analysis"),
-        h("p", { class: "small muted" }, "How the LLM that works out who says what uses the GPU."), mode),
+        h("p", { class: "small muted" }, "How the LLM that works out who says what uses the GPU."), mode,
+        mode.value === "adaptive" || s.llm_mode === "adaptive" ? h("ul", { class: "small", style: { margin: "8px 0 0", paddingLeft: "18px" } },
+          h("li", {}, h("b", {}, "Reading or listening: "), "the reading voice stays loaded; analysis runs next to it, a bit slower."),
+          h("li", {}, h("b", {}, "Designing voices: "), "the reading voice and the voice designer are loaded; analysis pauses until ",
+            pause, " min after your last design."),
+          h("li", {}, h("b", {}, "Idle "), "(nobody has used the site for ", idle, " min): analysis gets the whole GPU and new books\u2019 voices are created; " +
+            "the reading voice comes back when you do (a banner shows its progress).")) : null,
+        h("p", { class: "small" }, now)),
       h("div", { class: "row", style: { display: "flex", gap: "8px", alignItems: "center" } }, save, note));
     clearTimeout(timer);
     if (st.loading) timer = setTimeout(render, 3000);
@@ -638,6 +720,7 @@ async function installedEngines() {
   return ENGINE_INFO.list;
 }
 const sharedPlayer = new Audio();
+PLAYERS.add(sharedPlayer);
 function playUrl(url) { if (url) { sharedPlayer.pause(); sharedPlayer.src = url; sharedPlayer.play().catch(() => {}); } }
 async function playPath(path) { playUrl(await authBlobUrl(path)); }
 const usedByText = (v, limit = 8) => {
@@ -901,6 +984,7 @@ async function bookView(id) {
     units: [], playing: -1, audio: new Audio(), fetches: new Map(), session: null, pictures: {},
     tierHi: localStorage.getItem("tierHi") || "",
   };
+  PLAYERS.add(st.audio);
   const app = $("#app");
   app.replaceChildren(h("p", { style: { padding: "20px" } }, "Loading\u2026"));
   try {

@@ -62,11 +62,15 @@ class ServerConfig:
     llm_model: str = "Qwen3.5-35B-A3B-Q4_K_M.gguf"
     llm_context: int = 12288
     llm_threads: int = 12
-    # Where the LLM runs: "shared" (default: on the GPU next to the speech model, with the experts of
-    # llm_cpu_moe_shared layers in RAM, so the speech model is never unloaded), "auto" (the whole GPU
-    # while no speech has been requested for two minutes, unloading the speech model, otherwise CPU),
-    # "gpu" (the whole GPU) or "cpu". llm_cpu_moe = layers whose experts stay in RAM on the whole-GPU path.
-    llm_mode: str = "shared"
+    # Where the LLM runs: "adaptive" (default) follows what the site is used for (activity.py): while
+    # someone reads or listens, analysis runs next to the speech model (experts of llm_cpu_moe_shared layers
+    # in RAM); while someone designs voices and design_pause_s after, it waits; when nobody has used the site
+    # for idle_after_s, it gets the whole GPU (experts of llm_cpu_moe layers in RAM) and new books' voices
+    # are created. Fixed modes: "shared" (always next to the speech model), "auto" (the whole GPU after two
+    # minutes without speech requests, otherwise CPU), "gpu" (always the whole GPU) or "cpu".
+    llm_mode: str = "adaptive"
+    idle_after_s: float = 300.0
+    design_pause_s: float = 600.0
     llm_cpu_moe: int = 20
     llm_cpu_moe_shared: int = 32
     # Pass 1 of the analysis: a reasoning model reads the whole book and builds a character
@@ -108,7 +112,7 @@ class ServerConfig:
     whisper_venv: str = "indextts"
     whisper_model: str = "whisper/large-v3-turbo.pt"
     # Version of the settings below the defaults written to config.json (for one-time migrations).
-    settings_v: int = 1
+    settings_v: int = 2
 
     data_dir: str = field(default="", repr=False)
 
@@ -142,6 +146,11 @@ def load_config(data_dir: Path | None = None) -> ServerConfig:
         if raw.get("llm_mode", "auto") == "auto":
             raw["llm_mode"] = "shared"
         raw["settings_v"] = 1
+    if raw and int(raw.get("settings_v") or 0) < 2:
+        # v2: the LLM follows what the site is used for ("shared" was the v1 default).
+        if raw.get("llm_mode", "shared") == "shared":
+            raw["llm_mode"] = "adaptive"
+        raw["settings_v"] = 2
     known = set(ServerConfig.__dataclass_fields__) - {"data_dir"}
     cfg = ServerConfig(**{k: v for k, v in raw.items() if k in known})
     path.write_text(json.dumps(cfg.to_json(), indent=2), encoding="utf-8")

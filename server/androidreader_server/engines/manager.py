@@ -181,6 +181,7 @@ class _Slot:
         self.state = "idle"
         self.detail = ""
         self.loading: str | None = None
+        self.since = 0.0  # when the current load started
 
     @property
     def active(self) -> str | None:
@@ -214,6 +215,9 @@ class EngineManager:
         self._reaper: asyncio.Task | None = None
         # The site's speech model (loaded in the main slot, now or on the first request).
         self.resident: str | None = None
+        self.designer_load_s: dict[str, float] = {}
+        self._speaking = 0
+        self._last_speech = time.monotonic() - 3600
         # Called before the designer loads, to make room on the GPU (the server stops a GPU LLM here).
         self.before_designer = None
 
@@ -238,6 +242,16 @@ class EngineManager:
         return self._main.state
 
     def status(self) -> dict:
+        def expected(slot: _Slot) -> float | None:
+            if not slot.loading:
+                return None
+            if slot is self._design:
+                return self.designer_load_s.get(slot.loading, 15.0)
+            return (self.stats.get(slot.loading) or EngineStats()).load_s or 30.0
+
+        def label(engine_id: str | None) -> str | None:
+            return self.specs[engine_id].label if engine_id in self.specs else engine_id
+
         return {
             "active": self.active,
             "state": self._main.state,
@@ -246,6 +260,14 @@ class EngineManager:
             "busy": self._main.lock.locked(),
             "designer": self.designer,
             "designer_state": self._design.state,
+            # For the website's banner: what is loading, for how long so far and about how long it takes.
+            "speech": {"engine": self._main.loading or self.active, "label": label(self._main.loading or self.active),
+                       "state": self._main.state, "loading_s": round(time.monotonic() - self._main.since, 1)
+                       if self._main.loading else None, "expected_s": expected(self._main)},
+            "voice_designer": {"engine": self._design.loading or self.designer,
+                               "label": label(self._design.loading or self.designer), "state": self._design.state,
+                               "loading_s": round(time.monotonic() - self._design.since, 1)
+                               if self._design.loading else None, "expected_s": expected(self._design)},
         }
 
     def engines(self) -> list[dict]:
@@ -304,6 +326,8 @@ class EngineManager:
         if not extra:  # the designer's numbers would mislead (it loads only part of the model)
             self.stats[spec.id].load_s = round(time.perf_counter() - t0, 1)
             self.stats[spec.id].vram_mb = loaded.get("vram_mb")
+        else:
+            self.designer_load_s[spec.id] = round(time.perf_counter() - t0, 1)
         logger.info("%s loaded in %.1fs%s", spec.label, time.perf_counter() - t0, " (voice designer)" if extra else "")
         return worker
 
@@ -315,6 +339,7 @@ class EngineManager:
         if slot is self._design and self.before_designer is not None:
             await self.before_designer()
         slot.state, slot.detail, slot.loading = "loading", f"Loading {spec.label}", spec.id
+        slot.since = time.monotonic()
         try:
             slot.worker = await self._start(spec, extra)
         except EngineError as exc:
@@ -385,10 +410,10 @@ class EngineManager:
         return self._main.waiting > 0
 
     def idle_seconds(self) -> float:
-        """Seconds since speech was last requested or produced."""
-        if self._main.waiting:
+        """Seconds since speech was last requested or produced (voice design doesn't count)."""
+        if self._speaking:
             return 0.0
-        return time.monotonic() - self._main.last_activity
+        return time.monotonic() - self._last_speech
 
     async def close(self) -> None:
         if self._reaper:
@@ -400,7 +425,19 @@ class EngineManager:
 
     def synthesize(self, engine_id: str, payload: dict):
         """Async iterator: StreamStart, AudioChunk..., Done. Raises EngineError."""
-        return self._run(self._main, engine_id, {"op": "synth", **payload})
+        return self._speech(self._run(self._main, engine_id, {"op": "synth", **payload}))
+
+    async def _speech(self, stream):
+        """Marks speech (reading) as going on, for idle_seconds: voice design doesn't count as listening."""
+        self._speaking += 1
+        self._last_speech = time.monotonic()
+        try:
+            async with contextlib.aclosing(stream):
+                async for ev in stream:
+                    yield ev
+        finally:
+            self._speaking -= 1
+            self._last_speech = time.monotonic()
 
     def design(self, engine_id: str, description: str, text: str, seed: int | None = None):
         """Design with the speech model when it is the design model; otherwise with the designer, next to it."""
