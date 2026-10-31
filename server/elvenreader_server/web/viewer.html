@@ -608,6 +608,13 @@ async function queueView() {
     clearTimeout(timer);
     try { render((await api("PUT", "/api/queue", { order })).data); } catch (e) { alert(e.message); refresh(); }
   }
+  async function post(path) {
+    clearTimeout(timer);
+    try { render((await api("POST", path)).data); } catch (e) { alert(e.message); refresh(); }
+  }
+  const toBottom = (b, current) => h("button", { class: "iconbtn", title: "Send to the bottom of the queue" +
+    (current ? " (it stops now and continues where it stopped when its turn comes)" : ""),
+    onclick: () => post(`/api/queue/${b.id}/bottom`) }, "\u2913");
   function render(q) {
     const el = $("#queue");
     const ids = q.queued.map(b => b.id);
@@ -622,9 +629,13 @@ async function queueView() {
             `about ${minutes(b.words)} min`, b.lines ? `${b.lines} lines done` : null].filter(Boolean).join(" \u00b7 "))),
         h("span", { class: "grow" }),
         h("span", { class: "qbtns" },
+        h("button", { class: "iconbtn", title: q.current
+            ? `Analyse it now: \u201c${q.current.title}\u201d stops, keeps its progress and goes next`
+            : "Analyse it now", onclick: () => post(`/api/queue/${b.id}/now`) }, "\u23F5"),
         h("button", { class: "iconbtn", title: "Analyse it next", disabled: i === 0, onclick: () => move(i, 0) }, "\u2912"),
         h("button", { class: "iconbtn", title: "Move up", disabled: i === 0, onclick: () => move(i, i - 1) }, "\u2191"),
         h("button", { class: "iconbtn", title: "Move down", disabled: i === ids.length - 1, onclick: () => move(i, i + 1) }, "\u2193"),
+        toBottom(b),
         h("button", { class: "iconbtn", title: "Take it out of the queue (what's done is kept; \u201cContinue analysis\u201d in the library puts it back)",
           onclick: async () => {
             if (!confirm(`Take \u201c${b.title}\u201d out of the analysis queue?`)) return;
@@ -642,21 +653,23 @@ async function queueView() {
       return r;
     };
     const cur = q.current;
-    el.replaceChildren(
+    el.replaceChildren(...[
       h("h3", {}, "Analysing now"),
       cur ? h("div", { class: "qrow now" }, cover(cur),
         h("div", { class: "qinfo" }, h("a", { href: `/books/${cur.id}`, class: "qtitle" }, cur.title),
           h("div", { class: "bar" }, h("div", { style: { width: Math.round((cur.progress || 0) * 100) + "%" } })),
-          h("div", { class: "small muted" }, `${Math.round((cur.progress || 0) * 100)}% \u00b7 ${cur.detail || ""}`)))
+          h("div", { class: "small muted" }, `${Math.round((cur.progress || 0) * 100)}% \u00b7 ${cur.detail || ""}`)),
+        q.queued.length ? h("span", { class: "qbtns" }, toBottom(cur, true)) : null)
         : h("p", { class: "small muted" }, "Nothing."),
       h("h3", {}, `Next up (${q.queued.length})`),
       q.queued.length ? h("div", {}, ...q.queued.map(row)) : h("p", { class: "small muted" }, "Nothing is waiting. Add books from the library."),
-      q.queued.length > 1 ? h("p", { class: "small muted" }, "Drag a book, or use \u2912 \u2191 \u2193, to change the order. " +
+      q.queued.length ? h("p", { class: "small muted" }, "\u23F5 analyses a book now (the current one keeps its progress and goes next). " +
+        "Drag a book, or use \u2912 \u2191 \u2193 \u2913, to change the order. " +
         `Together about ${minutes(q.queued.reduce((a, b) => a + (b.words || 0), 0))} min with the whole GPU; longer while you read, ` +
         "and analysis pauses while you design voices.") : null,
       q.casting.length ? h("h3", {}, `Voices still to create (${q.casting.length})`) : null,
       ...q.casting.map(b => h("div", { class: "qrow" }, cover(b), h("div", { class: "qinfo" },
-        h("a", { href: `/books/${b.id}`, class: "qtitle" }, b.title), h("div", { class: "small muted" }, b.detail || "")))));
+        h("a", { href: `/books/${b.id}`, class: "qtitle" }, b.title), h("div", { class: "small muted" }, b.detail || ""))))].filter(Boolean));
     refreshSoon();
   }
   function refreshSoon() { clearTimeout(timer); timer = setTimeout(refresh, 5000); }

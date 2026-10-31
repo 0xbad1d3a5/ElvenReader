@@ -1481,9 +1481,11 @@ class BookQueue:
         except (OSError, ValueError):
             return []
 
-    async def put(self, book_id: str, before: str | None = None) -> None:
+    async def put(self, book_id: str, before: str | None = None, at: int | None = None) -> None:
         if book_id not in self.items:
-            if before in self.items:
+            if at is not None:
+                self.items.insert(at, book_id)
+            elif before in self.items:
                 self.items.insert(self.items.index(before), book_id)
             else:
                 self.items.append(book_id)
@@ -1514,6 +1516,14 @@ class BookQueue:
         self.items = wanted + [i for i in self.items if i not in wanted]
         self._save()
 
+    def to_bottom(self, book_id: str) -> bool:
+        if book_id not in self.items:
+            return False
+        self.items.remove(book_id)
+        self.items.append(book_id)
+        self._save()
+        return True
+
     def set_current(self, book_id: str | None) -> None:
         self.current = book_id
         self._save()
@@ -1527,6 +1537,8 @@ class Analyzer:
         self.queue = BookQueue(Path(store.root).parent / "analysis-queue.json")
         self.task: asyncio.Task | None = None
         self.current: str | None = None
+        self.job: asyncio.Task | None = None  # the current book's analysis
+        self._interrupt: str | None = None  # "next" or "bottom": where the interrupted book goes
         # Background GPU work while the site is idle runs one thing at a time (an LLM step, or a book's
         # automatic casting), so the LLM and the voice designer don't keep evicting each other.
         self.background = asyncio.Lock()
@@ -1582,8 +1594,10 @@ class Analyzer:
                 book_id = await self.queue.get()
                 self.current = book_id
                 self.queue.set_current(book_id)
+                self._interrupt = None
                 try:
-                    await self.analyse(session, book_id)
+                    self.job = asyncio.ensure_future(self.analyse(session, book_id))
+                    await self.job
                     s = self.store.script(book_id)
                     if s.get("auto_cast") and s.get("status") == "done":  # added from the library: cast it too
                         async with self.store.lock(book_id):
@@ -1595,8 +1609,11 @@ class Analyzer:
                         # next book's analysis goes on meanwhile.
                         self._spawn_cast(book_id, engine)
                 except asyncio.CancelledError:
-                    self.current = None  # the server stops: the book stays first in the saved order, so it resumes first
-                    raise
+                    if not self._interrupt or asyncio.current_task().cancelling():
+                        self.current = None  # the server stops: the book stays first in the saved order, so it resumes first
+                        raise
+                    self.queue.current = None
+                    await self._requeue(book_id, self._interrupt)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("analysis of %s failed", book_id)
                     async with self.store.lock(book_id):
@@ -1607,6 +1624,35 @@ class Analyzer:
                 self.queue.set_current(None)
                 if self.queue.empty():
                     await self.llm.stop()  # free RAM/VRAM when idle
+
+    async def _requeue(self, book_id: str, where: str) -> None:
+        """The current book was set aside (another one is analysed now, or it went to the bottom): its finished
+        passages are kept, and analysing it again continues from there."""
+        async with self.store.lock(book_id):
+            s = self.store.script(book_id)
+            s.update(status="queued", detail="set aside; continues where it stopped")
+            self.store.save_script(book_id, s)
+        await self.queue.put(book_id, at=min(1, len(self.queue.items)) if where == "next" else None)
+
+    def _set_aside(self, where: str) -> bool:
+        if self.current is None or self.job is None or self.job.done():
+            return False
+        self._interrupt = where
+        self.job.cancel()
+        return True
+
+    def analyse_now(self, book_id: str) -> bool:
+        """Analyse a waiting book right away: the current one stops (keeping what it has done) and goes next."""
+        if book_id not in self.queue.items:
+            return False
+        self.queue.reorder([book_id])
+        self._set_aside("next")
+        return True
+
+    def send_to_bottom(self, book_id: str) -> bool:
+        if book_id == self.current:
+            return self._set_aside("bottom")
+        return self.queue.to_bottom(book_id)
 
     def _spawn_cast(self, book_id: str, engine: str) -> None:
         tasks = self.app[CAST_TASKS_KEY] if CAST_TASKS_KEY in self.app else set()
@@ -2132,6 +2178,22 @@ async def queue_put(request: web.Request) -> web.Response:
     return web.json_response(_queue_json(request.app))
 
 
+async def queue_now(request: web.Request) -> web.Response:
+    """Analyse a waiting book right away; the current one stops, keeps its progress and goes next."""
+    if not request.app[ANALYZER_KEY].analyse_now(request.match_info["book"]):
+        return web.json_response({"error": "That book isn't waiting in the queue"}, status=404)
+    await asyncio.sleep(0.2)  # let the switch happen, so the answer shows it
+    return web.json_response(_queue_json(request.app))
+
+
+async def queue_bottom(request: web.Request) -> web.Response:
+    """Send a book (waiting, or the one being analysed: it stops, keeping its progress) to the end of the queue."""
+    if not request.app[ANALYZER_KEY].send_to_bottom(request.match_info["book"]):
+        return web.json_response({"error": "That book isn't in the queue"}, status=404)
+    await asyncio.sleep(0.2)
+    return web.json_response(_queue_json(request.app))
+
+
 async def queue_delete(request: web.Request) -> web.Response:
     """Take a waiting book out of the queue. Its analysis so far is kept; analysing it again continues it."""
     store = request.app[DRAMA_STORE_KEY]
@@ -2622,6 +2684,8 @@ def setup(app: web.Application) -> None:
     r.add_get("/api/queue", queue_get)
     r.add_put("/api/queue", queue_put)
     r.add_delete("/api/queue/{book}", queue_delete)
+    r.add_post("/api/queue/{book}/now", queue_now)
+    r.add_post("/api/queue/{book}/bottom", queue_bottom)
     r.add_get("/api/books", list_books)
     r.add_post("/api/books/{book}/characters/{character}/voice-from-dossier", voice_from_dossier)
     from . import series

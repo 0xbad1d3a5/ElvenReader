@@ -1482,3 +1482,44 @@ async def test_rename_book_sets_volume_order_keeps_series_and_survives_reupload(
     await c.post("/api/books/v2", json={**book_payload(), "title": "Saga 2: The Middle"}, headers=AUTH)
     books = {b["id"]: b for b in (await (await c.get("/api/books", headers=AUTH)).json())["books"]}
     assert books["v2"]["title"] == "Saga, Vol. 2: The Middle" and books["v2"]["series"] == "Saga"
+
+async def test_queue_analyse_now_and_send_to_bottom_set_the_current_book_aside(aiohttp_client, tmp_path, monkeypatch):
+    calls = []
+
+    async def blocking(self, *a, **k):  # every book stays "being analysed" until set aside
+        calls.append(1)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(dz.LocalLlm, "complete", blocking)
+    c = await aiohttp_client(make_app(make_cfg(tmp_path), specs=SPECS))
+    for b in ("b1", "b2", "b3"):
+        await c.post(f"/api/books/{b}", json={**book_payload(), "title": f"Book {b}", "analyze": True}, headers=AUTH)
+
+    async def queue():
+        return await (await c.get("/api/queue", headers=AUTH)).json()
+
+    async def current_is(book):
+        for _ in range(100):
+            q = await queue()
+            if q["current"] and q["current"]["id"] == book:
+                return q
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"{book} never started: {q}")
+
+    await current_is("b1")
+    r = await c.post("/api/queue/b3/now", headers=AUTH)
+    assert r.status == 200
+    q = await current_is("b3")
+    assert [b["id"] for b in q["queued"]] == ["b1", "b2"]  # the set-aside book goes next
+    s = await (await c.get("/api/books/b1/script", headers=AUTH)).json()
+    assert s["status"] == "queued" and "set aside" in s["detail"]
+
+    assert (await c.post("/api/queue/b1/bottom", headers=AUTH)).status == 200
+    assert [b["id"] for b in (await queue())["queued"]] == ["b2", "b1"]
+    assert (await c.post("/api/queue/b3/bottom", headers=AUTH)).status == 200  # the current one
+    q = await current_is("b2")
+    assert [b["id"] for b in q["queued"]] == ["b1", "b3"]
+    assert (await c.post("/api/queue/nope/now", headers=AUTH)).status in (400, 404)
+    import json
+    saved = next(tmp_path.rglob("analysis-queue.json"))
+    assert json.loads(saved.read_text())["order"] == ["b2", "b1", "b3"]  # no duplicates of the set-aside book

@@ -169,8 +169,10 @@ are kept. Adding a book that is already in the library keeps its analysis.
 
 **Queue** (in the library header, with the number of books waiting) shows the book being analysed
 with its progress, the books next in line with a rough time each (about 1,800 words a minute with
-the whole GPU), and the books whose voices are still to be created. Drag a book, or use ⤒ (next),
-↑ and ↓, to change the order; ✕ takes a book out of the queue, keeping what's done. **Continue
+the whole GPU), and the books whose voices are still to be created. ⏵ analyses a waiting book now:
+the current one stops, keeps the passages it has finished, and goes next. Drag a book, or use ⤒
+(next), ↑, ↓ and ⤓ (bottom; on the current book it stops it and sends it to the end), to change
+the order; ✕ takes a book out of the queue, keeping what's done. **Continue
 analysis** on its library card puts it back at the end. The order is saved, so a restart resumes
 the same way, the interrupted book first.
 
@@ -652,7 +654,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET /api/engines` · `POST /api/engines/{id}/load` · `POST /api/engines/unload` | Engines with capabilities, licence and measured RTF; make one the site's speech model; free the GPU. |
 | `GET/PUT /api/settings` `{speech_engine?, voice_design_engine?, llm_mode?, idle_after_s?, design_pause_s?}` | Site settings (the Settings page). `POST /api/tts` reads with the speech model; naming another `engine` is refused (409). |
 | `POST /api/activity` · `GET /api/gpu` | An open page says someone is using the site (pages send it while you interact or audio plays) · what's on the GPU: the state (`reading`, `designing`, `idle`), the speech model and voice designer with loading progress, the analysis LLM (for the banner). |
-| `GET/PUT /api/queue` · `DELETE /api/queue/{book}` | Analysis queue: `{current, queued, casting}` · `PUT {order: [book ids]}` puts those first, in that order · take a waiting book out (its status becomes `none`; `POST /api/books/{id}/analyze` continues it). Saved in `data/analysis-queue.json`. |
+| `GET/PUT /api/queue` · `DELETE /api/queue/{book}` · `POST /api/queue/{book}/now` · `POST /api/queue/{book}/bottom` | Analysis queue: `{current, queued, casting}` · `PUT {order: [book ids]}` puts those first, in that order · take a waiting book out (its status becomes `none`; `POST /api/books/{id}/analyze` continues it) · analyse a waiting book now (the current one keeps its progress and goes next) · send a book to the end (the current one stops and keeps its progress). Saved in `data/analysis-queue.json`. |
 | `GET/POST /api/voices` · `DELETE /api/voices/{id}` · `GET /api/voices/{id}/audio` · `POST /api/voices/design` | Voice store (`?all=1` adds character voices, `?details=1` everything with who uses it). |
 | `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?, age?}` (`age` -1/1: one age group younger/older; returns the new `description`, `age_from`, `age_to`) · listen · keep one · Whisper transcript of an uploaded clip. |
