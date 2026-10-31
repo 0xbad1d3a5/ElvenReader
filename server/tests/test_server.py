@@ -526,3 +526,19 @@ async def test_the_llm_waits_for_a_designer_in_use(tmp_path):
 
 async def _drain_events(stream):
     return [ev async for ev in stream]
+
+async def test_compressed_speech_for_the_website(client):
+    import shutil
+
+    resp, body = await tts(client, text="one two three four", format="pcm")
+    assert resp.headers["Content-Type"].startswith("audio/L16") and len(body) == 4 * WORD_BYTES
+    resp, body = await tts(client, text="one", format="flac")
+    assert resp.status == 400
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    resp, body = await tts(client, text="alpha beta gamma delta", format="opus")
+    assert resp.status == 200 and resp.headers["Content-Type"].startswith("audio/ogg")
+    assert body[:4] == b"OggS" and resp.headers["X-Cache"] == "miss" and resp.headers["X-Encoding"] == "opus"
+    resp, body = await tts(client, text="alpha beta gamma delta", format="mp3")
+    assert resp.headers["Content-Type"] == "audio/mpeg" and resp.headers["X-Cache"] == "hit"
+    assert body[:3] == b"ID3" or body[0] == 0xFF

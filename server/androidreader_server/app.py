@@ -17,7 +17,9 @@ import aiohttp
 from aiohttp import web
 
 from . import __version__
-from .audio import SilenceTrimmer, time_stretch, wav_bytes
+from .audio import FORMATS as AUDIO_FORMATS
+from .audio import EncodeError, SilenceTrimmer, time_stretch, wav_bytes
+from .audio import encode as encode_audio
 from .cache import AudioCache, cache_key
 from .config import ServerConfig
 from .engines.manager import AudioChunk, Done, EngineError, EngineManager, StreamStart
@@ -430,7 +432,9 @@ class SynthesisPlan:
 
 
 async def tts(request: web.Request) -> web.StreamResponse:
-    """Synthesize one utterance and stream raw PCM16LE mono back.
+    """Synthesize one utterance. By default raw PCM16LE mono is streamed back as it is made; with
+    {"format": "opus"|"mp3"} the whole utterance comes back compressed (Ogg Opus 64 kbit/s or MP3), about a
+    sixth of the size (PCM if ffmpeg can't encode it; the Content-Type says which).
 
     Errors before any audio is produced are JSON with a 4xx/5xx status. An
     error after audio has started aborts the connection, so the client sees a
@@ -455,21 +459,52 @@ async def tts(request: web.Request) -> web.StreamResponse:
     use_cache = body.get("cache", True) is not False
     meta = {"X-Engine": plan.engine_id, "X-Voice": plan.voice.id, "X-Pronunciation-Version": plan.pron_version}
 
+    fmt = _str(body, "format").lower()
+    if fmt in ("", "pcm", "l16"):
+        fmt = ""
+    elif fmt not in AUDIO_FORMATS:
+        return _json_error(400, f"format must be pcm, {', '.join(AUDIO_FORMATS)}")
+
+    async def encoded(pcm: bytes, rate: int, cache_state: str) -> web.Response:
+        """The whole utterance, compressed (or PCM when ffmpeg can't encode it)."""
+        headers = {**meta, "X-Cache": cache_state}
+        if fmt and pcm:
+            try:
+                data, content_type = await encode_audio(pcm, rate, fmt)
+                return web.Response(body=data, headers={"Content-Type": content_type, "Cache-Control": "no-store",
+                                                        "X-Sample-Rate": str(rate), "X-Encoding": fmt, **headers})
+            except EncodeError as exc:
+                logger.warning("sending PCM: %s", exc)
+        return web.Response(body=pcm, headers=_audio_headers(rate, **headers))
+
     cached = app[CACHE_KEY].get(plan.key) if use_cache else None
     if cached is not None:
         rate, pcm = cached
         pcm = time_stretch(pcm, rate, speed) + bytes(int(rate * pause_ms / 1000) * 2)
-        return web.Response(body=pcm, headers=_audio_headers(rate, **meta, **{"X-Cache": "hit"}))
+        return await encoded(pcm, rate, "hit")
 
     manager = app[ENGINES_KEY]
     t0 = time.perf_counter()
     first_audio: float | None = None
-    resp: web.StreamResponse | None = None
+    resp: web.StreamResponse | None = None  # streaming PCM; compressed audio is sent whole at the end
+    started = False
     rate = 24000
     trimmer: SilenceTrimmer | None = None
-    full = bytearray()
+    full = bytearray()  # the utterance as cached (trimmed, normal speed, no pause)
+    out = bytearray()  # what a compressed response will contain
     sent = 0
     complete = False
+
+    async def emit(data: bytes) -> None:
+        nonlocal first_audio, sent
+        if first_audio is None:
+            first_audio = time.perf_counter() - t0
+        sent += len(data)
+        if resp is not None:
+            await resp.write(data)
+        else:
+            out.extend(data)
+
     try:
         for piece in split_for_synthesis(plan.text):
             stream = manager.synthesize(plan.engine_id, plan.worker_payload(piece))
@@ -480,35 +515,28 @@ async def tts(request: web.Request) -> web.StreamResponse:
                         rate = ev.sample_rate
                         if trimmer is None and cfg.trim_silence:
                             trimmer = SilenceTrimmer(rate)
-                        if resp is None:
-                            resp = web.StreamResponse(headers=_audio_headers(rate, **meta, **{"X-Cache": "miss"}))
-                            resp.enable_chunked_encoding()
-                            await resp.prepare(request)
-                    elif isinstance(ev, AudioChunk) and resp is not None:
+                        if not started:
+                            started = True
+                            if not fmt:
+                                resp = web.StreamResponse(headers=_audio_headers(rate, **meta, **{"X-Cache": "miss"}))
+                                resp.enable_chunked_encoding()
+                                await resp.prepare(request)
+                    elif isinstance(ev, AudioChunk) and started:
                         pcm = trimmer.feed(ev.pcm) if trimmer else ev.pcm
                         if not pcm:
                             continue
                         full += pcm
                         if speed == 1.0:
-                            if first_audio is None:
-                                first_audio = time.perf_counter() - t0
-                            sent += len(pcm)
-                            await resp.write(pcm)
+                            await emit(pcm)
                         else:
                             piece_pcm += pcm
-            if piece_pcm and resp is not None:
-                out = time_stretch(bytes(piece_pcm), rate, speed)
-                if first_audio is None:
-                    first_audio = time.perf_counter() - t0
-                sent += len(out)
-                await resp.write(out)
-        if trimmer is not None and resp is not None:
+            if piece_pcm and started:
+                await emit(time_stretch(bytes(piece_pcm), rate, speed))
+        if trimmer is not None and started:
             tail = trimmer.flush()
             if tail:
                 full += tail
-                out = time_stretch(tail, rate, speed) if speed != 1.0 else tail
-                sent += len(out)
-                await resp.write(out)
+                await emit(time_stretch(tail, rate, speed) if speed != 1.0 else tail)
         complete = True
     except EngineError as exc:
         if resp is None:
@@ -527,20 +555,20 @@ async def tts(request: web.Request) -> web.StreamResponse:
 
     if complete and full and use_cache:
         app[CACHE_KEY].put(plan.key, rate, bytes(full))
-    if resp is None:
-        return web.Response(body=b"", headers=_audio_headers(rate, **meta))
-    if sent and pause_ms:
-        silence = bytes(int(rate * pause_ms / 1000) * 2)
-        await resp.write(silence)
-    await resp.write_eof()
+    silence = bytes(int(rate * pause_ms / 1000) * 2) if sent and pause_ms else b""
     audio_s = len(full) / 2 / rate
     total = time.perf_counter() - t0
     logger.info(
-        "tts %s/%s %d chars -> %.1fs audio, first audio %s, total %.2fs (RTF %.2f)",
+        "tts %s/%s %d chars -> %.1fs audio, first audio %s, total %.2fs (RTF %.2f)%s",
         plan.engine_id, plan.voice.id, len(text), audio_s,
         f"{first_audio * 1000:.0f}ms" if first_audio is not None else "n/a", total,
-        total / audio_s if audio_s else 0,
+        total / audio_s if audio_s else 0, f", sent as {fmt}" if fmt else "",
     )
+    if resp is None:
+        return await encoded(bytes(out) + silence, rate, "miss")
+    if silence:
+        await resp.write(silence)
+    await resp.write_eof()
     return resp
 
 

@@ -190,6 +190,18 @@ function wav(pcm, rate) {
   return new Blob([b, pcm], { type: "audio/wav" });
 }
 
+/* Speech comes compressed (Ogg Opus, or MP3 where the browser can't play Opus), about a sixth of raw PCM. */
+const TTS_FORMAT = (() => {
+  const a = document.createElement("audio");
+  return a.canPlayType('audio/ogg; codecs="opus"') ? "opus" : a.canPlayType("audio/mpeg") ? "mp3" : "";
+})();
+/* A playable URL for a /api/tts response, whichever way it came (compressed, or raw PCM as a fallback). */
+function speechUrl(r) {
+  const type = r.headers.get("Content-Type") || "";
+  return URL.createObjectURL(type.startsWith("audio/L16") || !type.startsWith("audio/")
+    ? wav(r.data, Number(r.headers.get("X-Sample-Rate") || 24000)) : new Blob([r.data], { type }));
+}
+
 // Mid-lightness colours: readable as tints and underlines on both the light and the dark theme.
 const PALETTE = ["#e6194b","#3cb44b","#4f7cff","#f58231","#b05ce6","#2bb5d8","#f032e6","#c08a3e","#3fae9f","#a8a820","#9b8cff","#5aa0ff","#a9a9a9","#7fb800","#d6608a","#d98c3a","#2fae6a","#8a5cf6","#e0605a","#c9a500"];
 const LANGS = { en:"English", de:"German", fr:"French", es:"Spanish", it:"Italian", pt:"Portuguese", ja:"Japanese", zh:"Chinese", ko:"Korean", ru:"Russian", nl:"Dutch", pl:"Polish" };
@@ -725,8 +737,9 @@ async function openVoiceEditor(voiceId, ctx = {}) {
           const body = { text: ui.testText.value.trim(), voice: v.id };
           if (ui.testDelivery.value.trim()) body.delivery = ui.testDelivery.value.trim();
           if (v.language) body.language = v.language;
+          if (TTS_FORMAT) body.format = TTS_FORMAT;
           const r = await api("POST", "/api/tts", body);
-          playUrl(URL.createObjectURL(wav(r.data, Number(r.headers.get("X-Sample-Rate") || 24000))));
+          playUrl(speechUrl(r));
         }) }, "\u25B6 Say it")));
     return s;
   }
@@ -1065,6 +1078,7 @@ async function bookView(id) {
     const u = st.units[i], next = st.units[i + 1];
     const req = { text: u.text, book: st.id, sentence_pause_ms: next && next.pi === u.pi && next.ci === u.ci ? 120 : 450 };
     if (st.language) req.language = st.language;
+    if (TTS_FORMAT) req.format = TTS_FORMAT;
     if (u.voice || st.narrator) req.voice = u.voice || st.narrator;
     if (u.delivery) req.delivery = u.delivery;
     return req;
@@ -1073,8 +1087,7 @@ async function bookView(id) {
   function fetchUnit(i) {
     if (!st.units[i]) return null;
     if (!st.fetches.has(i)) {
-      st.fetches.set(i, api("POST", "/api/tts", unitRequest(i))
-        .then(r => URL.createObjectURL(wav(r.data, Number(r.headers.get("X-Sample-Rate") || 24000)))));
+      st.fetches.set(i, api("POST", "/api/tts", unitRequest(i)).then(speechUrl));
     }
     return st.fetches.get(i);
   }

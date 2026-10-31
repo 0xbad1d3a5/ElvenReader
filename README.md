@@ -219,7 +219,9 @@ after them, so they never shift the text.
 * **Playback:** click any line or narration to play from there through the chapter with each
   speaker's voice and delivery, using the chosen narrator voice and the site's speech model
   (Settings). Sentences already
-  synthesized come from the server's cache, so re-listening is instant.
+  synthesized come from the server's cache, so re-listening is instant. Speech reaches the
+  browser as Ogg Opus at 64 kbit/s (MP3 where the browser can't play Opus), about a sixth of the
+  raw 24 kHz audio: roughly 30 MB per hour of listening instead of 170 MB.
 * **Editing:** click a speaker tag to change the speaker or delivery; corrections always win
   over the model. The book's series is shown next to the title and can be changed there (see
   *Series* in section 3).
@@ -609,7 +611,7 @@ All `/api/*` routes except `/api/ping` need `Authorization: Bearer <token>`.
 | `GET/PATCH /api/voices/{id}` · `PUT /api/voices/{id}/audio` · `POST /api/voices/{id}/revert` · `POST /api/voices/{id}/duplicate` | Voice editor: details, history and users · edit name/description/language/seed/transcript · new reference (multipart `audio`, `start`, `end`, `ref_text`; transcribed when empty) · undo · copy (`{book, character}` assigns the copy). |
 | `POST /api/voices/{id}/design` · `GET /api/voice-candidates/{c}/audio` · `POST /api/voices/{id}/design/{c}` · `POST /api/transcribe` | Design candidates `{description, engine?, count?, text?, seeds?, age?}` (`age` -1/1: one age group younger/older; returns the new `description`, `age_from`, `age_to`) · listen · keep one · Whisper transcript of an uploaded clip. |
 | `GET/POST /api/pronunciations` · `PATCH/DELETE /api/pronunciations/{id}` | Dictionary (`?book=` for a book's view). |
-| `POST /api/tts` | Body `{text, engine?, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?}`. Chunked **PCM16LE mono**, rate in `X-Sample-Rate`; `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
+| `POST /api/tts` | Body `{text, voice?, language?, speed?, delivery?, seed?, book?, sentence_pause_ms?, extra_pronunciations?, cache?, format?}`. By default chunked **PCM16LE mono** as it is made, rate in `X-Sample-Rate`; `format: "opus"` (Ogg Opus 64 kbit/s, what the website uses) or `"mp3"` (96 kbit/s, for browsers without Opus) returns the whole passage compressed, about 18% / 25% of the PCM size. `X-Cache: hit/miss`. Errors before audio are JSON; closing the connection cancels synthesis. |
 | `POST /api/library/import` | Add a book: multipart `epub` file (any device; what the website uses), or `{"path": ...}` (from the PC only, for `process_book.py`); options `analyze`, `cast` (default true), `reanalyze`, `engine`, `series` (default: from the title). |
 | `GET /api/books` · `GET /api/books/{id}` · `GET /api/books/{id}/cover` | Books with analysis/cast status · a book's paragraphs, quotations and pictures · its cover. |
 | `GET /api/books/{id}/pictures` · `GET /api/books/{id}/picture?path=` | The book's pictures · one picture (by its path in the EPUB; only pictures the book's text refers to). |

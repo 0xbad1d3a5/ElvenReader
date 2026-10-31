@@ -160,3 +160,38 @@ def wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
         sample_rate, sample_rate * 2, 2, 16, b"data", len(pcm),
     )
     return header + pcm
+
+
+# ---------------------------------------------------------------- compressed delivery
+
+# What the website asks for: speech in Opus at 64 kbit/s is indistinguishable from the 24 kHz PCM it comes
+# from for listening, at about a sixth of the size; MP3 is the fallback for browsers without Ogg Opus.
+FORMATS = {
+    "opus": (["-c:a", "libopus", "-b:a", "64k", "-f", "ogg"], "audio/ogg; codecs=opus"),
+    "mp3": (["-c:a", "libmp3lame", "-b:a", "96k", "-f", "mp3"], "audio/mpeg"),
+}
+
+
+class EncodeError(Exception):
+    pass
+
+
+async def encode(pcm: bytes, rate: int, fmt: str) -> tuple[bytes, str]:
+    """Mono PCM16LE -> (encoded bytes, content type) with ffmpeg. Raises EncodeError when it can't."""
+    import asyncio
+    import shutil
+
+    if fmt not in FORMATS:
+        raise EncodeError(f"Unknown audio format {fmt!r}")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise EncodeError("ffmpeg is not installed")
+    codec, content_type = FORMATS[fmt]
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg, "-v", "error", "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0", *codec, "pipe:1",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        creationflags=0x08000000 if sys.platform == "win32" else 0)
+    out, err = await proc.communicate(pcm)
+    if proc.returncode != 0 or not out:
+        raise EncodeError(f"ffmpeg failed: {err.decode('utf-8', 'replace')[-300:]}")
+    return out, content_type
