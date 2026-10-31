@@ -206,6 +206,7 @@ const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
 if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");
 else if (routeMatch && routeMatch[1] === "voices") voicesView();
 else if (routeMatch && routeMatch[1] === "series") seriesView();
+else if (routeMatch && routeMatch[1] === "settings") settingsView();
 else if (routeMatch) bookView(routeMatch[1]); else libraryView();
 
 /* ------------------------------------------------------------------ series */
@@ -316,6 +317,7 @@ async function libraryView() {
       h("button", { class: "primary", onclick: () => addBook(refresh) }, "+ Add book"),
       h("a", { href: "/books/series" }, "Series"),
       h("a", { href: "/books/voices" }, "Voices"),
+      h("a", { href: "/books/settings", title: "The speech model the whole site uses, and how book analysis shares the GPU" }, "Settings"),
       EMBEDDED_TOKEN ? h("a", { href: "/", title: "Links and QR codes to open the library on other devices" }, "Other devices") : null),
     h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
   const covers = {};
@@ -450,6 +452,60 @@ async function addBook(onDone) {
   d.showModal();
 }
 
+/* ------------------------------------------------------------------ settings */
+
+/* Site settings: the one speech model the site reads with, the voice-design model, and how book analysis
+   shares the GPU. */
+async function settingsView() {
+  $("#app").replaceChildren(
+    h("header", {}, h("a", { href: "/books" }, "\u2190 Books"), h("h1", {}, "Settings"), h("span", { class: "grow" })),
+    h("div", { class: "serieslist", id: "settings" }, h("p", { class: "muted" }, "Loading\u2026")));
+  let timer = null;
+  async function render() {
+    const s = await get("/api/settings");
+    const el = $("#settings");
+    const speed = (e) => e.stats && e.stats.rtf ? ` \u00b7 ${e.stats.rtf < 1 ? (1 / e.stats.rtf).toFixed(1) + "\u00d7 real time" : "slower than real time"}` : "";
+    const speech = h("select", {}, ...s.engines.map(e => h("option", { value: e.id }, e.label + speed(e))));
+    speech.value = s.speech_engine;
+    const design = h("select", {}, ...s.engines.filter(e => e.voice_design).map(e => h("option", { value: e.id }, e.label)));
+    design.value = s.voice_design_engine;
+    const modes = [["shared", "Share the GPU (recommended): the speech model stays loaded; analysis runs a bit slower"],
+      ["auto", "Use the whole GPU when nobody has listened for 2 minutes (faster analysis; the speech model is unloaded and takes about a minute to come back)"],
+      ["cpu", "CPU only (slowest; never touches the GPU)"]];
+    if (s.llm_mode === "gpu") modes.push(["gpu", "Always the whole GPU (the speech model is unloaded during analysis)"]);
+    const mode = h("select", {}, ...modes.map(([k, t]) => h("option", { value: k }, t)));
+    mode.value = s.llm_mode;
+    const st = s.status;
+    const state = st.loading ? `Loading ${st.loading}\u2026` : st.active ? `Loaded: ${st.active}` : st.state === "error" ? `\u26A0 ${st.detail}` : "Not loaded yet (it loads with the first sentence)";
+    const note = h("span", { class: "small" });
+    const save = h("button", { class: "primary", onclick: async () => {
+      if (speech.value !== s.speech_engine && !confirm(`Switch the whole site to ${speech.options[speech.selectedIndex].text.split(" \u00b7 ")[0]}? ` +
+        "Everything is read with it from now on; cached sentences from the old model aren't reused. It takes about a minute to load.")) return;
+      save.disabled = true;
+      try {
+        await api("PUT", "/api/settings", { speech_engine: speech.value, voice_design_engine: design.value, llm_mode: mode.value });
+        note.textContent = "\u2713 Saved";
+      } catch (e) { alert(e.message); }
+      save.disabled = false;
+      render();
+    } }, "Save");
+    el.replaceChildren(
+      h("div", { class: "sr" }, h("h3", {}, "Speech model"),
+        h("p", { class: "small muted" }, "The one model the whole site reads with: books, previews and voice tests. It stays loaded; " +
+          "nothing else unloads it."), speech, h("p", { class: "small" }, state)),
+      h("div", { class: "sr" }, h("h3", {}, "Voice design"),
+        h("p", { class: "small muted" }, "Makes new character voices from a description (casting, Make 3 options, Younger/Older). " +
+          "If it isn't the speech model, it is loaded next to it while you design and unloaded after a few idle minutes."),
+        design, st.designer ? h("p", { class: "small" }, `Designer loaded: ${st.designer}`) : null),
+      h("div", { class: "sr" }, h("h3", {}, "Book analysis"),
+        h("p", { class: "small muted" }, "How the LLM that works out who says what uses the GPU."), mode),
+      h("div", { class: "row", style: { display: "flex", gap: "8px", alignItems: "center" } }, save, note));
+    clearTimeout(timer);
+    if (st.loading) timer = setTimeout(render, 3000);
+  }
+  render().catch(e => tokenScreen.shown || $("#settings").replaceChildren(h("p", {}, "Error: " + e.message)));
+}
+
 /* ------------------------------------------------------------------ voices */
 
 const ENGINE_INFO = { list: null, def: "" };
@@ -540,13 +596,6 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     return ui[key];
   }
   const untouch = (...keys) => keys.forEach(k => ui[k] && delete ui[k].dataset.touched);
-  function engineSelect(key, list, preferred) {
-    if (!ui[key]) {
-      ui[key] = h("select", {}, ...list.map(e => h("option", { value: e.id }, e.label)));
-      if (list.some(e => e.id === preferred)) ui[key].value = preferred;
-    }
-    return ui[key];
-  }
 
   async function send(method, path, form) {
     const r = await fetch(path, { method, body: form, headers: { Authorization: "Bearer " + TOKEN } });
@@ -601,7 +650,6 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     await busy(btn, label, async () => {
       const body = { description, count: 3 };
       if (age) body.age = age;
-      if (ui.designEngine) body.engine = ui.designEngine.value;
       if (ui.sampleLine && ui.sampleLine.value.trim()) body.text = ui.sampleLine.value.trim();
       const r = (await api("POST", `/api/voices/${v.id}/design`, body)).data;
       takes = r.candidates;
@@ -625,8 +673,8 @@ async function openVoiceEditor(voiceId, ctx = {}) {
 
   function advanced() {
     const s = [];
-    s.push(h("label", {}, "Voice-design model"), engineSelect("designEngine", designers, "qwen3tts"),
-      h("label", {}, "What the options say (empty: a standard sentence)"), field("sampleLine", { placeholder: "e.g. a line this character says in the book" }));
+    s.push(h("label", {}, "What the options say (empty: a standard sentence)"),
+      field("sampleLine", { placeholder: "e.g. a line this character says in the book" }));
 
     s.push(h("h4", {}, "Details"),
       h("label", {}, "Name"), field("name", {}, v.name),
@@ -673,9 +721,8 @@ async function openVoiceEditor(voiceId, ctx = {}) {
     s.push(h("h4", {}, "Test with your own text"),
       field("testText", {}, "Stop! Don't you dare take another step, or I'll make you regret it."),
       h("div", { class: "line" }, field("testDelivery", { placeholder: "delivery, e.g. shouting", style: { width: "14em" } }),
-        engineSelect("testEngine", engines, ENGINE_INFO.def),
         h("button", { onclick: (e) => busy(e.target, "Speaking\u2026", async () => {
-          const body = { text: ui.testText.value.trim(), voice: v.id, engine: ui.testEngine.value };
+          const body = { text: ui.testText.value.trim(), voice: v.id };
           if (ui.testDelivery.value.trim()) body.delivery = ui.testDelivery.value.trim();
           if (v.language) body.language = v.language;
           const r = await api("POST", "/api/tts", body);
@@ -729,7 +776,7 @@ async function openVoiceEditor(voiceId, ctx = {}) {
 async function bookView(id) {
   const st = {
     id, book: null, script: null, voices: [], engines: [], chapter: 0, filterChar: "", search: "",
-    narrator: localStorage.getItem("narrator:" + id) || "", engine: localStorage.getItem("engine:" + id) || "",
+    narrator: localStorage.getItem("narrator:" + id) || "",
     units: [], playing: -1, audio: new Audio(), fetches: new Map(), session: null, pictures: {},
     tierHi: localStorage.getItem("tierHi") || "",
   };
@@ -782,8 +829,6 @@ async function bookView(id) {
       h("button", { class: "primary", id: "playBtn", onclick: () => st.session ? stopPlayback() : playFrom(Math.max(0, st.playing)) }, "\u25B6 Play"),
       h("span", { class: "small muted" }, "Narrator voice"),
       h("select", { id: "narrator", onchange: (e) => { st.narrator = e.target.value; localStorage.setItem("narrator:" + id, st.narrator); flushAudio(); } }),
-      h("span", { class: "small muted" }, "Model"),
-      h("select", { id: "engine", onchange: (e) => { st.engine = e.target.value; localStorage.setItem("engine:" + id, st.engine); flushAudio(); } }),
       h("span", { class: "small", id: "playStatus" })));
 
   function renderAll() { renderStatus(); renderCast(); renderSelectors(); renderText(); }
@@ -864,10 +909,6 @@ async function bookView(id) {
     nv.replaceChildren(h("option", { value: "" }, "Server default (" + voiceName(st.defaultVoice) + ")"),
       ...st.voices.filter(v => v.source !== "character").map(v => h("option", { value: v.id }, v.name)));
     nv.value = st.narrator;
-    const en = $("#engine");
-    en.replaceChildren(h("option", { value: "" }, "Server default (" + (st.defaultEngine || "") + ")"),
-      ...st.engines.map(e => h("option", { value: e.id }, e.label)));
-    en.value = st.engine;
   }
 
   function gotoChapter(i) {
@@ -1023,7 +1064,6 @@ async function bookView(id) {
   function unitRequest(i) {
     const u = st.units[i], next = st.units[i + 1];
     const req = { text: u.text, book: st.id, sentence_pause_ms: next && next.pi === u.pi && next.ci === u.ci ? 120 : 450 };
-    if (st.engine) req.engine = st.engine;
     if (st.language) req.language = st.language;
     if (u.voice || st.narrator) req.voice = u.voice || st.narrator;
     if (u.delivery) req.delivery = u.delivery;
@@ -1279,7 +1319,6 @@ async function bookView(id) {
 
   renderAll();
   get("/api/voices?all=1").then(v => { st.voices = v.voices; st.defaultVoice = v.default; renderSelectors(); renderCast(); }).catch(() => {});
-  get("/api/engines").then(e => { st.engines = e.engines.filter(x => x.installed); st.defaultEngine = e.default; renderSelectors(); }).catch(() => {});
   showSeries().catch(() => {});
   follow();
 }

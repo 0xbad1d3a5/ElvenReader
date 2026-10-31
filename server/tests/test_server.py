@@ -120,7 +120,9 @@ async def test_cache_key_covers_voice_delivery_and_engine(client, tmp_path):
     await tts(client, text="alpha beta")
     resp, _ = await tts(client, text="alpha beta", delivery="shouting")
     assert resp.headers["X-Cache"] == "miss"
-    resp, _ = await tts(client, text="alpha beta", engine="fake_slow")
+    r = await client.put("/api/settings", json={"speech_engine": "fake_slow"}, headers=AUTH)
+    assert r.status == 200
+    resp, _ = await tts(client, text="alpha beta")
     assert resp.headers["X-Cache"] == "miss"
 
 
@@ -179,9 +181,11 @@ async def test_errors(client, tmp_path):
     resp, body = await tts(client, text="please explode")
     assert resp.status == 502 and "engine exploded" in json.loads(body)["error"]
     resp, body = await tts(client, text="hi", engine="nope")
-    assert resp.status == 400
-    resp, body = await tts(client, text="hi", engine="broken")
+    assert resp.status == 409
+    assert (await client.put("/api/settings", json={"speech_engine": "broken"}, headers=AUTH)).status == 200
+    resp, body = await tts(client, text="hi")
     assert resp.status == 503 and "fake load failure" in json.loads(body)["error"]
+    assert (await client.put("/api/settings", json={"speech_engine": "fake"}, headers=AUTH)).status == 200
     resp, _ = await tts(client, text="x" * 5000)
     assert resp.status == 413
     resp = await client.post("/api/tts", data=b"nope", headers=AUTH)
@@ -197,28 +201,75 @@ async def test_no_voices_is_503(aiohttp_client, tmp_path):
     assert resp.status == 503 and "No voices" in json.loads(body)["error"]
 
 
-async def test_cancel_mid_stream_releases_engine(client):
-    resp = await client.post("/api/tts", json={"text": "w1 w2 w3 w4 w5 w6 w7 w8", "engine": "fake_slow"},
-                             headers=AUTH)
+async def test_cancel_mid_stream_releases_engine(aiohttp_client, tmp_path):
+    VoiceStore(tmp_path / "voices").add("Narrator", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="nar")
+    cfg = make_cfg(tmp_path)
+    cfg.default_engine = "fake_slow"
+    client = await aiohttp_client(make_app(cfg, specs=SPECS))
+    resp = await client.post("/api/tts", json={"text": "w1 w2 w3 w4 w5 w6 w7 w8"}, headers=AUTH)
     assert resp.status == 200
     assert len(await resp.content.readexactly(WORD_BYTES)) == WORD_BYTES
     resp.close()  # phone hit stop
     t0 = asyncio.get_running_loop().time()
-    resp, body = await tts(client, text="after cancel", engine="fake_slow", cache=False)
+    resp, body = await tts(client, text="after cancel", cache=False)
     assert resp.status == 200 and len(body) == 2 * WORD_BYTES
     assert asyncio.get_running_loop().time() - t0 < 2.0  # did not wait for all 8 words
 
 
-async def test_switching_engines_restarts_worker(client):
-    await tts(client, text="one", engine="fake")
+async def test_one_speech_model_for_the_site(client, tmp_path):
+    await tts(client, text="one")
     health = await (await client.get("/api/health", headers=AUTH)).json()
     assert health["engine"]["active"] == "fake"
-    await tts(client, text="one", engine="fake_slow")
-    health = await (await client.get("/api/health", headers=AUTH)).json()
-    assert health["engine"]["active"] == "fake_slow"
+    # a request can't swap the model
+    resp, body = await tts(client, text="one", engine="fake_slow")
+    assert resp.status == 409 and "Settings" in json.loads(body)["error"]
+    assert (await (await client.get("/api/health", headers=AUTH)).json())["engine"]["active"] == "fake"
+    # the setting does, and is saved
+    s = await (await client.get("/api/settings", headers=AUTH)).json()
+    assert s["speech_engine"] == "fake" and {"fake", "fake_slow"} <= {e["id"] for e in s["engines"]}
+    r = await client.put("/api/settings", json={"speech_engine": "fake_slow", "llm_mode": "cpu"}, headers=AUTH)
+    assert r.status == 200
+    for _ in range(100):
+        if (await (await client.get("/api/health", headers=AUTH)).json())["engine"]["active"] == "fake_slow":
+            break
+        await asyncio.sleep(0.05)
+    assert (await (await client.get("/api/health", headers=AUTH)).json())["engine"]["active"] == "fake_slow"
+    saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert saved["default_engine"] == "fake_slow" and saved["llm_mode"] == "cpu"
+    resp, _ = await tts(client, text="two")
+    assert resp.status == 200
     engines = await (await client.get("/api/engines", headers=AUTH)).json()
     stats = {e["id"]: e["stats"] for e in engines["engines"]}
-    assert stats["fake"]["requests"] == 1 and stats["fake"]["rtf"] is not None
+    assert stats["fake"]["requests"] == 1 and stats["fake_slow"]["requests"] == 1
+    assert (await client.put("/api/settings", json={"llm_mode": "turbo"}, headers=AUTH)).status == 400
+    assert (await client.put("/api/settings", json={"speech_engine": "ghost"}, headers=AUTH)).status == 400
+
+
+async def test_designing_with_another_model_keeps_the_speech_model_loaded(tmp_path):
+    manager = EngineManager(SPECS, tmp_path, designer_idle_s=0.3)
+    freed = []
+
+    async def make_room():
+        freed.append(1)
+
+    manager.before_designer = make_room
+    try:
+        await manager.preload("fake")
+        from androidreader_server.engines.manager import AudioChunk
+
+        chunks = [ev async for ev in manager.design("fake_slow", "deep", "a b", 1) if isinstance(ev, AudioChunk)]
+        assert chunks and manager.active == "fake" and manager.designer == "fake_slow" and freed == [1]
+        # designing with the speech model itself uses it
+        [ev async for ev in manager.design("fake", "deep", "a", 1)]
+        assert manager.designer == "fake_slow"
+        # the LLM's turn on the GPU unloads the designer only
+        async with manager.exclusive(evict=False):
+            assert manager.active == "fake" and manager.designer is None
+        [ev async for ev in manager.design("fake_slow", "deep", "a", 1)]
+        await asyncio.sleep(0.8)  # idle: the designer goes away by itself
+        assert manager.designer is None and manager.active == "fake"
+    finally:
+        await manager.close()
 
 
 async def test_design_voice_creates_locked_voice(client):
@@ -440,3 +491,38 @@ async def test_design_younger_or_older_options(client):
     r = await client.post("/api/voices/nar/design", json={"description": "An elderly man.", "engine": "fake",
                                                            "count": 1, "age": 1}, headers=AUTH)
     assert r.status == 400 and "already elderly" in (await r.json())["error"]
+
+def test_old_configs_move_the_llm_to_a_shared_gpu(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"token": "t", "llm_mode": "auto"}), encoding="utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.llm_mode == "shared" and cfg.settings_v == 1
+    (tmp_path / "config.json").write_text(json.dumps({"token": "t", "llm_mode": "auto", "settings_v": 1}),
+                                          encoding="utf-8")
+    assert load_config(tmp_path).llm_mode == "auto"  # chosen after the migration: kept
+
+async def test_the_llm_waits_for_a_designer_in_use(tmp_path):
+    """An LLM step queued while a voice is being designed waits until the designer has been idle."""
+    loop = asyncio.get_running_loop()
+    manager = EngineManager(SPECS, tmp_path, designer_idle_s=1.0)
+    try:
+        await manager.preload("fake")
+        design = asyncio.ensure_future(_drain_events(manager.design("fake_slow", "deep", "a b", 1)))
+        await asyncio.sleep(0.1)
+        entered = []
+
+        async def llm_step():
+            async with manager.exclusive(evict=False):
+                entered.append(loop.time())
+
+        step = asyncio.ensure_future(llm_step())
+        await design
+        done = loop.time()
+        assert manager.designer == "fake_slow"
+        await asyncio.wait_for(step, 10)
+        assert entered[0] - done >= 0.8 and manager.designer is None and manager.active == "fake"
+    finally:
+        await manager.close()
+
+
+async def _drain_events(stream):
+    return [ev async for ev in stream]

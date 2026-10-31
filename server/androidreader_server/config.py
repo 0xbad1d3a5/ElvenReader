@@ -62,12 +62,13 @@ class ServerConfig:
     llm_model: str = "Qwen3.5-35B-A3B-Q4_K_M.gguf"
     llm_context: int = 12288
     llm_threads: int = 12
-    # Where the LLM runs: "auto" (GPU while no speech has been requested for two
-    # minutes, otherwise CPU, so analysis never evicts the voice model while you
-    # listen), "gpu" or "cpu". llm_cpu_moe = layers whose experts stay in RAM on
-    # the GPU path (raise it if VRAM runs out).
-    llm_mode: str = "auto"
+    # Where the LLM runs: "shared" (default: on the GPU next to the speech model, with the experts of
+    # llm_cpu_moe_shared layers in RAM, so the speech model is never unloaded), "auto" (the whole GPU
+    # while no speech has been requested for two minutes, unloading the speech model, otherwise CPU),
+    # "gpu" (the whole GPU) or "cpu". llm_cpu_moe = layers whose experts stay in RAM on the whole-GPU path.
+    llm_mode: str = "shared"
     llm_cpu_moe: int = 20
+    llm_cpu_moe_shared: int = 32
     # Pass 1 of the analysis: a reasoning model reads the whole book and builds a character
     # dossier (names, apparent age and form, speech style...), which pass 2 (llm_model) uses
     # to attribute lines. Empty (default) = skip pass 1: on our gold excerpts it lowered
@@ -95,8 +96,10 @@ class ServerConfig:
     llm_label_profiles: bool = True
     # Cap on reasoning tokens per request (llama.cpp --reasoning-budget); -1 = unlimited.
     llm_reasoning_budget: int = -1
-    # Engine used to create character voices from a description.
+    # Engine used to create character voices from a description. When it isn't the speech model it runs
+    # as a voice designer next to it, loaded while voices are designed and unloaded after designer_idle_s.
     voice_design_engine: str = "qwen3tts"
+    designer_idle_s: float = 180.0
     # Casting: main characters and narrators always get a designed voice of their own, supporting
     # characters (most lines first) up to this many, extras share pooled voices.
     cast_supporting_voices: int = 12
@@ -104,6 +107,8 @@ class ServerConfig:
     # openai-whisper installed, and the model file under <models_dir>.
     whisper_venv: str = "indextts"
     whisper_model: str = "whisper/large-v3-turbo.pt"
+    # Version of the settings below the defaults written to config.json (for one-time migrations).
+    settings_v: int = 1
 
     data_dir: str = field(default="", repr=False)
 
@@ -132,6 +137,11 @@ def load_config(data_dir: Path | None = None) -> ServerConfig:
         raw = json.loads(path.read_text(encoding="utf-8-sig"))
     if not raw.get("token"):
         raw["token"] = generate_token()
+    if raw and int(raw.get("settings_v") or 0) < 1:
+        # v1: the LLM shares the GPU instead of unloading the speech model ("auto" was the old default).
+        if raw.get("llm_mode", "auto") == "auto":
+            raw["llm_mode"] = "shared"
+        raw["settings_v"] = 1
     known = set(ServerConfig.__dataclass_fields__) - {"data_dir"}
     cfg = ServerConfig(**{k: v for k, v in raw.items() if k in known})
     path.write_text(json.dumps(cfg.to_json(), indent=2), encoding="utf-8")
@@ -147,6 +157,16 @@ def load_config(data_dir: Path | None = None) -> ServerConfig:
     if os.environ.get("ANDROIDREADER_MODELS"):
         cfg.models_dir = os.environ["ANDROIDREADER_MODELS"]
     return cfg
+
+
+def save_settings(cfg: ServerConfig, **changes) -> None:
+    """Change settings in the running config and in config.json (keeping anything else in the file)."""
+    for k, v in changes.items():
+        setattr(cfg, k, v)
+    path = cfg.data_path / "config.json"
+    raw = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else cfg.to_json()
+    raw.update(changes)
+    path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
 
 def rotate_token(data_dir: Path | None = None) -> ServerConfig:

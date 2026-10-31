@@ -1,8 +1,9 @@
 """Runs engine workers and serialises access to the GPU.
 
-Only one engine is loaded at a time. Asking for another engine stops the
-current worker (freeing its VRAM) and starts the requested one. Requests are
-served one at a time in arrival order. When a client goes away mid-sentence,
+The site's speech model stays loaded in the main slot; asking it for another engine stops the
+current worker and starts the requested one (the server only does that when the speech model setting
+changes). Voice design with another model runs in a second, temporary slot. Requests are
+served one at a time per slot, in arrival order. When a client goes away mid-sentence,
 the worker is told to cancel and the manager waits for it to acknowledge
 before serving the next request, so frames never get mixed up.
 """
@@ -168,7 +169,29 @@ class _Worker:
             t.cancel()
 
 
+class _Slot:
+    """A place for one worker on the GPU, served one request at a time."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.lock = asyncio.Lock()
+        self.worker: _Worker | None = None
+        self.waiting = 0
+        self.last_activity = time.monotonic() - 3600
+        self.state = "idle"
+        self.detail = ""
+        self.loading: str | None = None
+
+    @property
+    def active(self) -> str | None:
+        return self.worker.spec.id if self.worker and self.worker.alive else None
+
+
 class EngineManager:
+    """Two places on the GPU: the speech model the site reads with (`main`, loaded once and kept), and a
+    voice designer (`design`) for when the design model is another one. The designer is loaded only while
+    voices are being designed and unloaded after `designer_idle_s`; it never evicts the speech model."""
+
     def __init__(
         self,
         specs: dict[str, EngineSpec],
@@ -177,20 +200,22 @@ class EngineManager:
         options: dict | None = None,
         load_timeout_s: float = 900.0,
         synth_timeout_s: float = 180.0,
+        designer_idle_s: float = 180.0,
     ):
         self.specs = specs
         self.models_dir = Path(models_dir)
         self.options = options or {}
         self.load_timeout_s = load_timeout_s
         self.synth_timeout_s = synth_timeout_s
+        self.designer_idle_s = designer_idle_s
         self.stats: dict[str, EngineStats] = {k: EngineStats() for k in specs}
-        self._lock = asyncio.Lock()
-        self._waiting = 0
-        self._last_activity = time.monotonic() - 3600
-        self._worker: _Worker | None = None
-        self.state = "idle"
-        self.state_detail = ""
-        self.loading_engine: str | None = None
+        self._main = _Slot("main")
+        self._design = _Slot("design")
+        self._reaper: asyncio.Task | None = None
+        # The site's speech model (loaded in the main slot, now or on the first request).
+        self.resident: str | None = None
+        # Called before the designer loads, to make room on the GPU (the server stops a GPU LLM here).
+        self.before_designer = None
 
     # -- information ---------------------------------------------------------
 
@@ -202,15 +227,25 @@ class EngineManager:
 
     @property
     def active(self) -> str | None:
-        return self._worker.spec.id if self._worker and self._worker.alive else None
+        return self._main.active
+
+    @property
+    def designer(self) -> str | None:
+        return self._design.active
+
+    @property
+    def state(self) -> str:
+        return self._main.state
 
     def status(self) -> dict:
         return {
             "active": self.active,
-            "state": self.state,
-            "detail": self.state_detail,
-            "loading": self.loading_engine,
-            "busy": self._lock.locked(),
+            "state": self._main.state,
+            "detail": self._main.detail,
+            "loading": self._main.loading,
+            "busy": self._main.lock.locked(),
+            "designer": self.designer,
+            "designer_state": self._design.state,
         }
 
     def engines(self) -> list[dict]:
@@ -227,13 +262,13 @@ class EngineManager:
 
     # -- worker lifecycle ----------------------------------------------------
 
-    async def _start(self, spec: EngineSpec) -> _Worker:
+    async def _start(self, spec: EngineSpec, extra: dict | None = None) -> _Worker:
         python = spec.python(self.models_dir)
         if not python.exists():
             raise EngineError(
                 f"{spec.label} is not installed (missing {python}). Run setup-engines.ps1 {spec.id}.", 503
             )
-        options = {**spec.defaults, **self.options.get(spec.id, {})}
+        options = {**spec.defaults, **self.options.get(spec.id, {}), **(extra or {})}
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(SERVER_ROOT), env.get("PYTHONPATH")]))
         env["PYTHONUNBUFFERED"] = "1"
@@ -266,90 +301,142 @@ class EngineManager:
             await worker.stop()
             raise
         worker.sample_rate = int(loaded.get("sample_rate") or 24000)
-        self.stats[spec.id].load_s = round(time.perf_counter() - t0, 1)
-        self.stats[spec.id].vram_mb = loaded.get("vram_mb")
-        logger.info("%s loaded in %.1fs", spec.label, self.stats[spec.id].load_s)
+        if not extra:  # the designer's numbers would mislead (it loads only part of the model)
+            self.stats[spec.id].load_s = round(time.perf_counter() - t0, 1)
+            self.stats[spec.id].vram_mb = loaded.get("vram_mb")
+        logger.info("%s loaded in %.1fs%s", spec.label, time.perf_counter() - t0, " (voice designer)" if extra else "")
         return worker
 
-    async def _ensure(self, spec: EngineSpec) -> _Worker:
-        """Caller holds the lock."""
-        if self._worker and self._worker.alive and self._worker.spec.id == spec.id:
-            return self._worker
-        await self._stop_worker()
-        self.state, self.state_detail, self.loading_engine = "loading", f"Loading {spec.label}", spec.id
+    async def _ensure(self, slot: _Slot, spec: EngineSpec, extra: dict | None = None) -> _Worker:
+        """Caller holds the slot's lock."""
+        if slot.worker and slot.worker.alive and slot.worker.spec.id == spec.id:
+            return slot.worker
+        await self._stop(slot)
+        if slot is self._design and self.before_designer is not None:
+            await self.before_designer()
+        slot.state, slot.detail, slot.loading = "loading", f"Loading {spec.label}", spec.id
         try:
-            self._worker = await self._start(spec)
+            slot.worker = await self._start(spec, extra)
         except EngineError as exc:
-            self.state, self.state_detail = "error", exc.detail
+            slot.state, slot.detail = "error", exc.detail
             raise
         finally:
-            self.loading_engine = None
-        self.state, self.state_detail = "ready", ""
-        return self._worker
+            slot.loading = None
+        slot.state, slot.detail = "ready", ""
+        return slot.worker
 
-    async def _stop_worker(self) -> None:
-        if self._worker is not None:
-            logger.info("stopping %s", self._worker.spec.label)
-            await self._worker.stop()
-            self._worker = None
-            self.state = "idle"
+    async def _stop(self, slot: _Slot) -> None:
+        if slot.worker is not None:
+            logger.info("stopping %s%s", slot.worker.spec.label, " (voice designer)" if slot is self._design else "")
+            await slot.worker.stop()
+            slot.worker = None
+            slot.state = "idle"
 
     async def preload(self, engine_id: str) -> None:
+        """Load the speech model the site reads with (replacing another one)."""
         spec = self.spec(engine_id)
-        async with self._lock:
-            await self._ensure(spec)
+        self.resident = engine_id
+        async with self._main.lock:
+            await self._ensure(self._main, spec)
 
     async def unload(self) -> None:
-        """Free the GPU (e.g. before running a local LLM)."""
-        async with self._lock:
-            await self._stop_worker()
+        """Free the GPU entirely (e.g. before running something else on it)."""
+        async with self._main.lock, self._design.lock:
+            await self._stop(self._design)
+            await self._stop(self._main)
+
+    async def unload_designer(self) -> None:
+        async with self._design.lock:
+            await self._stop(self._design)
 
     @contextlib.asynccontextmanager
-    async def exclusive(self):
-        """Hold the GPU for something else (the dramatization LLM): no TTS model is loaded meanwhile."""
-        async with self._lock:
-            await self._stop_worker()
-            yield
+    async def exclusive(self, evict: bool = True):
+        """Hold the GPU for something else (the dramatization LLM). The voice designer is unloaded; the speech
+        model too only with `evict` (otherwise it stays loaded and speech keeps being served meanwhile)."""
+        if evict:
+            async with self._main.lock, self._design.lock:
+                await self._stop(self._design)
+                await self._stop(self._main)
+                yield
+        else:
+            # Someone is designing voices: wait until the designer has been idle (it is unloaded then), so
+            # each "Make 3 options" doesn't reload it. Checked again once the lock is ours: a design that
+            # was running when we queued has just finished.
+            def designing() -> bool:
+                return (self._design.worker is not None
+                        and time.monotonic() - self._design.last_activity < self.designer_idle_s)
+
+            while True:
+                while designing():
+                    await asyncio.sleep(1)
+                await self._design.lock.acquire()
+                if not designing():
+                    break
+                self._design.lock.release()
+            try:
+                await self._stop(self._design)
+                yield
+            finally:
+                self._design.lock.release()
 
     @property
     def tts_waiting(self) -> bool:
         """True when synthesis requests are queued behind the current GPU holder."""
-        return self._waiting > 0
+        return self._main.waiting > 0
 
     def idle_seconds(self) -> float:
         """Seconds since speech was last requested or produced."""
-        if self._waiting:
+        if self._main.waiting:
             return 0.0
-        return time.monotonic() - self._last_activity
+        return time.monotonic() - self._main.last_activity
 
     async def close(self) -> None:
-        await self._stop_worker()
+        if self._reaper:
+            self._reaper.cancel()
+        await self._stop(self._design)
+        await self._stop(self._main)
 
     # -- synthesis -----------------------------------------------------------
 
     def synthesize(self, engine_id: str, payload: dict):
         """Async iterator: StreamStart, AudioChunk..., Done. Raises EngineError."""
-        return self._run(engine_id, {"op": "synth", **payload})
+        return self._run(self._main, engine_id, {"op": "synth", **payload})
 
     def design(self, engine_id: str, description: str, text: str, seed: int | None = None):
+        """Design with the speech model when it is the design model; otherwise with the designer, next to it."""
         if not self.spec(engine_id).voice_design:
             raise EngineError(f"{self.spec(engine_id).label} cannot design voices", 400)
-        return self._run(engine_id, {"op": "design", "description": description, "text": text, "seed": seed})
+        msg = {"op": "design", "description": description, "text": text, "seed": seed}
+        if engine_id in (self.active, self.resident, self._main.loading):
+            return self._run(self._main, engine_id, msg)
+        return self._run(self._design, engine_id, msg, extra={"design_only": True})
 
-    async def _run(self, engine_id: str, msg: dict):
+    def _reap_later(self) -> None:
+        if self._reaper and not self._reaper.done():
+            self._reaper.cancel()
+
+        async def reap():
+            await asyncio.sleep(self.designer_idle_s)
+            if not self._design.lock.locked() and time.monotonic() - self._design.last_activity >= self.designer_idle_s - 1:
+                async with self._design.lock:
+                    await self._stop(self._design)
+
+        self._reaper = asyncio.ensure_future(reap())
+
+    async def _run(self, slot: _Slot, engine_id: str, msg: dict, extra: dict | None = None):
         spec = self.spec(engine_id)
-        self._waiting += 1
-        self._last_activity = time.monotonic()
+        slot.waiting += 1
+        slot.last_activity = time.monotonic()
         try:
-            await self._lock.acquire()
+            await slot.lock.acquire()
         finally:
-            self._waiting -= 1
+            slot.waiting -= 1
         worker: _Worker | None = None
         q: asyncio.Queue | None = None
         rid = uuid.uuid4().hex
         finished = False
         try:
-            worker = await self._ensure(spec)
+            worker = await self._ensure(slot, spec, extra)
             q = asyncio.Queue()
             worker.queues[rid] = q
             await worker.send({**msg, "id": rid})
@@ -358,12 +445,12 @@ class EngineManager:
                     kind, data = await asyncio.wait_for(q.get(), self.synth_timeout_s)
                 except asyncio.TimeoutError as exc:
                     finished = True
-                    await self._stop_worker()
+                    await self._stop(slot)
                     raise EngineError(f"{spec.label} produced no audio for {self.synth_timeout_s:.0f}s", 504) from exc
                 if kind == "exit":
                     finished = True
                     detail = worker.crash_detail()
-                    await self._stop_worker()
+                    await self._stop(slot)
                     raise EngineError(detail, 503)
                 if kind == "audio":
                     yield AudioChunk(data)
@@ -373,7 +460,8 @@ class EngineManager:
                     yield StreamStart(int(data.get("sample_rate") or worker.sample_rate), spec.id)
                 elif t == "done":
                     finished = True
-                    self.stats[spec.id].record(data.get("gen_s", 0.0), data.get("audio_s", 0.0), data.get("vram_mb"))
+                    if slot is self._main:
+                        self.stats[spec.id].record(data.get("gen_s", 0.0), data.get("audio_s", 0.0), data.get("vram_mb"))
                     yield Done(data.get("gen_s", 0.0), data.get("audio_s", 0.0))
                     return
                 elif t == "cancelled":
@@ -385,15 +473,17 @@ class EngineManager:
         finally:
             if not finished and worker is not None and q is not None and worker.alive:
                 # The consumer went away mid-request: cancel, then release the
-                # GPU once the worker confirms, without blocking the caller.
-                asyncio.ensure_future(self._drain(worker, rid, q))
+                # slot once the worker confirms, without blocking the caller.
+                asyncio.ensure_future(self._drain(slot, worker, rid, q))
             else:
                 if worker is not None:
                     worker.queues.pop(rid, None)
-                self._last_activity = time.monotonic()
-                self._lock.release()
+                slot.last_activity = time.monotonic()
+                slot.lock.release()
+                if slot is self._design:
+                    self._reap_later()
 
-    async def _drain(self, worker: _Worker, rid: str, q: asyncio.Queue) -> None:
+    async def _drain(self, slot: _Slot, worker: _Worker, rid: str, q: asyncio.Queue) -> None:
         try:
             await worker.send({"op": "cancel", "id": rid})
             deadline = time.monotonic() + self.synth_timeout_s
@@ -402,7 +492,9 @@ class EngineManager:
                 if kind == "exit" or (kind == "json" and data.get("type") in {"done", "cancelled", "error"}):
                     break
         except (asyncio.TimeoutError, EngineError):
-            await self._stop_worker()
+            await self._stop(slot)
         finally:
             worker.queues.pop(rid, None)
-            self._lock.release()
+            slot.lock.release()
+            if slot is self._design:
+                self._reap_later()

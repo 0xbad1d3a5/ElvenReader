@@ -1047,8 +1047,11 @@ class LocalLlm:
         model_file = model or self.cfg.llm_model
         context = context or self.cfg.llm_context
         budget = getattr(self.cfg, "llm_reasoning_budget", -1)
+        # On the GPU next to the speech model ("shared"), or with the whole GPU to itself.
+        shared = self.gpu and self.cfg.llm_mode == "shared"
+        cpu_moe = self.cfg.llm_cpu_moe_shared if shared else self.cfg.llm_cpu_moe
         if self.proc is not None and self.proc.returncode is None and (
-                self.running_gpu != self.gpu or self.running != (model_file, context, budget)):
+                self.running_gpu != self.gpu or self.running != (model_file, context, budget, cpu_moe)):
             await self.stop()
         if await self._alive(session):
             return
@@ -1067,7 +1070,7 @@ class LocalLlm:
         if budget >= 0:
             args += ["--reasoning-budget", str(budget)]
         if self.gpu:
-            args += ["-ngl", "99", "--n-cpu-moe", str(self.cfg.llm_cpu_moe)]
+            args += ["-ngl", "99", "--n-cpu-moe", str(cpu_moe)]
         else:
             args += ["-ngl", "0"]
         logger.info("starting LLM: %s", " ".join(args))
@@ -1075,7 +1078,7 @@ class LocalLlm:
         self.proc = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log,
                                                          creationflags=0x08000000)
         self.running_gpu = self.gpu
-        self.running = (model_file, context, budget)
+        self.running = (model_file, context, budget, cpu_moe)
         for _ in range(600):
             await asyncio.sleep(1)
             if self.proc.returncode is not None:
@@ -1429,6 +1432,14 @@ class Analyzer:
         self.current: str | None = None
 
     def start(self) -> None:
+        from .app import ENGINES_KEY
+
+        async def make_room():  # the voice designer needs the VRAM a GPU LLM holds between steps
+            if self.llm.running_gpu:
+                await self.llm.stop()
+
+        if ENGINES_KEY in self.app:
+            self.app[ENGINES_KEY].before_designer = make_room
         self.task = asyncio.ensure_future(self._run())
 
     async def stop(self) -> None:
@@ -1518,12 +1529,17 @@ class Analyzer:
                 d["narrates"] = "yes" if key == "any" else f"the {key}-tense sections"
 
     async def _gpu(self, make_coro):
-        """Runs one LLM step on the GPU when allowed and the voice model has been idle,
-        otherwise on the CPU alongside speech synthesis."""
+        """Runs one LLM step. "shared" (default): on the GPU next to the speech model, which stays loaded
+        (only a voice designer is unloaded). "auto": with the whole GPU when the speech model has been idle,
+        otherwise on the CPU alongside speech. "gpu": always the whole GPU. "cpu": never the GPU."""
         from .app import ENGINES_KEY
 
         manager = self.app[ENGINES_KEY]
         mode = self.llm.cfg.llm_mode
+        if mode == "shared":
+            self.llm.gpu = True
+            async with manager.exclusive(evict=False):
+                return await make_coro()
         use_gpu = mode == "gpu" or (mode == "auto" and manager.idle_seconds() >= GPU_IDLE_S)
         self.llm.gpu = use_gpu
         if not use_gpu:

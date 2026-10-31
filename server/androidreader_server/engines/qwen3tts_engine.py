@@ -19,9 +19,15 @@ class Engine(BaseEngine):
         )
 
     def load(self) -> None:
-        self.model = self._load_model(self.options.get("repo", "Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
         self.designer = None
         self._prompts: dict[tuple, object] = {}
+        if self.options.get("design_only"):
+            # The voice designer next to the site's speech model: only the VoiceDesign half (about 4 GB).
+            self.model = None
+            self.designer = self._load_model(
+                self.options.get("design_repo", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"))
+            return
+        self.model = self._load_model(self.options.get("repo", "Qwen/Qwen3-TTS-12Hz-1.7B-Base"))
 
     def _language(self, value: str | None) -> str:
         return self.language_name(value) or "Auto"
@@ -37,6 +43,8 @@ class Engine(BaseEngine):
         return self._prompts[key]
 
     def synthesize(self, req: dict, cancelled):
+        if self.model is None:
+            raise RuntimeError("This Qwen3-TTS worker only designs voices")
         voice = req.get("voice") or {}
         seed = req.get("seed") if req.get("seed") is not None else voice.get("seed")
         self.seed_everything(seed)

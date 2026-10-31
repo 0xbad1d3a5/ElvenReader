@@ -124,17 +124,95 @@ async def engines(request: web.Request) -> web.Response:
 
 
 async def engine_load(request: web.Request) -> web.Response:
-    manager = request.app[ENGINES_KEY]
+    """Make an engine the site's speech model (same as PUT /api/settings {"speech_engine": ...})."""
     try:
-        await manager.preload(request.match_info["engine"])
+        await set_speech_engine(request.app, request.match_info["engine"])
     except EngineError as exc:
         return _json_error(exc.status, exc.detail)
-    return web.json_response({"status": manager.status()})
+    return web.json_response({"status": request.app[ENGINES_KEY].status()})
 
 
 async def engine_unload(request: web.Request) -> web.Response:
     await request.app[ENGINES_KEY].unload()
     return web.json_response({"status": request.app[ENGINES_KEY].status()})
+
+
+# ---------------------------------------------------------------- site settings
+
+LLM_MODES = ("shared", "auto", "gpu", "cpu")
+
+
+def settings_json(app: web.Application) -> dict:
+    cfg, manager = app[CONFIG_KEY], app[ENGINES_KEY]
+    installed = [e for e in manager.engines() if e["installed"]]
+    return {
+        "speech_engine": cfg.default_engine,
+        "voice_design_engine": cfg.voice_design_engine,
+        "llm_mode": cfg.llm_mode,
+        "engines": [{"id": e["id"], "label": e["label"], "voice_design": e["voice_design"], "stats": e["stats"]}
+                    for e in installed],
+        "status": manager.status(),
+    }
+
+
+async def set_speech_engine(app: web.Application, engine_id: str) -> None:
+    """The one speech model the site reads with: saved, then loaded in place of the old one."""
+    from .config import save_settings
+
+    manager = app[ENGINES_KEY]
+    spec = manager.spec(engine_id)
+    if not spec.installed(manager.models_dir):
+        raise EngineError(f"{spec.label} is not installed on the PC", 400)
+    save_settings(app[CONFIG_KEY], default_engine=engine_id)
+    await manager.preload(engine_id)
+
+
+async def settings_get(request: web.Request) -> web.Response:
+    return web.json_response(settings_json(request.app))
+
+
+async def settings_put(request: web.Request) -> web.Response:
+    """{speech_engine?, voice_design_engine?, llm_mode?}. Changing the speech model loads it (about a minute)
+    in the background; GET shows when it's ready."""
+    from .config import save_settings
+
+    app = request.app
+    body = await _json_body(request)
+    manager = app[ENGINES_KEY]
+    changes = {}
+    design = _str(body, "voice_design_engine")
+    if design:
+        spec = manager.spec(design) if design in manager.specs else None
+        if spec is None or not spec.voice_design or not spec.installed(manager.models_dir):
+            return _json_error(400, f"{design} can't design voices on this PC")
+        changes["voice_design_engine"] = design
+    mode = _str(body, "llm_mode")
+    if mode:
+        if mode not in LLM_MODES:
+            return _json_error(400, f"llm_mode must be one of {', '.join(LLM_MODES)}")
+        changes["llm_mode"] = mode
+    speech = _str(body, "speech_engine")
+    if speech and speech != app[CONFIG_KEY].default_engine:
+        spec = manager.specs.get(speech)
+        if spec is None or not spec.installed(manager.models_dir):
+            return _json_error(400, f"{speech} is not installed on the PC")
+    if changes:
+        save_settings(app[CONFIG_KEY], **changes)
+        if "voice_design_engine" in changes:
+            await manager.unload_designer()
+    if speech and speech != app[CONFIG_KEY].default_engine:
+        save_settings(app[CONFIG_KEY], default_engine=speech)
+        manager.resident = speech
+
+        async def load():
+            try:
+                await manager.preload(speech)
+            except EngineError as exc:
+                logger.warning("could not load %s: %s", speech, exc.detail)
+
+        app[EXTRA_KEY]["loading"] = asyncio.ensure_future(load())
+        await asyncio.sleep(0)
+    return web.json_response(settings_json(app))
 
 
 # ---------------------------------------------------------------- voices
@@ -232,7 +310,7 @@ async def voice_design(request: web.Request) -> web.Response:
     description = _str(body, "description")
     if not description:
         return _json_error(400, "Describe the voice, e.g. 'female, young adult, warm, british accent'")
-    engine = _str(body, "engine") or "qwen3tts"
+    engine = _str(body, "engine") or request.app[CONFIG_KEY].voice_design_engine
     try:
         voice = await design_voice(request.app, engine, description, _str(body, "name") or description[:40],
                                    text=_str(body, "text"), seed=body.get("seed"))
@@ -306,7 +384,11 @@ class SynthesisPlan:
     def __init__(self, app: web.Application, body: dict, text: str):
         cfg = app[CONFIG_KEY]
         manager = app[ENGINES_KEY]
-        self.engine_id = _str(body, "engine") or cfg.default_engine
+        # One speech model for the whole site (Settings); a request can't swap it for another.
+        self.engine_id = cfg.default_engine
+        asked = _str(body, "engine")
+        if asked and asked != self.engine_id:
+            raise EngineError(f"The site reads with {self.engine_id}; change the speech model in Settings", 409)
         self.spec: EngineSpec = manager.spec(self.engine_id)
         if not self.spec.installed(manager.models_dir):
             raise EngineError(f"{self.spec.label} is not installed on the PC", 503)
@@ -541,7 +623,9 @@ def make_app(
         options=cfg.engine_options,
         load_timeout_s=cfg.load_timeout_s,
         synth_timeout_s=cfg.synth_timeout_s,
+        designer_idle_s=cfg.designer_idle_s,
     )
+    app[ENGINES_KEY].resident = app[ENGINES_KEY].resident or cfg.default_engine
     app[VOICES_KEY] = VoiceStore(data / "voices")
     app[PRON_KEY] = PronunciationStore(data / "pronunciations.json")
     app[CACHE_KEY] = AudioCache(data / "cache", cfg.cache_max_mb * 1024 * 1024)
@@ -569,6 +653,8 @@ def make_app(
     r.add_get("/api/ping", ping)
     r.add_get("/api/health", health)
     r.add_get("/api/engines", engines)
+    r.add_get("/api/settings", settings_get)
+    r.add_put("/api/settings", settings_put)
     r.add_post("/api/engines/unload", engine_unload)
     r.add_post("/api/engines/{engine}/load", engine_load)
     r.add_get("/api/voices", voices)
