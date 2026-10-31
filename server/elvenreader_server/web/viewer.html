@@ -176,10 +176,10 @@ function tokenScreen(message) {
   input.focus();
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, signal) {
   const r = await fetch(path, {
     method, cache: "no-cache", headers: { Authorization: "Bearer " + TOKEN, ...(body ? { "Content-Type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? JSON.stringify(body) : undefined, signal,
   });
   if (r.status === 401) { tokenScreen("The token was not accepted. Enter the current one."); throw new Error("Wrong token"); }
   const ct = r.headers.get("Content-Type") || "";
@@ -1333,15 +1333,30 @@ async function bookView(id) {
     return req;
   }
 
+  const AHEAD = 10;  // passages synthesized ahead of the one playing
   function fetchUnit(i) {
     if (!st.units[i]) return null;
     if (!st.fetches.has(i)) {
-      st.fetches.set(i, api("POST", "/api/tts", unitRequest(i)).then(speechUrl));
+      const ctrl = new AbortController();
+      const promise = api("POST", "/api/tts", unitRequest(i), ctrl.signal).then(speechUrl);
+      promise.catch(() => {});  // a cancelled look-ahead isn't an error
+      st.fetches.set(i, { promise, ctrl });
     }
-    return st.fetches.get(i);
+    return st.fetches.get(i).promise;
   }
 
-  function flushAudio() { st.fetches.clear(); }
+  /* Keep only the passages from `from` to `from + AHEAD`: the others are cancelled, and the server stops making
+     their audio, so jumping elsewhere doesn't wait behind ten passages nobody will hear. */
+  function keepFetches(from) {
+    for (const [i, f] of st.fetches) {
+      if (i >= from && i <= from + AHEAD) continue;
+      f.ctrl.abort();
+      f.promise.then(u => URL.revokeObjectURL(u)).catch(() => {});
+      st.fetches.delete(i);
+    }
+  }
+
+  function flushAudio() { keepFetches(Infinity); }
 
   async function playFrom(i) {
     stopPlayback();
@@ -1357,9 +1372,13 @@ async function bookView(id) {
       $("#playStatus").textContent = "Synthesizing on the PC\u2026";
       let url;
       try {
-        url = await fetchUnit(k);
-        fetchUnit(k + 1); fetchUnit(k + 2);
+        keepFetches(k);
+        const current = fetchUnit(k);
+        for (let j = 1; j <= AHEAD; j++) fetchUnit(k + j);  // queued on the PC behind this one
+        url = await current;
       } catch (e) {
+        if (st.session !== session) return;  // stopped or moved elsewhere meanwhile
+        if (e.name === "AbortError") { k--; continue; }  // its audio was dropped (e.g. new narrator): fetch again
         $("#playStatus").textContent = "Error: " + e.message; st.session = null; playLabel(false); return;
       }
       if (st.session !== session) return;

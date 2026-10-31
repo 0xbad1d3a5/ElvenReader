@@ -225,7 +225,8 @@ after them, so they never shift the text.
   or leaving full screen ends it.
 * **Playback:** click any line or narration to play from there through the chapter with each
   speaker's voice and delivery, using the chosen narrator voice and the site's speech model
-  (Settings). Sentences already
+  (Settings). While a passage plays, the next 10 are already being made on the PC; jumping
+  elsewhere cancels the ones you won't hear. Sentences already
   synthesized come from the server's cache, so re-listening is instant. Speech reaches the
   browser as Ogg Opus at 64 kbit/s (MP3 where the browser can't play Opus), about a sixth of the
   raw 24 kHz audio: roughly 30 MB per hour of listening instead of 170 MB.
