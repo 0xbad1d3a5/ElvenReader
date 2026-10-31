@@ -1523,3 +1523,25 @@ async def test_queue_analyse_now_and_send_to_bottom_set_the_current_book_aside(a
     import json
     saved = next(tmp_path.rglob("analysis-queue.json"))
     assert json.loads(saved.read_text())["order"] == ["b2", "b1", "b3"]  # no duplicates of the set-aside book
+
+def test_labelling_prompt_shows_the_text_after_the_passage():
+    paras = [f"Paragraph {i} \u201cLine {i}.\u201d" if i % 2 else f"Narration {i} " + "word " * 40 for i in range(30)]
+    quotes = [[f"c0p{i}q0", i, *dz.quote_regions(p)[0]] for i, p in enumerate(paras) if dz.quote_regions(p)]
+    book = {"title": "T", "author": "A", "chapters": [{"title": "One", "paragraphs": paras, "quotes": quotes}]}
+    chunks = dz.make_chunks(book, max_words=200)
+    first, last = chunks[0], chunks[-1]
+    after = dz.following_text(book, first, 60)
+    assert after.startswith(paras[first.paragraphs[-1] + 1]) and len(after.split()) >= 60
+    assert dz.following_text(book, last, 60) == ""
+    seen = {}
+
+    class Llm:
+        async def complete(self, session, system, user, schema, max_tokens=0, **kw):
+            seen["user"] = user
+            return {"quotes": [], "speakers": []}
+
+    asyncio.run(dz.label_chunk(Llm(), None, book, {"characters": {}, "lines": {}}, first, after_words=60))
+    assert "Story just after this passage" in seen["user"]
+    assert seen["user"].index("Passage:") < seen["user"].index(paras[first.paragraphs[-1] + 1])
+    asyncio.run(dz.label_chunk(Llm(), None, book, {"characters": {}, "lines": {}}, first))
+    assert "Story just after" not in seen["user"]

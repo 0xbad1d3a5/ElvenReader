@@ -95,6 +95,8 @@ class ServerConfig:
     # old 0 / 6 on our hardest gold excerpts for ~7% more time (README); 0 / 6 = the old fast pass.
     llm_label_context_words: int = 600
     llm_label_recent_lines: int = 12
+    # Words of the story just after the passage (speech tags and replies there show who said its last lines).
+    llm_label_after_words: int = 300
     # Let each labelling call revise up to this many earlier lines of the chapter when the new passage
     # shows they were wrong (a name revealed later...); 0 = off. _unnamed: only lines given to
     # unnamed speakers ("a prisoner"). Reader corrections are never revised.

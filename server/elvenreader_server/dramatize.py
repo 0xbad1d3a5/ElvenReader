@@ -1187,6 +1187,18 @@ def preceding_text(book: dict, chunk: Chunk, words: int) -> str:
     return "\n\n".join(out)
 
 
+def following_text(book: dict, chunk: Chunk, words: int) -> str:
+    """Up to `words` words of the chapter just after this chunk (unnumbered, for context): a speech tag or a
+    reply in the next paragraph often shows who said the passage's last lines."""
+    paras = book["chapters"][chunk.chapter]["paragraphs"]
+    out, n, k = [], 0, chunk.paragraphs[-1] + 1
+    while k < len(paras) and n < words:
+        out.append(paras[k])
+        n += len(paras[k].split())
+        k += 1
+    return "\n\n".join(out)
+
+
 REVIEW_NOTE = ("A first reading proposed the labels below. Check every one against the speech tags, who is "
                "addressed, turn-taking, who is present and who \"I\" is, and correct the ones that are wrong "
                "(keep the right ones). Return the full list.")
@@ -1275,11 +1287,12 @@ def apply_revisions(script: dict, result: dict) -> list[dict]:
 
 async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk,
                       thinking: bool = False, model: str | None = None, effort: str = "high",
-                      context_words: int = 0, recent: int = 6,
+                      context_words: int = 0, recent: int = 6, after_words: int = 0,
                       proposed: dict[str, str] | None = None, revise: int = 0,
                       revise_unnamed: bool = False, profiles: bool = False) -> tuple[dict, dict[str, str]]:
-    """Label one chunk. `context_words` adds the preceding text, `recent` sets how many earlier
-    attributions are shown, and `proposed` (number -> speaker) asks the model to review a first pass."""
+    """Label one chunk. `context_words` adds the preceding text, `after_words` the text after the passage,
+    `recent` sets how many earlier attributions are shown, and `proposed` (number -> speaker) asks the model to
+    review a first pass."""
     text, local = render_chunk(book, chunk)
     chapter = book["chapters"][chunk.chapter]
     narrator = script.get("narrator") or "unknown (work it out from the passage)"
@@ -1311,6 +1324,7 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         # Profiles (and the reader's profile edits) only shape voices; they are not given to attribution.
         known = f"Known characters:\n{roster_text(script)}"
     before = preceding_text(book, chunk, context_words) if context_words else ""
+    after = following_text(book, chunk, after_words) if after_words else ""
     editable: dict[str, str] = {}
     revise_block = ""
     if revise:
@@ -1331,7 +1345,10 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
         + (f"Story just before this passage (for context only):\n{before}\n\n" if before else "")
         + f"Most recent lines before this passage:\n{recent_text(script, book, chunk, n=recent)}\n\n"
         f"Passage:\n{text}\n\n"
-        f"{review}{revise_block}"
+        + (f"Story just after this passage (for context only: its quotations are not numbered and are "
+           f"labelled later; use it for speech tags and replies that show who said the passage's lines):\n"
+           f"{after}\n\n" if after else "")
+        + f"{review}{revise_block}"
         f"Label every number from 1 to {len(local)} once."
     )
     # Generous budget: reasoning models (gpt-oss) spend tokens before the JSON, and the
@@ -1665,6 +1682,7 @@ class Analyzer:
         cfg = self.llm.cfg
         return await self._gpu(lambda: label_chunk(self.llm, session, book, script, chunk, thinking=thinking,
                                                    context_words=cfg.llm_label_context_words,
+                                                   after_words=cfg.llm_label_after_words,
                                                    recent=cfg.llm_label_recent_lines,
                                                    revise=cfg.llm_label_revise_window,
                                                    revise_unnamed=cfg.llm_label_revise_unnamed,

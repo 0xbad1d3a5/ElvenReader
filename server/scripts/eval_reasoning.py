@@ -45,6 +45,7 @@ class Variant:
     cpu_moe: int | None = None  # None = llm_cpu_moe; 0 = the whole model on the GPU
     max_words: int = 600
     context_words: int = 0
+    after_words: int = 0
     recent: int = 6
     review: bool = False  # second call per chunk that checks the first pass's labels
     review_thinking: bool = False
@@ -70,6 +71,8 @@ VARIANTS = {
     "context": V("1,200-word chunks, 600 words of preceding text, 12 recent lines", max_words=1200,
                  context_words=600, recent=12),
     "context-small": V("600-word chunks + 600 words of preceding text, 12 recent lines", context_words=600, recent=12),
+    "context-after": V("context-small + 300 words of the text after the passage", context_words=600, recent=12,
+                       after_words=300),
     "context-review": V("context-small + review pass per chunk", context_words=600, recent=12, review=True),
     "context-big": V("600-word chunks + 1,200 words of preceding text, 20 recent lines", context_words=1200, recent=20),
     "consistency": V("two runs (600/420-word chunks); disagreeing chunks reviewed", consistency=True),
@@ -169,7 +172,7 @@ async def label(llm, session, book: dict, s: dict, chunk, v: Variant, proposed=N
     by_tense = s.setdefault("narrator_by_tense", {})
     result, local = await dz.label_chunk(
         llm, session, book, s, chunk, thinking=v.thinking if thinking is None else thinking, model=v.model,
-        effort=v.effort, context_words=v.context_words, recent=v.recent, proposed=proposed,
+        effort=v.effort, context_words=v.context_words, after_words=v.after_words, recent=v.recent, proposed=proposed,
         revise=0 if proposed else v.revise, revise_unnamed=v.revise_unnamed, profiles=v.profiles)
     if chunk.tense and by_tense.get(chunk.tense):
         result["narrator"] = by_tense[chunk.tense]
