@@ -1336,7 +1336,10 @@ async function bookView(id) {
     st.chapter = i; st.filterChar = ""; st.search = "";
     $("#charFilter").value = ""; $("#search").value = "";
     history.replaceState(null, "", "#c=" + i);
-    renderText(); $("main").scrollTop = 0;
+    renderText();
+    // Wide screens scroll the text panel; phones (and narrow tablets) scroll the whole page.
+    $("main").scrollTop = 0; window.scrollTo(0, 0);
+    requestAnimationFrame(() => { $("main").scrollTop = 0; window.scrollTo(0, 0); });  // after iOS lays it out
   }
 
   /* A paragraph as narration and quotation pieces. Quoted terms inside a sentence (line.mention) stay in
