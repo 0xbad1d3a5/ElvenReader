@@ -70,9 +70,9 @@ Requirements: Windows, an NVIDIA GPU with recent drivers, ~60 GB free disk for m
 environments. [`uv`](https://docs.astral.sh/uv/) is installed automatically with winget if missing.
 
 ```powershell
-cd D:\Dev\AndroidReader\server
+cd D:\Dev\ElvenReader\server
 # Where models and per-engine Python environments go (outside git). Default: server\data\models
-'{"models_dir": "D:\\Models\\AndroidReader"}' | Set-Content -Encoding ascii data\config.json
+'{"models_dir": "D:\\Models\\ElvenReader"}' | Set-Content -Encoding ascii data\config.json
 
 .\setup-engines.ps1                 # one venv per engine (torch cu128); or e.g. .\setup-engines.ps1 omnivoice fish_s2
 .\download-models.ps1               # weights into <models_dir>\hf and <models_dir>\checkpoints
@@ -116,7 +116,7 @@ one from a description (`POST /api/voices/design`).
 ### Windows firewall (once, elevated)
 
 ```powershell
-cd D:\Dev\AndroidReader\server
+cd D:\Dev\ElvenReader\server
 .\allow-firewall.ps1        # TCP 3950 on Domain and Private networks
 ```
 
@@ -126,7 +126,7 @@ reach the PC through it). Without this rule other devices can't open the library
 ### Start automatically (optional)
 
 ```powershell
-$a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File D:\Dev\AndroidReader\server\run-server.ps1"
+$a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File D:\Dev\ElvenReader\server\run-server.ps1"
 Register-ScheduledTask -TaskName "ElvenReader server" -Action $a -Trigger (New-ScheduledTaskTrigger -AtLogOn)
 ```
 

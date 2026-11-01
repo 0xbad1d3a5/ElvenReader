@@ -1,7 +1,7 @@
 """Can a fast quotation-attribution model flag the LLM's mistakes? (ModernBookNLP as a second opinion)
 
 Two steps, because ModernBookNLP needs its own environment
-(D:\\Models\\AndroidReader\\venvs\\booknlp, see the README):
+(D:\\Models\\ElvenReader\\venvs\\booknlp, see the README):
 
     # 1. ModernBookNLP's speaker for every gold quotation (run with the booknlp venv's python,
     #    from a folder that has an "examples" subfolder; PYTHONUTF8=1)
@@ -266,7 +266,7 @@ def main() -> None:
     a.add_argument("gold", nargs="+")
     a.add_argument("--out", required=True)
     a.add_argument("--book", help="run over this whole book (id on this PC) instead of the gold excerpt")
-    a.add_argument("--work", default=r"D:\Models\AndroidReader\work\booknlp")
+    a.add_argument("--work", default=r"D:\Models\ElvenReader\work\booknlp")
     b = sub.add_parser("score")
     b.add_argument("gold", nargs="+")
     b.add_argument("--booknlp", required=True)
