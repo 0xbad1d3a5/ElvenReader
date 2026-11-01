@@ -105,3 +105,13 @@ def test_an_edited_voice_reaches_the_engines_under_a_new_path(tmp_path):
     second = store.get("bishop").worker_spec()["ref_audio"]
     assert second != first and Path(second).read_bytes() == store.get("bishop").wav_path.read_bytes()
     assert [x.id for x in store.list()] == ["bishop"]  # the copies aren't voices
+
+def test_clean_text_puts_a_space_after_tight_ellipses():
+    from elvenreader_server.text import clean_text
+
+    assert clean_text("I\u2026I didn\u2019t") == "I\u2026 I didn\u2019t"
+    assert clean_text("Um...yes. H\u2025huh? Wait......what") == "Um... yes. H\u2025 huh? Wait...... what"
+    assert clean_text("\u201c\u2026I see.\u201d") == "\u201c\u2026 I see.\u201d"
+    # Left alone: already spaced, before punctuation or a closing quote, decimals.
+    for s in ("Well\u2026 fine", "Um\u2026,", "\u201cBut\u2026\u201d", "So...?", "Pi is 3.14", "Wait\u2026 \u2026no"):
+        assert clean_text(s) == s.replace("\u2026no", "\u2026 no")

@@ -12,14 +12,18 @@ MAX_CHUNK_CHARS = 280
 # Soft hyphens and zero-width characters are common in EPUB text and must not be spoken.
 _INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"), None)
 _WHITESPACE = re.compile(r"\s+")
+# "I…I", "Um...yes", "H‥huh": an ellipsis run straight into the next word makes the models slur or skip the
+# pause, so a space goes after it ("I… I").
+_TIGHT_ELLIPSIS = re.compile(r"(\.{2,}|[\u2026\u2025]+)(?=\w)")
 
 
 def clean_text(text: str) -> str:
-    """Remove invisible/control characters and collapse whitespace."""
+    """Remove invisible/control characters, collapse whitespace and put a space after ellipses."""
     text = unicodedata.normalize("NFC", text).translate(_INVISIBLE)
     text = "".join(
         ch if not unicodedata.category(ch).startswith("C") else " " for ch in text
     )
+    text = _TIGHT_ELLIPSIS.sub(r"\1 ", text)
     return _WHITESPACE.sub(" ", text).strip()
 
 
