@@ -676,10 +676,20 @@ async def index(request: web.Request) -> web.Response:
 
 async def viewer_page(request: web.Request) -> web.Response:
     """Book viewer. Only loopback requests get the token embedded; other devices supply it."""
-    page = (Path(__file__).parent / "web" / "viewer.html").read_text(encoding="utf-8")
+    path = Path(__file__).parent / "web" / "viewer.html"
+    page = path.read_text(encoding="utf-8")
     token = request.app[CONFIG_KEY].token if request.remote in _LOOPBACK else None
     page = page.replace("__TOKEN__", json.dumps(token))
+    # The page's version (when it was last changed), so a device's reports show whether it has reloaded since.
+    page = page.replace("__VERSION__", json.dumps(time.strftime("%m-%d %H:%M", time.localtime(path.stat().st_mtime))))
     return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
+
+
+async def client_log(request: web.Request) -> web.Response:
+    """What a reading device saw (after a chapter change, or a script error), for tracking down device-only bugs."""
+    body = await _json_body(request)
+    logger.info("client %s: %s", request.remote, json.dumps(body, ensure_ascii=False)[:1500])
+    return web.json_response({"ok": True})
 
 
 # ---------------------------------------------------------------- app
@@ -738,6 +748,7 @@ def make_app(
     from .activity import activity_route
 
     r.add_post("/api/activity", activity_route)
+    r.add_post("/api/client-log", client_log)
     r.add_post("/api/engines/unload", engine_unload)
     r.add_post("/api/engines/{engine}/load", engine_load)
     r.add_get("/api/voices", voices)

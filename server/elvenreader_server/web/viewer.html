@@ -181,6 +181,21 @@ const TOKEN = (() => {
   }
   return EMBEDDED_TOKEN || localStorage.getItem(TOKEN_KEY) || localStorage.getItem("androidreader-token") || "";  // the old name's key
 })();
+const VIEWER_VERSION = __VERSION__;
+/* A short note to the server's log (what a device saw; script errors), for bugs that only happen on a device. */
+function report(kind, data = {}) {
+  try {
+    fetch("/api/client-log", { method: "POST", keepalive: true,
+      headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, v: VIEWER_VERSION, w: innerWidth, h: innerHeight,
+        ua: navigator.userAgent.replace(/^Mozilla\/5\.0 /, "").slice(0, 90), ...data }) }).catch(() => {});
+  } catch (e) { /* never let reporting break the page */ }
+}
+window.addEventListener("error", (e) => report("error", { msg: String(e.message).slice(0, 300), at: `${e.lineno}:${e.colno}` }));
+window.addEventListener("unhandledrejection", (e) => {
+  const r = e.reason || {};
+  if (r.name !== "AbortError") report("rejection", { msg: String(r.message || r).slice(0, 300) });
+});
 const $ = (sel, el = document) => el.querySelector(sel);
 const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
@@ -1350,13 +1365,22 @@ async function bookView(id) {
      yours is undone. */
   function toTop() {
     const main = $("main");
-    const top = () => { main.scrollTop = 0; window.scrollTo(0, 0); };
+    // Locking overflow for a frame stops an iOS momentum glide at once (scrollTo alone is ignored during one).
+    const scrollers = [document.documentElement, document.body, main];
+    const top = () => {
+      scrollers.forEach(e => { e.style.overflow = "hidden"; });
+      main.scrollTop = 0; window.scrollTo(0, 0);
+      requestAnimationFrame(() => {
+        scrollers.forEach(e => { e.style.overflow = ""; });
+        main.scrollTop = 0; window.scrollTo(0, 0);
+      });
+    };
     top();
     requestAnimationFrame(top);
     let yours = false;
     const mine = () => { yours = true; };
     const undo = () => { if (!yours && (window.scrollY > 0 || main.scrollTop > 0)) top(); };
-    const until = setTimeout(done, 2500);
+    const until = setTimeout(done, 4000);
     function done() {
       clearTimeout(until);
       ["touchstart", "wheel", "keydown", "mousedown"].forEach(ev => document.removeEventListener(ev, mine, true));
@@ -1364,7 +1388,19 @@ async function bookView(id) {
     }
     ["touchstart", "wheel", "keydown", "mousedown"].forEach(ev => document.addEventListener(ev, mine, { capture: true, passive: true }));
     window.addEventListener("scroll", undo, { passive: true }); main.addEventListener("scroll", undo, { passive: true });
-    [200, 600, 1200, 2000, 2400].forEach(ms => setTimeout(undo, ms));  // iOS ignores scrollTo during momentum
+    [200, 600, 1200, 2000, 3000, 3900].forEach(ms => setTimeout(undo, ms));  // iOS ignores scrollTo during momentum
+    // Tell the server where the page ended up, to track down devices where it still goes wrong.
+    const snap = (when) => {
+      const t = $("#text");
+      if (!t) return;
+      const vis = [...t.querySelectorAll("p, h2, figure")].filter(e => { const b = e.getBoundingClientRect();
+        return b.height > 0 && b.bottom > 0 && b.top < innerHeight; }).length;
+      report("chapter", { when, book: st.id, chapter: st.chapter, scrollY: Math.round(scrollY), mainTop: Math.round(main.scrollTop),
+        pageH: document.documentElement.scrollHeight, textChars: t.innerText.length, visible: vis, yours,
+        reading: document.body.classList.contains("reading"), playing: !!st.session });
+    };
+    setTimeout(() => snap("0.3s"), 300);
+    setTimeout(() => snap("4.5s"), 4500);
   }
 
   /* A paragraph as narration and quotation pieces. Quoted terms inside a sentence (line.mention) stay in
