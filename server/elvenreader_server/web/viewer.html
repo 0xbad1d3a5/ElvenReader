@@ -1386,9 +1386,12 @@ async function bookView(id) {
       ...st.script.characters.map(c => h("option", { value: c.id }, `${c.name} (${c.lines})`)));
     cf.value = st.filterChar;
     const nv = $("#narrator");
-    nv.replaceChildren(h("option", { value: "" }, "Server default (" + voiceName(st.defaultVoice) + ")"),
-      ...st.voices.filter(v => v.source !== "character").map(v => h("option", { value: v.id }, v.name)));
-    nv.value = st.narrator;
+    const narrators = st.voices.filter(v => v.source !== "character");
+    // A narrator picked for this book that no longer exists (deleted) falls back to the default.
+    if (narrators.length && st.narrator && !narrators.some(v => v.id === st.narrator)) { st.narrator = ""; localStorage.removeItem("narrator:" + st.id); }
+    nv.replaceChildren(h("option", { value: "" }, voiceName(st.defaultVoice) + " (default)"),
+      ...narrators.filter(v => v.id !== st.defaultVoice).map(v => h("option", { value: v.id }, v.name)));
+    nv.value = st.narrator === st.defaultVoice ? "" : st.narrator;
   }
 
   function gotoChapter(i) {
