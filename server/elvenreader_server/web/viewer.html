@@ -1357,7 +1357,11 @@ async function bookView(id) {
     return out;
   }
 
+  /* Display: a space after an ellipsis run straight into a word ("I…I" -> "I… I"), as the server does for speech.
+     Only what's shown changes; quotation offsets refer to the stored text. */
+  const spaced = (t) => t.replace(/(\.{2,}|[\u2026\u2025]+)(?=[\p{L}\p{N}])/gu, "$1 ");
   function highlight(t) {
+    t = spaced(t);
     if (!st.search) return [t];
     const out = [], low = t.toLowerCase(), q = st.search.toLowerCase(); let i = 0, j;
     while ((j = low.indexOf(q, i)) >= 0) { out.push(t.slice(i, j), h("mark", {}, t.slice(j, j + q.length))); i = j + q.length; }
