@@ -23,6 +23,9 @@
   .grid .serieshead:not(:first-child) { margin-top:14px; }
   .seriessel { max-width:18em; font-size:12.5px; padding:2px 4px; } dialog .seriessel { max-width:none; width:100%; }
   .selbtn { position:fixed; z-index:30; font-size:12.5px; box-shadow:0 2px 8px #0003; }
+  .selbtn.touch { transform:translateX(-50%); font-size:15px; padding:10px 16px; border-radius:22px; max-width:92vw;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; background:var(--accent); color:#fff; border:0;
+    box-shadow:0 4px 16px #0005; }
   #gpubanner { position:fixed; inset:auto; top:64px; left:50%; transform:translateX(-50%); margin:0; max-width:min(560px, 92vw);
     background:var(--card); color:var(--fg); border:1px solid var(--accent); border-radius:10px; padding:8px 14px; box-shadow:0 4px 16px #0003;
     font-size:13px; }
@@ -1788,8 +1791,19 @@ async function bookView(id) {
     const r = sel.getRangeAt(0).getBoundingClientRect();
     const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
     const para = node && node.closest("p");
-    selBtn.style.left = Math.max(8, Math.min(r.left, innerWidth - 180)) + "px";
-    selBtn.style.top = (r.top > 50 ? r.top - 38 : r.bottom + 8) + "px";
+    if (matchMedia("(pointer: coarse)").matches) {
+      // Touch screens: the system's copy/look-up toolbar sits right by the selection, so the button goes to
+      // the bottom of the screen instead, above the player.
+      const below = Math.max(0, ...[".player", "#readctl"].map(s => $(s) && $(s).getBoundingClientRect())
+        .filter(r => r && r.height).map(r => innerHeight - r.top));
+      selBtn.classList.add("touch");
+      selBtn.textContent = `\uD83D\uDDE3 How \u201c${word.length > 24 ? word.slice(0, 22) + "\u2026" : word}\u201d is said\u2026`;
+      Object.assign(selBtn.style, { left: "50%", top: "auto", bottom: `calc(${below + 12}px + env(safe-area-inset-bottom))` });
+    } else {
+      selBtn.style.bottom = "";
+      selBtn.style.left = Math.max(8, Math.min(r.left, innerWidth - 180)) + "px";
+      selBtn.style.top = (r.top > 50 ? r.top - 38 : r.bottom + 8) + "px";
+    }
     selBtn.style.display = "";
     selBtn.onclick = () => {
       hideSel();
