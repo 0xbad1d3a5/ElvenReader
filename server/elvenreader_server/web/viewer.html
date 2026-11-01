@@ -1341,9 +1341,30 @@ async function bookView(id) {
     $("#charFilter").value = ""; $("#search").value = "";
     history.replaceState(null, "", "#c=" + i);
     renderText();
-    // Wide screens scroll the text panel; phones (and narrow tablets) scroll the whole page.
-    $("main").scrollTop = 0; window.scrollTo(0, 0);
-    requestAnimationFrame(() => { $("main").scrollTop = 0; window.scrollTo(0, 0); });  // after iOS lays it out
+    toTop();
+  }
+
+  /* Start a chapter at its top. Wide screens scroll the text panel, phones (and narrow tablets) the whole page.
+     A scroll still moving when the chapter changes (playback's smooth follow, or the momentum of a swipe on
+     iOS) would carry on and leave you at the bottom of the new chapter, so for a moment any scroll that isn't
+     yours is undone. */
+  function toTop() {
+    const main = $("main");
+    const top = () => { main.scrollTop = 0; window.scrollTo(0, 0); };
+    top();
+    requestAnimationFrame(top);
+    let yours = false;
+    const mine = () => { yours = true; };
+    const undo = () => { if (!yours && (window.scrollY > 0 || main.scrollTop > 0)) top(); };
+    const until = setTimeout(done, 2500);
+    function done() {
+      clearTimeout(until);
+      ["touchstart", "wheel", "keydown", "mousedown"].forEach(ev => document.removeEventListener(ev, mine, true));
+      window.removeEventListener("scroll", undo); main.removeEventListener("scroll", undo);
+    }
+    ["touchstart", "wheel", "keydown", "mousedown"].forEach(ev => document.addEventListener(ev, mine, { capture: true, passive: true }));
+    window.addEventListener("scroll", undo, { passive: true }); main.addEventListener("scroll", undo, { passive: true });
+    [200, 600, 1200, 2000, 2400].forEach(ms => setTimeout(undo, ms));  // iOS ignores scrollTo during momentum
   }
 
   /* A paragraph as narration and quotation pieces. Quoted terms inside a sentence (line.mention) stay in
