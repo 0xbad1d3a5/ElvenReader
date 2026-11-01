@@ -609,18 +609,18 @@ cached audio, and undoing an edit finds the old clips again.
 
 When the voice says a name or word wrong, fix it for the whole series:
 
-* **Select the word** in a book's text: a *🗣 Pronunciation…* button appears next to it. Or use
-  *Pronunciations…* in the cast's ⋯ menu, *How the name is said…* in a character's ⋯ menu, or
-  *Pronunciations…* on the **Series** page.
-* Type how it sounds (`MY-nuh`, `BEN-oh`; capitals mark the stressed part), press **▶ With the
-  fix** to hear it in the sentence it came from (**▶ Now** plays it as it is said today), and
-  **Save**. The dialog offers the series' character names as one-click starting points.
-* Choose where it applies: **every book of the series** (default), **only this book**, or **all
-  books**. For the same word, the narrower one wins (book over series over all books).
+* **Select the word** in a book's text: a *🗣 Pronunciation…* button appears next to it (on a phone
+  or tablet, at the bottom of the screen). Or use *Pronunciations…* in the cast's ⋯ menu, *How the
+  name is said…* in a character's ⋯ menu, or *Pronunciations…* on the **Series** page.
+* Type how it sounds (`MY-nuh`, `BEN-oh`; capitals mark the stressed part), press **▶ Listen** to
+  hear it in the sentence it came from (with your fix once you've typed one), and **Save**. Saved
+  fixes are listed below, with ▶, ✎ and ✕.
+* *More options* sets where it applies: **every book of the series** (default), **only this book**,
+  or **all books**. For the same word, the narrower one wins (book over series over all books).
   Renaming or merging a series keeps its pronunciations.
 
 How it works: the fixes are applied to the text before synthesis, so they work with every voice and
-model. A respelling works everywhere (stress capitals are lower-cased before speaking); *Advanced*
+model. A respelling works everywhere (stress capitals are lower-cased before speaking); *More options*
 also takes CMU/ARPAbet phonemes such as `HH ER0 M AY1 AH0 N IY0`, used by OmniVoice and IndexTTS.
 Matching is whole-word and case-insensitive unless *Match case* is ticked (*May* the name, not
 *may*), and covers possessives and plurals (*Hermione's*) and multi-word names. Fixes are part of
