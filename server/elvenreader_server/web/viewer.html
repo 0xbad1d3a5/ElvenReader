@@ -23,6 +23,8 @@
   .grid .serieshead:not(:first-child) { margin-top:14px; }
   .seriessel { max-width:18em; font-size:12.5px; padding:2px 4px; } dialog .seriessel { max-width:none; width:100%; }
   .selbtn { position:fixed; z-index:30; font-size:12.5px; box-shadow:0 2px 8px #0003; }
+  .updatebar { position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:60; background:var(--accent); color:#fff;
+    border:0; border-radius:20px; padding:8px 16px; box-shadow:0 4px 16px #0005; max-width:92vw; }
   dialog.prondlg { width:min(520px, 94vw); min-width:0; max-width:94vw; padding:16px 18px; }
   .pron .phead { display:flex; align-items:center; } .pron .phead h3 { margin:0; flex:1; }
   .pron .phead .iconbtn { font-size:18px; padding:4px 8px; }
@@ -306,6 +308,7 @@ async function pollGpu(soon) {
   if (!TOKEN || document.visibilityState !== "visible") { gpuTimer = setTimeout(pollGpu, 5000); return; }
   let g = null;
   try { g = (await api("GET", "/api/gpu")).data; } catch (_) {}
+  if (g && g.viewer && g.viewer !== VIEWER_VERSION) siteUpdated();
   const msg = g ? gpuMessage(g) : null;
   // A popover sits in the top layer, so the banner shows above open dialogs (the voice editor) too.
   const el = $("#gpubanner") || document.body.appendChild(h("div", { id: "gpubanner", role: "status", popover: "manual" }));
@@ -342,6 +345,21 @@ function gpuMessage(g) {
   return null;
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pollGpu(true); });
+
+/* The site was updated while this page stayed open (a tablet keeps a tab's page for days): offer a reload, and
+   reload by itself when you come back to the tab with nothing playing. */
+let updateShown = false;
+function siteUpdated() {
+  const playing = [...PLAYERS].some(a => !a.paused);
+  if (!playing && document.visibilityState === "visible" && Date.now() - lastInteract > 2000 && resumedAt && Date.now() - resumedAt < 3000) {
+    location.reload(); return;
+  }
+  if (updateShown) return;
+  updateShown = true;
+  document.body.append(h("button", { class: "updatebar", onclick: () => location.reload() }, "ElvenReader was updated \u2014 tap to reload"));
+}
+let resumedAt = Date.now();
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") resumedAt = Date.now(); });
 const route = location.pathname.replace(/\/+$/, "");
 const routeMatch = route.match(/^\/books\/([A-Za-z0-9_-]+)$/);
 if (!TOKEN) tokenScreen("This browser doesn't have the server token yet.");

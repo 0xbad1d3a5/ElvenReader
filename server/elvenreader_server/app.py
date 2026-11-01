@@ -674,14 +674,20 @@ async def index(request: web.Request) -> web.Response:
     parts.append(f"<p>Token: <code>{html.escape(cfg.token)}</code></p></body></html>")
     return web.Response(text="".join(parts), content_type="text/html")
 
+def viewer_version() -> str:
+    """When viewer.html last changed: open pages compare it with their own to notice the site was updated."""
+    path = Path(__file__).parent / "web" / "viewer.html"
+    return time.strftime("%m-%d %H:%M", time.localtime(path.stat().st_mtime))
+
+
 async def viewer_page(request: web.Request) -> web.Response:
     """Book viewer. Only loopback requests get the token embedded; other devices supply it."""
     path = Path(__file__).parent / "web" / "viewer.html"
     page = path.read_text(encoding="utf-8")
     token = request.app[CONFIG_KEY].token if request.remote in _LOOPBACK else None
     page = page.replace("__TOKEN__", json.dumps(token))
-    # The page's version (when it was last changed), so a device's reports show whether it has reloaded since.
-    page = page.replace("__VERSION__", json.dumps(time.strftime("%m-%d %H:%M", time.localtime(path.stat().st_mtime))))
+    # The page's version, so a device's reports show whether it has reloaded since, and it can offer a reload.
+    page = page.replace("__VERSION__", json.dumps(viewer_version()))
     return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
 

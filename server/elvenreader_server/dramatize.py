@@ -2147,13 +2147,14 @@ async def gpu_status(request: web.Request) -> web.Response:
     """What runs on the GPU right now, for the website's banner: the site's state (reading, designing, idle),
     the speech model and voice designer (loading progress), and the analysis LLM."""
     from .activity import ACTIVITY_KEY
-    from .app import ENGINES_KEY
+    from .app import ENGINES_KEY, viewer_version
 
     app = request.app
     analyzer = app[ANALYZER_KEY]
     book = analyzer.current
     title = ((app[DRAMA_STORE_KEY].summary(book) or {}).get("title", "") if book else "")
     return web.json_response({
+        "viewer": viewer_version(),
         "mode": analyzer.llm.cfg.llm_mode,
         "activity": app[ACTIVITY_KEY].json() if ACTIVITY_KEY in app else None,
         "engines": app[ENGINES_KEY].status(),
