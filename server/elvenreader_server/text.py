@@ -14,7 +14,7 @@ _INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\u2060\ufeff"), Non
 _WHITESPACE = re.compile(r"\s+")
 # "I…I", "Um...yes", "H‥huh": an ellipsis run straight into the next word makes the models slur or skip the
 # pause, so a space goes after it ("I… I").
-_TIGHT_ELLIPSIS = re.compile(r"(\.{2,}|[\u2026\u2025]+)(?=\w)")
+_TIGHT_ELLIPSIS = re.compile(r"(\.{2,}|[\u2026\u2025]+)(?=[\u2018\u2019\u201c\"'(\[]?\w)")
 
 
 def clean_text(text: str) -> str:

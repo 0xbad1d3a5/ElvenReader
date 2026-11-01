@@ -115,3 +115,11 @@ def test_clean_text_puts_a_space_after_tight_ellipses():
     # Left alone: already spaced, before punctuation or a closing quote, decimals.
     for s in ("Well\u2026 fine", "Um\u2026,", "\u201cBut\u2026\u201d", "So...?", "Pi is 3.14", "Wait\u2026 \u2026no"):
         assert clean_text(s) == s.replace("\u2026no", "\u2026 no")
+
+def test_clean_text_spaces_an_ellipsis_before_quotes_and_brackets():
+    from elvenreader_server.text import clean_text
+
+    assert clean_text("\u201c\u2026\u2018Boss,\u2019 she says\u201d") == "\u201c\u2026 \u2018Boss,\u2019 she says\u201d"
+    assert clean_text("...\u2019Cause, I mean") == "... \u2019Cause, I mean"
+    assert clean_text("Just\u2026(whispers) don\u2019t") == "Just\u2026 (whispers) don\u2019t"
+    assert clean_text("\u201cUrk\u2026\u201d Miss") == "\u201cUrk\u2026\u201d Miss"  # a closing quote stays put
