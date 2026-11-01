@@ -8,6 +8,7 @@ dependencies = [
     "aiohttp>=3.10",
     "qrcode>=7.4",
     "numpy>=1.26",
+    "Pillow>=10",
 ]
 
 [project.optional-dependencies]

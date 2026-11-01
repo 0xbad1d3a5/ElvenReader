@@ -2175,7 +2175,8 @@ def _queue_json(app: web.Application) -> dict:
         return {"id": book_id, "title": summary.get("title", book_id), "author": summary.get("author", ""),
                 "words": summary.get("words", 0), "series": book_series(app, book_id),
                 "status": s.get("status", "none"), "progress": s.get("progress", 0.0), "detail": s.get("detail", ""),
-                "lines": len(s.get("lines", {})), "cover": store.cover(book_id) is not None}
+                "lines": len(s.get("lines", {})), "cover": store.cover(book_id) is not None,
+                "cover_v": cover_version(store, book_id)}
 
     casting = [b for b in store.ids() if store.script(b).get("status") == "casting"]
     return {"current": item(analyzer.current) if analyzer.current else None,
@@ -2248,6 +2249,7 @@ async def list_books(request: web.Request) -> web.Response:
             "characters": len(public["characters"]),
             "voiced": sum(1 for c in public["characters"] if c.get("voice")),
             "cover": store.cover(book_id) is not None,
+            "cover_v": cover_version(store, book_id),
             "updated": s.get("updated") or summary.get("uploaded", 0),
         })
     books.sort(key=lambda b: -(b.get("updated") or 0))
@@ -2338,14 +2340,102 @@ async def get_picture(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(f, headers={"Content-Type": PICTURE_TYPES[f.suffix], "Cache-Control": "private, max-age=86400"})
 
 
+COVER_WIDTHS = (120, 240, 400, 800)
+MAX_SPRITE = 120  # covers per sheet
+
+
+def cover_thumbnail(path: Path, width: int) -> Path:
+    """A small JPEG of the cover (made once, kept next to it; made again when the cover changes). Book covers
+    are ~2 MB at 1400 px, which the library and queue show at 34-200 px."""
+    out = path.with_name(f"cover-{width}.jpg")
+    if out.exists() and out.stat().st_mtime >= path.stat().st_mtime:
+        return out
+    from PIL import Image
+
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        if im.width > width:
+            im = im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
+        tmp = out.with_suffix(".tmp")
+        im.save(tmp, "JPEG", quality=82, optimize=True, progressive=True)
+    tmp.replace(out)
+    return out
+
+
 async def get_cover(request: web.Request) -> web.StreamResponse:
+    """The cover; ?w=N gives a thumbnail at least N px wide (from COVER_WIDTHS). With ?v= (the cover's version,
+    from the book list) the browser keeps it, so the library doesn't download covers again on every visit."""
     try:
         path = request.app[DRAMA_STORE_KEY].cover(request.match_info["book"])
     except ValueError:
         path = None
     if path is None:
         return web.json_response({"error": "no cover"}, status=404)
-    return web.FileResponse(path, headers={"Content-Type": "image/jpeg"})
+    try:
+        want = int(request.query.get("w") or 0)
+    except ValueError:
+        want = 0
+    if want > 0:
+        width = next((w for w in COVER_WIDTHS if w >= want), COVER_WIDTHS[-1])
+        try:
+            path = await asyncio.to_thread(cover_thumbnail, path, width)
+        except Exception:  # noqa: BLE001 - an unreadable cover is still served as it is
+            logger.exception("cover thumbnail for %s failed", request.match_info["book"])
+    cache = "private, max-age=31536000, immutable" if request.query.get("v") else "private, no-cache"
+    return web.FileResponse(path, headers={"Content-Type": "image/jpeg", "Cache-Control": cache})
+
+
+def cover_version(store: "ScriptStore", book_id: str) -> int:
+    path = store.cover(book_id)
+    return int(path.stat().st_mtime) if path else 0
+
+
+def cover_sprite(store: "ScriptStore", ids: list[str], width: int) -> Path:
+    """One JPEG with the books' covers side by side, each cropped to a 2:3 cell `width` px wide (the library's
+    card shape), so a page loads a series' covers in one request. Kept on disk under its contents' hash."""
+    from PIL import Image, ImageOps
+
+    height = round(width * 1.5)
+    covers = [store.cover(b) for b in ids]
+    key = hashlib.sha1(json.dumps([width, [(b, int(p.stat().st_mtime) if p else 0) for b, p in zip(ids, covers)]])
+                       .encode()).hexdigest()[:20]
+    folder = Path(store.root).parent / "cache" / "covers"
+    out = folder / f"{key}.jpg"
+    if out.exists():
+        return out
+    folder.mkdir(parents=True, exist_ok=True)
+    sheet = Image.new("RGB", (width * len(ids), height), (200, 200, 200))
+    for i, path in enumerate(covers):
+        if path is None:
+            continue
+        try:
+            with Image.open(path) as im:
+                sheet.paste(ImageOps.fit(im.convert("RGB"), (width, height), Image.LANCZOS), (i * width, 0))
+        except Exception:  # noqa: BLE001 - one unreadable cover leaves a grey cell
+            logger.exception("cover of %s unreadable", ids[i])
+    for old in sorted(folder.glob("*.jpg"), key=lambda p: p.stat().st_mtime)[:-200]:  # keep the cache small
+        old.unlink(missing_ok=True)
+    tmp = out.with_suffix(".tmp")
+    sheet.save(tmp, "JPEG", quality=80, optimize=True, progressive=True)
+    tmp.replace(out)
+    return out
+
+
+async def get_covers(request: web.Request) -> web.StreamResponse:
+    """?ids=a,b,c&w=240: the covers of several books in one image (cover_sprite), left to right in that order.
+    With ?v= (any version string from the book list) the browser keeps it."""
+    store = request.app[DRAMA_STORE_KEY]
+    ids = [b for b in request.query.get("ids", "").split(",") if b][:MAX_SPRITE]
+    if not ids or not all(_ID_RE.match(b) for b in ids):
+        return web.json_response({"error": "ids: book ids, comma-separated"}, status=400)
+    try:
+        want = int(request.query.get("w") or 240)
+    except ValueError:
+        want = 240
+    width = next((w for w in COVER_WIDTHS if w >= want), COVER_WIDTHS[-1])
+    path = await asyncio.to_thread(cover_sprite, store, ids, width)
+    cache = "private, max-age=31536000, immutable" if request.query.get("v") else "private, no-cache"
+    return web.FileResponse(path, headers={"Content-Type": "image/jpeg", "Cache-Control": cache})
 
 
 async def upload_book(request: web.Request) -> web.Response:
@@ -2712,6 +2802,7 @@ def setup(app: web.Application) -> None:
     series.setup(app)
     r.add_get("/api/books/{book}", get_book)
     r.add_get("/api/books/{book}/cover", get_cover)
+    r.add_get("/api/covers", get_covers)
     r.add_get("/api/books/{book}/pictures", list_pictures)
     r.add_get("/api/books/{book}/picture", get_picture)
     r.add_post("/api/books/{book}", upload_book)

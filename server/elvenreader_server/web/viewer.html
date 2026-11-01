@@ -72,6 +72,7 @@
   .book { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; color:inherit; }
   .book .cover { aspect-ratio:2/3; background:#8883; display:flex; align-items:center; justify-content:center; text-align:center; padding:8px; font-weight:600; }
   .book .cover img { width:100%; height:100%; object-fit:cover; }
+  .cover.sheet, .qcover.sheet { color:transparent; background-repeat:no-repeat; }
   .book .info { padding:10px; } .book .title { font-weight:600; }
   .bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; margin:6px 0; } .bar > div { height:100%; background:var(--accent); }
   .layout { display:grid; grid-template-columns:300px 1fr; height:calc(100vh - 55px); }
@@ -245,8 +246,8 @@ async function api(method, path, body, signal) {
 }
 const get = (p) => api("GET", p).then(r => r.data);
 
-async function authBlobUrl(path) {
-  const r = await fetch(path, { cache: "no-cache", headers: { Authorization: "Bearer " + TOKEN } });
+async function authBlobUrl(path, cache = "no-cache") {
+  const r = await fetch(path, { cache, headers: { Authorization: "Bearer " + TOKEN } });
   if (r.status === 401) tokenScreen("The token was not accepted. Enter the current one.");
   if (!r.ok) return null;
   return URL.createObjectURL(await r.blob());
@@ -276,6 +277,29 @@ function speechUrl(r) {
 const PALETTE = ["#e6194b","#3cb44b","#4f7cff","#f58231","#b05ce6","#2bb5d8","#f032e6","#c08a3e","#3fae9f","#a8a820","#9b8cff","#5aa0ff","#a9a9a9","#7fb800","#d6608a","#d98c3a","#2fae6a","#8a5cf6","#e0605a","#c9a500"];
 const LANGS = { en:"English", de:"German", fr:"French", es:"Spanish", it:"Italian", pt:"Portuguese", ja:"Japanese", zh:"Chinese", ko:"Korean", ru:"Russian", nl:"Dutch", pl:"Polish" };
 const BUSY = ["queued", "running", "casting"];
+
+/* Covers come as one image per group of books (a series, the queue): far fewer requests than one per book.
+   coverSheet(books, w) returns paint(book, el), which shows that book's cell as el's background. The sheet's
+   cells are 2:3, the cards' shape; the browser keeps a sheet until one of its covers changes. */
+const SHEETS = new Map();
+function coverSheet(books, w) {
+  const list = books.filter(b => b.cover).sort((a, b) => (a.id < b.id ? -1 : 1));  // same sheet whatever the order
+  let v = 0;
+  for (const b of list) v = (v * 31 + (b.cover_v || 0)) % 2147483647;
+  const url = `/api/covers?w=${w}&ids=${list.map(b => b.id).join(",")}&v=${v}`;
+  if (list.length && !SHEETS.has(url)) SHEETS.set(url, authBlobUrl(url, "default"));
+  const sheet = SHEETS.get(url), n = list.length;
+  return (b, el) => {
+    const i = list.findIndex(x => x.id === b.id);
+    if (i < 0 || !sheet) return;
+    sheet.then(u => {
+      if (!u) return;
+      Object.assign(el.style, { backgroundImage: `url(${u})`, backgroundSize: `${n * 100}% 100%`,
+        backgroundPosition: `${n > 1 ? (i / (n - 1)) * 100 : 0}% 0` });
+      el.classList.add("sheet");
+    });
+  };
+}
 
 function statusText(s) {
   return ({ none: "Not analysed", queued: "Waiting to be analysed", running: `Analysing ${Math.round(s.progress * 100)}%`,
@@ -496,7 +520,6 @@ async function libraryView() {
       h("a", { href: "/books/settings", title: "The speech model the whole site uses, and how book analysis shares the GPU" }, "Settings"),
       EMBEDDED_TOKEN ? h("a", { href: "/", title: "Links and QR codes to open the library on other devices" }, "Other devices") : null),
     h("div", { class: "grid", id: "grid" }, h("p", { class: "muted" }, "Loading\u2026")));
-  const covers = {};
   let timer = null;
   async function refresh() {
     const { books } = await get("/api/books");
@@ -521,17 +544,15 @@ async function libraryView() {
     for (const sec of sections) {
       if (sec.head) grid.append(h("h2", { class: "serieshead" }, sec.head,
         sec.count ? h("span", { class: "small muted" }, `${sec.count} books`) : null));
-      for (const b of sec.books) grid.append(card(b, !sec.count));
+      const paint = coverSheet(sec.books, 240);
+      for (const b of sec.books) grid.append(card(b, !sec.count, paint));
     }
     clearTimeout(timer);
     if (books.some(b => BUSY.includes(b.status))) timer = setTimeout(refresh, 8000);
   }
-  function card(b, showSeries) {
+  function card(b, showSeries, paint) {
     const cover = h("div", { class: "cover" }, b.title);
-    if (b.cover) {
-      covers[b.id] = covers[b.id] || authBlobUrl(`/api/books/${b.id}/cover`);
-      covers[b.id].then(u => u && cover.replaceChildren(h("img", { src: u, alt: "" })));
-    }
+    paint(b, cover);
     return h("a", { class: "book", href: `/books/${b.id}` }, cover,
       h("div", { class: "info" },
         h("div", { class: "title" }, b.title),
@@ -644,15 +665,11 @@ async function queueView() {
   $("#app").replaceChildren(
     h("header", {}, h("a", { href: "/books" }, "\u2190 Books"), h("h1", {}, "Analysis queue"), h("span", { class: "grow" })),
     h("div", { class: "serieslist", id: "queue" }, h("p", { class: "muted" }, "Loading\u2026")));
-  const covers = {};
-  let timer = null, dragging = null;
+  let timer = null, dragging = null, paint = () => {};
   const minutes = (words) => Math.max(1, Math.round((words || 0) / 1800));  // ~1,800 words a minute with the whole GPU
   const cover = (b) => {
     const el = h("div", { class: "qcover" });
-    if (b.cover) {
-      covers[b.id] = covers[b.id] || authBlobUrl(`/api/books/${b.id}/cover`);
-      covers[b.id].then(u => u && el.replaceChildren(h("img", { src: u, alt: "" })));
-    }
+    paint(b, el);
     return el;
   };
   async function send(order) {
@@ -667,6 +684,7 @@ async function queueView() {
     (current ? " (it stops now and continues where it stopped when its turn comes)" : ""),
     onclick: () => post(`/api/queue/${b.id}/bottom`) }, "\u2913");
   function render(q) {
+    paint = coverSheet([...(q.current ? [q.current] : []), ...q.queued, ...q.casting], 120);
     const el = $("#queue");
     const ids = q.queued.map(b => b.id);
     const move = (from, to) => { const o = ids.slice(); o.splice(to, 0, o.splice(from, 1)[0]); send(o); };

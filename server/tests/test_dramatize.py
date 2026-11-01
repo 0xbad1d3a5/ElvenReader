@@ -1545,3 +1545,35 @@ def test_labelling_prompt_shows_the_text_after_the_passage():
     assert seen["user"].index("Passage:") < seen["user"].index(paras[first.paragraphs[-1] + 1])
     asyncio.run(dz.label_chunk(Llm(), None, book, {"characters": {}, "lines": {}}, first))
     assert "Story just after" not in seen["user"]
+
+async def test_cover_thumbnails_and_series_sheets(drama_client):
+    import base64
+    import io
+
+    from PIL import Image
+
+    def jpeg(color, size=(1400, 1980)):
+        buf = io.BytesIO()
+        Image.new("RGB", size, color).save(buf, "JPEG", quality=95)
+        return buf.getvalue()
+
+    c = drama_client
+    for b, color in (("b1", (255, 0, 0)), ("b2", (0, 0, 255))):
+        r = await c.post(f"/api/books/{b}", json={**book_payload(), "cover": base64.b64encode(jpeg(color)).decode()}, headers=AUTH)
+        assert r.status == 200
+    await c.post("/api/books/b3", json=book_payload(), headers=AUTH)  # no cover
+    books = {b["id"]: b for b in (await (await c.get("/api/books", headers=AUTH)).json())["books"]}
+    assert books["b1"]["cover_v"] > 0 and books["b3"]["cover_v"] == 0
+
+    r = await c.get("/api/books/b1/cover?w=200&v=1", headers=AUTH)
+    thumb = Image.open(io.BytesIO(await r.read()))
+    assert thumb.width == 240 and "immutable" in r.headers["Cache-Control"]  # rounded up to a stored width
+
+    r = await c.get("/api/covers?w=120&ids=b1,b3,b2", headers=AUTH)
+    assert r.status == 200
+    sheet = Image.open(io.BytesIO(await r.read())).convert("RGB")
+    assert sheet.size == (360, 180)  # three 2:3 cells, left to right in the order asked
+    assert sheet.getpixel((60, 90))[0] > 200 and sheet.getpixel((300, 90))[2] > 200
+    assert max(sheet.getpixel((180, 90))) - min(sheet.getpixel((180, 90))) < 20  # no cover: a grey cell
+    assert (await c.get("/api/covers?ids=../x", headers=AUTH)).status == 400
+    assert (await c.get("/api/covers", headers=AUTH)).status == 400
