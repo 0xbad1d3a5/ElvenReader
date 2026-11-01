@@ -774,6 +774,8 @@ async function settingsView() {
     mode.value = s.llm_mode;
     const minutes = (secs) => h("input", { type: "number", min: 1, max: 1440, step: 1, value: Math.round(secs / 60), style: { width: "5em" } });
     const idle = minutes(s.idle_after_s), pause = minutes(s.design_pause_s);
+    const voice = h("select", {}, ...s.voices.map(v => h("option", { value: v.id }, v.name)));
+    voice.value = s.default_voice;
     const act = s.activity || {};
     const now = { reading: "Right now: someone is reading or listening \u2014 analysis runs next to the reading voice.",
       designing: `Right now: voices are being designed \u2014 analysis is paused (about ${Math.ceil((act.design_pause_left_s || 0) / 60)} more min).`,
@@ -786,7 +788,7 @@ async function settingsView() {
         "Everything is read with it from now on; cached sentences from the old model aren't reused. It takes about a minute to load.")) return;
       save.disabled = true;
       try {
-        await api("PUT", "/api/settings", { speech_engine: speech.value, llm_mode: mode.value,
+        await api("PUT", "/api/settings", { speech_engine: speech.value, llm_mode: mode.value, default_voice: voice.value,
           idle_after_s: Math.max(1, Number(idle.value) || 5) * 60, design_pause_s: Math.max(1, Number(pause.value) || 10) * 60 });
         note.textContent = "\u2713 Saved";
       } catch (e) { alert(e.message); }
@@ -797,6 +799,8 @@ async function settingsView() {
       h("div", { class: "sr" }, h("h3", {}, "Speech model"),
         h("p", { class: "small muted" }, "The one model the whole site reads with: books, previews and voice tests. " +
           "Only an idle site unloads it, for book analysis; it comes back when you do."), speech, h("p", { class: "small" }, state)),
+      h("div", { class: "sr" }, h("h3", {}, "Narrator voice"),
+        h("p", { class: "small muted" }, "Reads the narration of every book, unless a book's player picks another."), voice),
       h("div", { class: "sr" }, h("h3", {}, "Voice design"),
         h("p", { class: "small muted" }, `New character voices (casting, Make 3 options, Younger/Older) are designed with ` +
           `${design ? design.label : s.voice_design_engine}, which follows the whole description. It loads next to the reading voice ` +

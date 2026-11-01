@@ -149,9 +149,13 @@ def settings_json(app: web.Application) -> dict:
 
     cfg, manager = app[CONFIG_KEY], app[ENGINES_KEY]
     installed = [e for e in manager.engines() if e["installed"]]
+    store = app[VOICES_KEY]
+    default = store.default(cfg.default_voice)
     return {
         "speech_engine": cfg.default_engine,
         "voice_design_engine": cfg.voice_design_engine,
+        "default_voice": default.id if default else "",
+        "voices": [{"id": v.id, "name": v.name} for v in store.list() if v.source != "character"],
         "llm_mode": cfg.llm_mode,
         "idle_after_s": cfg.idle_after_s,
         "design_pause_s": cfg.design_pause_s,
@@ -179,8 +183,8 @@ async def settings_get(request: web.Request) -> web.Response:
 
 
 async def settings_put(request: web.Request) -> web.Response:
-    """{speech_engine?, voice_design_engine?, llm_mode?}. Changing the speech model loads it (about a minute)
-    in the background; GET shows when it's ready."""
+    """{speech_engine?, voice_design_engine?, llm_mode?, default_voice?, idle_after_s?, design_pause_s?}. Changing
+    the speech model loads it (about a minute) in the background; GET shows when it's ready."""
     from .config import save_settings
 
     app = request.app
@@ -198,6 +202,12 @@ async def settings_put(request: web.Request) -> web.Response:
         if mode not in LLM_MODES:
             return _json_error(400, f"llm_mode must be one of {', '.join(LLM_MODES)}")
         changes["llm_mode"] = mode
+    voice = _str(body, "default_voice")
+    if voice:
+        v = app[VOICES_KEY].get(voice)
+        if v is None or v.source == "character":
+            return _json_error(400, "Choose one of the voices in the list")
+        changes["default_voice"] = voice
     from .activity import ACTIVITY_KEY
 
     for key in ("idle_after_s", "design_pause_s"):

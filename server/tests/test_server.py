@@ -573,3 +573,18 @@ async def test_series_pronunciations_apply_to_every_book_of_the_series(client):
     assert len(body) == 2 * WORD_BYTES
     assert (await client.post("/api/pronunciations", json={"term": "X", "respelling": "y", "scope": "series"},
                               headers=AUTH)).status == 400
+
+
+async def test_default_narrator_voice_setting(aiohttp_client, tmp_path):
+    store = VoiceStore(tmp_path / "voices")
+    store.add("Narrator", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="nar")
+    store.add("Storyteller", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="story")
+    store.add("Tom", wav_bytes(b"\x10\x00" * 2400, 24000), "Hello.", voice_id="ch-tom", source="character")
+    client = await aiohttp_client(make_app(make_cfg(tmp_path), specs=SPECS))
+    s = await (await client.get("/api/settings", headers=AUTH)).json()
+    assert [v["id"] for v in s["voices"]] == ["nar", "story"]  # character voices aren't offered
+    r = await client.put("/api/settings", json={"default_voice": "story"}, headers=AUTH)
+    assert (await r.json())["default_voice"] == "story"
+    assert (await (await client.get("/api/voices", headers=AUTH)).json())["default"] == "story"
+    assert (await client.put("/api/settings", json={"default_voice": "ch-tom"}, headers=AUTH)).status == 400
+    assert (await client.put("/api/settings", json={"default_voice": "ghost"}, headers=AUTH)).status == 400
