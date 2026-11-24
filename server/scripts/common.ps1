@@ -39,4 +39,10 @@ $Engines = [ordered]@{
                    Git = "https://github.com/breezeblue-ai/breeze-tts.git"; Commit = "daa6cb2efe5471f09369229f322d20bb956cb3c3"; Dir = "breeze-tts" }
 }
 
-$TorchIndex = "https://download.pytorch.org/whl/cu128"  # CUDA 12.8 builds support RTX 50-series (sm_120)
+$TorchIndex = "https://download.pytorch.org/whl/cu128"  # CUDA 12.8 builds: RTX 40-series (sm_89) and 50-series (sm_120)
+
+# What setup-engines.ps1 and download-models.ps1 install when no engine is named: VoxCPM2 reads (and transcribes
+# new reference clips with Whisper, in the same environment); Qwen3-TTS designs voices from descriptions. The
+# others are optional: name them, or pass -All.
+$DefaultEngines = @("voxcpm", "qwen3tts")
+$WhisperEngine = "voxcpm"

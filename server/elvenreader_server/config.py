@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 DEFAULT_PORT = 3950
-DEFAULT_ENGINE = "omnivoice"
+DEFAULT_ENGINE = "voxcpm"
 # Unambiguous characters so the token is easy to type on another device if needed.
 _TOKEN_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
 _TOKEN_LENGTH = 16
@@ -140,8 +140,8 @@ class ServerConfig:
     # characters (most lines first) up to this many, extras share pooled voices.
     cast_supporting_voices: int = 12
     # Whisper fills in the transcript of new reference audio: the engine venv that has
-    # openai-whisper installed, and the model file under <models_dir>.
-    whisper_venv: str = "indextts"
+    # openai-whisper installed (setup-engines.ps1 adds it to VoxCPM2's), and the model file under <models_dir>.
+    whisper_venv: str = "voxcpm"
     whisper_model: str = "whisper/large-v3-turbo.pt"
     # Version of the settings below the defaults written to config.json (for one-time migrations).
     settings_v: int = 3

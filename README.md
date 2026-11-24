@@ -26,8 +26,9 @@ The Android app that used to be the reader has been retired (see *The Android ap
 
 ## Voice models
 
-All five run on an RTX 5080 (16 GB) with PyTorch 2.8 + CUDA 12.8. The site reads with one of them,
-the **speech model** chosen on the **Settings** page (default OmniVoice). It is what the site reads
+All five run on an RTX 5080 (16 GB) with PyTorch 2.8 + CUDA 12.8; the standard setup installs only
+VoxCPM2 and Qwen3-TTS (see *Set up the PC server*). The site reads with one of them,
+the **speech model** chosen on the **Settings** page (default VoxCPM2). It is what the site reads
 with, and requests can't swap it for another; it makes way only for book analysis while nobody
 uses the site (see *How analysis shares the GPU*). Voice design with another model (Qwen3-TTS by
 default) runs as a separate, design-only worker next to it (about 4 GB) while you design and is
@@ -277,26 +278,54 @@ Notes:
 
 ## 1. Set up the PC server
 
-Requirements: Windows, an NVIDIA GPU with recent drivers, ~60 GB free disk for models and
-environments. [`uv`](https://docs.astral.sh/uv/) is installed automatically with winget if missing.
+Requirements: Windows 10/11, an NVIDIA GPU with at least 16 GB (tested on an RTX 5080; an RTX 4090
+works the same: the CUDA 12.8 builds cover both) and a driver new enough for CUDA 12.8 (570 or
+later), [Git](https://git-scm.com/), and about 60 GB free disk. [`uv`](https://docs.astral.sh/uv/)
+is installed automatically with winget if missing, and it fetches the Python versions needed.
+
+The standard setup is three models:
+
+| Model | For | Size |
+|---|---|---|
+| **VoxCPM2** | reading (the speech model), plus Whisper for the voice editor | ~5 GB + 1.6 GB |
+| **Qwen3-TTS 1.7B** | designing character voices from descriptions | ~9 GB |
+| **Qwen3.5-35B-A3B** (llama.cpp) | analysing books: who says what, how, the cast | 22 GB |
 
 ```powershell
-cd D:\Dev\ElvenReader\server
-# Models and per-engine Python environments go in D:\Dev\ElvenReader\models (git-ignored).
-.\setup-engines.ps1                 # one venv per engine (torch cu128); or e.g. .\setup-engines.ps1 omnivoice fish_s2
-.\download-models.ps1               # weights into <models_dir>\hf and <models_dir>\checkpoints
-.\run-server.ps1 --import-voicestudio   # optional: copy VoiceStudio's voice profiles (read-only)
-.\run-server.ps1                    # start; prints the token and the library's addresses
+git clone <your repository URL> ElvenReader
+cd ElvenReader\server
+.\setup-engines.ps1      # VoxCPM2 + Qwen3-TTS environments (exact versions from engine-locks\)
+.\download-models.ps1    # their weights (and Whisper) into ..\models
+.\download-llm.ps1       # llama.cpp and Qwen3.5-35B-A3B
+.\run-server.ps1         # creates server\.venv and data\config.json (new token); prints the addresses
 ```
+
+Then open `http://127.0.0.1:3950/books`, go to **Settings** and choose VoxCPM2 as the voice designer
+too if you prefer quick designs (see *Voice models*), and create a narrator voice on the **Voices**
+page: a new install has no voices, and nothing is read aloud until there is one. Optional:
+`.\allow-firewall.ps1` (other devices on your network) and `.\install-service.ps1` (start at logon),
+both below.
+
+**Other engines** (OmniVoice, Fish S2 Pro, IndexTTS 2.5, Breeze TTS 2) are not installed by
+default; add one by name (`.\setup-engines.ps1 omnivoice` then `.\download-models.ps1 omnivoice`)
+or all of them with `-All`. The engine environments install the exact package versions in
+`server\engine-locks\` (a set known to work: newer releases have broken the adapters before);
+`.\setup-engines.ps1 voxcpm -Latest` installs the newest instead and rewrites the lock.
+
+**Moving your library to another PC:** books, voices, pronunciations and settings are in
+`server\data` (git-ignored); copy that folder across (it holds the token, so the same links keep
+working), or move single books as `.elvenbook` files (see *Book files*). Model weights and
+environments (`models\`) are better made again with the scripts above than copied.
 
 `run-server.ps1` creates the server's own small environment (`server\.venv`) on first run.
 Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--rotate-token`,
-`--show-links`. Settings live in `server\data\config.json` (git-ignored, contains the token):
+`--show-links`, `--import-voicestudio` (copy VoiceStudio's voice profiles, read-only). Settings live
+in `server\data\config.json` (git-ignored, contains the token):
 
 | Key | Default | Meaning |
 |---|---|---|
 | `models_dir` | `models` (repo root) | Engine venvs, model weights, compile caches, LLM files. |
-| `default_engine` / `default_voice` | `omnivoice` / first voice | The site's speech model (set on the Settings page) / the voice used when the reader doesn't choose. |
+| `default_engine` / `default_voice` | `voxcpm` / first voice | The site's speech model (set on the Settings page) / the voice used when the reader doesn't choose. |
 | `extra_urls` | `[]` | More addresses for the links and QR codes on the Users page, e.g. `["http://10.8.0.2:3950"]` for the PC on your VPN. |
 | `preload` | `true` | Load the default engine at start-up. |
 | `engine_options` | `{}` | Per engine, e.g. `{"omnivoice": {"num_step": 16}, "indextts": {"compile": true}}`. |
@@ -308,7 +337,7 @@ Options: `--port 3960`, `--engine fish_s2` (default engine), `--no-preload`, `--
 | `llm_label_context_words`, `llm_label_recent_lines` | `600`, `12` | Story text before each passage and earlier attributions shown when labelling; `0`, `6` = the old, slightly faster pass (see *What does more time per book buy?*). |
 | `llm_label_profiles` | `true` | The labelling pass also notes each speaker's voice profile (see *Voice profiles*). |
 | `llm_dossier_model`, `llm_dossier_effort`, `llm_dossier_words` | empty (off), `medium`, `3500` | Optional pass 1: a reasoning model builds character dossiers (see *Character dossiers*). |
-| `whisper_venv`, `whisper_model` | `indextts`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor. |
+| `whisper_venv`, `whisper_model` | `voxcpm`, `whisper/large-v3-turbo.pt` | Transcribes new reference clips in the voice editor (Whisper is installed in VoxCPM2's environment). |
 | `voice_design_engine`, `designer_idle_s` | `qwen3tts`, `180` | Creates character voices (must follow free-text descriptions; Qwen3-TTS); the designer is unloaded after this many seconds without designs. |
 | `cast_supporting_voices` | `12` | How many supporting characters (most lines first) get a designed voice of their own; main characters and narrators always do, extras share pool voices. |
 
@@ -327,7 +356,7 @@ one from a description (`POST /api/voices/design`).
 ### Windows firewall (once, elevated)
 
 ```powershell
-cd D:\Dev\ElvenReader\server
+cd ElvenReader\server
 .\allow-firewall.ps1        # TCP 3950 on Domain and Private networks
 ```
 
@@ -798,7 +827,7 @@ line plainly in the character's voice. Voice and delivery are part of the cache 
 
 **LLM setup:** `download-llm.ps1` fetches llama.cpp and **Qwen3.5-35B-A3B** (Q4_K_M, 22 GB,
 Apache-2.0; a mixture of experts with about 3B parameters active per token, run with thinking off).
-`-Alternative` adds the previous default, Qwen3-30B-A3B-Instruct-2507, and gpt-oss-20b. The
+`-Alternative` adds the previous default, Qwen3-30B-A3B-Instruct-2507. The
 server starts and stops llama.cpp itself, and frees its memory when idle.
 
 Measured on hand-labelled chapters (*Pride and Prejudice* ch. 1, *Alice* ch. 7; 182 quotations,
