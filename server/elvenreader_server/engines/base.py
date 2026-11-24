@@ -33,6 +33,16 @@ class BaseEngine:
         """Speak ``text`` in a new voice described by ``description`` (voice design)."""
         raise NotImplementedError("this engine cannot design voices")
 
+    # Engines that can step aside for something else on the GPU without being rebuilt: `park` moves the loaded
+    # model to system RAM and frees its VRAM, `unpark` brings it back. Others are stopped and loaded again.
+    can_park = False
+
+    def park(self) -> None:  # pragma: no cover - model specific
+        raise NotImplementedError
+
+    def unpark(self) -> None:  # pragma: no cover - model specific
+        raise NotImplementedError
+
     # -- helpers ------------------------------------------------------------
 
     @staticmethod

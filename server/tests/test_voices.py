@@ -1,6 +1,9 @@
+import shutil
 import sqlite3
 import struct
 from pathlib import Path
+
+import pytest
 
 from elvenreader_server.audio import wav_bytes
 from elvenreader_server.text import split_for_synthesis, trailing_pause_ms
@@ -123,3 +126,50 @@ def test_clean_text_spaces_an_ellipsis_before_quotes_and_brackets():
     assert clean_text("...\u2019Cause, I mean") == "... \u2019Cause, I mean"
     assert clean_text("Just\u2026(whispers) don\u2019t") == "Just\u2026 (whispers) don\u2019t"
     assert clean_text("\u201cUrk\u2026\u201d Miss") == "\u201cUrk\u2026\u201d Miss"  # a closing quote stays put
+
+
+def test_clean_text_collapses_doubled_quotation_marks():
+    from elvenreader_server.text import clean_text
+
+    assert clean_text("\u201c\u201cWh\u2026what?!\u201d\u201d") == "\u201cWh\u2026 what?!\u201d"
+    assert clean_text("\u2018\u2018No!\u2019\u2019 and \"\"yes\"\"") == "\u2018No!\u2019 and \"yes\""
+    assert clean_text("\u201cHe said \u2018hi.\u2019\u201d") == "\u201cHe said \u2018hi.\u2019\u201d"  # nested: different marks
+
+
+def test_a_clause_left_open_is_closed_for_the_speech_model():
+    from elvenreader_server.text import close_clause
+
+    assert close_clause("When she was his page, Ronie always said,") == "When she was his page, Ronie always said:"
+    assert close_clause("\u201cI\u2019ll do it,\u201d") == "\u201cI\u2019ll do it.\u201d"  # a quotation: a period
+    assert close_clause("he said; ") == "he said:"
+    for s in ("It was late.", "\u201cWait\u2026\u201d", "Then\u2014", "Who?", "She said"):
+        assert close_clause(s) == s
+
+
+def test_stutters_are_spelled_as_they_sound():
+    from elvenreader_server.text import engine_text, spell_stutters
+    from elvenreader_server.engines.registry import ENGINES
+
+    assert spell_stutters("\u201cR-right, I\u2019ll go.\u201d") == "\u201cRuh-right, I\u2019ll go.\u201d"
+    assert spell_stutters("Wh-what? S-s-sorry! Y-yeah. Th-that\u2019s it") == \
+        "Whuh-what? Suh-suh-sorry! Yuh-yeah. Thuh-that\u2019s it"
+    # Left alone: fragments with a vowel, fragments that aren't the next word's start, ordinary hyphens.
+    for s in ("I-I don\u2019t know", "Wha-what?", "a T-shirt", "an X-ray", "well-known", "B-52"):
+        assert spell_stutters(s) == s
+    assert engine_text(ENGINES["voxcpm"], "B-but he said,") == "Buh-but he said:"
+    assert engine_text(ENGINES["omnivoice"], "B-but he said,") == "B-but he said,"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_a_phone_recording_with_its_index_at_the_end_is_read(tmp_path):
+    """Phones' .m4a recordings keep their index (moov) after the audio: ffmpeg only finds it by seeking."""
+    import subprocess
+
+    from elvenreader_server.voice_edit import to_wav
+
+    clip = tmp_path / "recording.m4a"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=300:duration=60", "-ac", "2",
+                    "-ar", "48000", "-c:a", "aac", "-b:a", "256k", str(clip)], check=True)
+    wav = to_wav(clip.read_bytes(), 1.0, 11.0)
+    assert wav[:4] == b"RIFF" and abs((len(wav) - 44) / 2 / 24000 - 10.0) < 0.1
+

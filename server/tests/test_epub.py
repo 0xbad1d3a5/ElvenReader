@@ -115,6 +115,52 @@ def test_pictures_attach_to_the_next_paragraph_without_changing_the_text(tmp_pat
     assert "images" not in b
 
 
+def test_scene_breaks_are_kept_without_changing_the_text(tmp_path):
+    """Unital Ring I, chapter 9: an ornament and <p class="space-break"> where Asuna's scene ends and Kirito's starts."""
+    book = epub.parse(make_epub(tmp_path / "breaks.epub", {
+        "META-INF/container.xml": """<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>""",
+        "OEBPS/content.opf": """<package><metadata><dc:title>Breaks</dc:title></metadata><manifest>
+            <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="a"/></spine></package>""",
+        "OEBPS/a.xhtml": """<html><body><p>“I’m Shikimi Kamura.”</p>
+            <div class="ext_ch"><div class="pc-rw"><img class="ornament" src="Art_sborn.jpg"/></div></div>
+            <p class="space-break"><em>“Fwahuawh……”</em></p><p>“…?”</p><p>I yawned.</p>
+            <p class="space-break1">Next morning.</p><p>Later.</p><p>* * *</p><p>Third scene.</p><hr/><p>Last scene.</p>
+            </body></html>""",
+    }))
+    ch = book["chapters"][0]
+    assert ch["paragraphs"] == ["“I’m Shikimi Kamura.”", "“Fwahuawh……”", "I yawned.", "Next morning.", "Later.",
+                                "Third scene.", "Last scene."]
+    assert ch["breaks"] == [1, 3, 5, 6]
+    assert ch["images"] == {"1": ["OEBPS/Art_sborn.jpg"]}  # the ornament, shown at the break
+    assert ch["silent"] == {"2": ["“…?”"]}  # a wordless line, kept without renumbering the paragraphs
+
+
+def test_a_small_picture_standing_alone_is_a_scene_break(tmp_path):
+    """Way of Kings marks scene breaks with a 14x12 glyph and no class; a small picture inside a sentence (an em dash
+    drawn as a picture) or an illustration is not a break."""
+    from PIL import Image
+
+    def png(w, h):
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h)).save(buf, "PNG")
+        return buf.getvalue()
+
+    book = epub.parse(make_epub(tmp_path / "glyph.epub", {
+        "META-INF/container.xml": """<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>""",
+        "content.opf": """<package><metadata><dc:title>Glyph</dc:title></metadata><manifest>
+            <item id="a" href="a.xhtml" media-type="application/xhtml+xml"/></manifest>
+            <spine><itemref idref="a"/></spine></package>""",
+        "a.xhtml": """<html><body><p>He sat down.</p><p class="centerimage"><img src="glyph.png"/></p>
+            <p>Hours later.</p><p>It was<img src="dash.png"/>over.</p><p><img src="art.png"/></p><p>Next.</p>
+            </body></html>""",
+        "glyph.png": png(14, 12), "dash.png": png(30, 8), "art.png": png(800, 1200),
+    }))
+    ch = book["chapters"][0]
+    assert ch["paragraphs"] == ["He sat down.", "Hours later.", "It wasover.", "Next."]
+    assert ch["breaks"] == [1]
+
+
 def test_parsing_quirks_match_jsoup():
     doc = lambda body: [p["text"] for p in epub.extract_paragraphs(f"<html><body>{body}</body></html>")]  # noqa: E731
     # rows straight inside <table> get an implicit <tbody> (not a block): the table is one paragraph

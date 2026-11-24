@@ -337,7 +337,7 @@ async def consolidate(llm, session, book: dict, script: dict, model: str, gpu_st
 
 async def build(llm, session, book: dict, store, book_id: str, model: str, gpu_step, progress) -> None:
     """Pass 1 over the whole book (resumable). `gpu_step(make_coro)` runs one LLM step."""
-    from .dramatize import LlmError, mixed_tense_runs
+    from .dramatize import LlmError, mixed_tense_runs, with_breaks
 
     runs = mixed_tense_runs(book) or []
     switches = sorted(((c, p), t) for c, p, t in runs)
@@ -358,7 +358,7 @@ async def build(llm, session, book: dict, store, book_id: str, model: str, gpu_s
             continue
         await progress(s, i / max(1, len(chunks)), f"reading the book for the cast: chapter {ci + 1}")
         chapter = book["chapters"][ci]
-        text = "\n\n".join(chapter["paragraphs"][p] for p in paras)
+        text = with_breaks(book, ci, paras)
         tense = tense_at(ci, paras[0])
         user = (f"Book: {book.get('title', '')} by {book.get('author', '')}\n"
                 f"Chapter: {chapter.get('title', '')}\n\n"

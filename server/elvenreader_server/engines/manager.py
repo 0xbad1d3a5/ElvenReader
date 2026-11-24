@@ -3,7 +3,8 @@
 The site's speech model stays loaded in the main slot; asking it for another engine stops the
 current worker and starts the requested one (the server only does that when the speech model setting
 changes). Voice design with another model runs in a second, temporary slot. Requests are
-served one at a time per slot, in arrival order. When a client goes away mid-sentence,
+served one at a time per slot, the most urgent first (RankedLock: with several people reading, the passage
+someone needs next goes before others' read-ahead), then in arrival order. When a client goes away mid-sentence,
 the worker is told to cancel and the manager waits for it to acknowledge
 before serving the next request, so frames never get mixed up.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import itertools
 import json
 import logging
 import os
@@ -20,6 +22,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from . import protocol
 from .registry import EngineSpec
@@ -89,6 +92,7 @@ class _Worker:
         self.queues: dict[str, asyncio.Queue] = {}
         self.control: asyncio.Queue = asyncio.Queue()
         self.alive = True
+        self.parked = False  # moved to system RAM for something else on the GPU (park/unpark)
         self.sample_rate = 24000
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
         self.tasks = [
@@ -169,12 +173,66 @@ class _Worker:
             t.cancel()
 
 
+class RankedLock:
+    """An asyncio lock whose waiters are served most urgent first: the lowest rank() when it is released (asked
+    then, so a rank may change while it waits, e.g. as a reader's playback moves on), then in arrival order.
+    `async with` and acquire() without a rank are rank 0 (wanted now)."""
+
+    def __init__(self):
+        self._locked = False
+        self._waiters: list[tuple[Callable[[], float], int, asyncio.Future]] = []
+        self._order = itertools.count()
+
+    def locked(self) -> bool:
+        return self._locked
+
+    async def acquire(self, rank: Callable[[], float] | None = None) -> bool:
+        if not self._locked:
+            self._locked = True
+            return True
+        fut = asyncio.get_running_loop().create_future()
+        entry = (rank or (lambda: 0.0), next(self._order), fut)
+        self._waiters.append(entry)
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self.release()  # it was handed over just as the waiter went away: pass it on
+            raise
+        finally:
+            if entry in self._waiters:
+                self._waiters.remove(entry)
+        return True
+
+    def release(self) -> None:
+        self._waiters = [w for w in self._waiters if not w[2].done()]
+        if not self._waiters:
+            self._locked = False
+            return
+
+        def urgency(w) -> tuple[float, int]:
+            try:
+                return float(w[0]()), w[1]
+            except Exception:  # noqa: BLE001 - a broken rank must not stall the GPU
+                return 0.0, w[1]
+
+        nxt = min(self._waiters, key=urgency)
+        self._waiters.remove(nxt)
+        nxt[2].set_result(True)  # still locked: it is the new holder's
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *exc) -> None:
+        self.release()
+
+
 class _Slot:
     """A place for one worker on the GPU, served one request at a time."""
 
     def __init__(self, name: str):
         self.name = name
-        self.lock = asyncio.Lock()
+        self.lock = RankedLock()
         self.worker: _Worker | None = None
         self.waiting = 0
         self.last_activity = time.monotonic() - 3600
@@ -189,9 +247,11 @@ class _Slot:
 
 
 class EngineManager:
-    """Two places on the GPU: the speech model the site reads with (`main`, loaded once and kept), and a
-    voice designer (`design`) for when the design model is another one. The designer is loaded only while
-    voices are being designed and unloaded after `designer_idle_s`; it never evicts the speech model."""
+    """Places on the GPU: the speech model the site reads with (`main`, loaded once and kept); a narration model
+    (`narration`, optional) that reads the narrator's lines next to it, so two readers (or a reader's narration and
+    dialogue) are made at the same time; and a voice designer (`design`) for when the design model is another one.
+    The designer is loaded only while voices are being designed and unloaded after `designer_idle_s`; it never
+    evicts the speech models. Each place serves one request at a time; the places run side by side."""
 
     def __init__(
         self,
@@ -202,6 +262,8 @@ class EngineManager:
         load_timeout_s: float = 900.0,
         synth_timeout_s: float = 180.0,
         designer_idle_s: float = 180.0,
+        park_speech: bool = True,
+        load_times_path: Path | None = None,
     ):
         self.specs = specs
         self.models_dir = Path(models_dir)
@@ -209,13 +271,27 @@ class EngineManager:
         self.load_timeout_s = load_timeout_s
         self.synth_timeout_s = synth_timeout_s
         self.designer_idle_s = designer_idle_s
+        # Make room for the LLM by moving the speech model to system RAM (when its engine can), not stopping it.
+        self.park_speech = park_speech
         self.stats: dict[str, EngineStats] = {k: EngineStats() for k in specs}
         self._main = _Slot("main")
+        self._narrator = _Slot("narration")
         self._design = _Slot("design")
+        # The narration model (loaded in the narration slot), when it isn't the speech model itself.
+        self.narration: str | None = None
         self._reaper: asyncio.Task | None = None
         # The site's speech model (loaded in the main slot, now or on the first request).
         self.resident: str | None = None
         self.designer_load_s: dict[str, float] = {}
+        # How long recent loads took, from starting the worker to ready ({"main"/"design": {engine: [s, ...]}}),
+        # kept across restarts so the banner's first estimate after a reboot is not a guess.
+        self.load_times_path = Path(load_times_path) if load_times_path else None
+        self._load_times: dict[str, dict[str, list[float]]] = {}
+        if self.load_times_path and self.load_times_path.exists():
+            try:
+                self._load_times = json.loads(self.load_times_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self._load_times = {}
         self._speaking = 0
         self._last_speech = time.monotonic() - 3600
         # Called before the designer loads, to make room on the GPU (the server stops a GPU LLM here).
@@ -237,6 +313,12 @@ class EngineManager:
     def designer(self) -> str | None:
         return self._design.active
 
+    def _slot_for(self, engine_id: str) -> _Slot:
+        """The narration model's requests go to its own place; everything else to the speech model's."""
+        if self.narration and engine_id == self.narration and engine_id != self.resident:
+            return self._narrator
+        return self._main
+
     @property
     def state(self) -> str:
         return self._main.state
@@ -245,6 +327,10 @@ class EngineManager:
         def expected(slot: _Slot) -> float | None:
             if not slot.loading:
                 return None
+            kind = "design" if slot is self._design else "main"
+            recent = (self._load_times.get(kind) or {}).get(slot.loading)
+            if recent:
+                return max(recent)  # loads just after a reboot are the slow ones (cold disk cache)
             if slot is self._design:
                 return self.designer_load_s.get(slot.loading, 15.0)
             return (self.stats.get(slot.loading) or EngineStats()).load_s or 30.0
@@ -264,6 +350,10 @@ class EngineManager:
             "speech": {"engine": self._main.loading or self.active, "label": label(self._main.loading or self.active),
                        "state": self._main.state, "loading_s": round(time.monotonic() - self._main.since, 1)
                        if self._main.loading else None, "expected_s": expected(self._main)},
+            "narration": {"engine": self._narrator.loading or self._narrator.active,
+                          "label": label(self._narrator.loading or self._narrator.active), "state": self._narrator.state,
+                          "loading_s": round(time.monotonic() - self._narrator.since, 1)
+                          if self._narrator.loading else None, "expected_s": expected(self._narrator)},
             "voice_designer": {"engine": self._design.loading or self.designer,
                                "label": label(self._design.loading or self.designer), "state": self._design.state,
                                "loading_s": round(time.monotonic() - self._design.since, 1)
@@ -334,7 +424,19 @@ class EngineManager:
     async def _ensure(self, slot: _Slot, spec: EngineSpec, extra: dict | None = None) -> _Worker:
         """Caller holds the slot's lock."""
         if slot.worker and slot.worker.alive and slot.worker.spec.id == spec.id:
-            return slot.worker
+            if not slot.worker.parked:
+                return slot.worker
+            # Back from system RAM (about a second), instead of loading again (about a minute).
+            t0 = time.perf_counter()
+            try:
+                await slot.worker.send({"op": "unpark"})
+                await slot.worker.expect_control({"unparked"}, 120)
+                slot.worker.parked = False
+                slot.state, slot.detail = "ready", ""
+                logger.info("%s back on the GPU in %.1fs", spec.label, time.perf_counter() - t0)
+                return slot.worker
+            except EngineError as exc:
+                logger.warning("%s could not come back from RAM (%s); loading it again", spec.label, exc.detail)
         await self._stop(slot)
         if slot is self._design and self.before_designer is not None:
             await self.before_designer()
@@ -345,10 +447,27 @@ class EngineManager:
         except EngineError as exc:
             slot.state, slot.detail = "error", exc.detail
             raise
+        except BaseException:
+            # Cancelled mid-load (the request went away, the speech model was switched): nothing is loading.
+            slot.state, slot.detail = "idle", ""
+            raise
         finally:
             slot.loading = None
+        self._remember_load("design" if slot is self._design else "main", spec.id, time.monotonic() - slot.since)
         slot.state, slot.detail = "ready", ""
         return slot.worker
+
+    LOAD_TIMES_KEPT = 3
+
+    def _remember_load(self, kind: str, engine_id: str, seconds: float) -> None:
+        times = self._load_times.setdefault(kind, {}).setdefault(engine_id, [])
+        times.append(round(seconds, 1))
+        del times[:-self.LOAD_TIMES_KEPT]
+        if self.load_times_path:
+            try:
+                self.load_times_path.write_text(json.dumps(self._load_times), encoding="utf-8")
+            except OSError as exc:
+                logger.warning("could not save load times: %s", exc)
 
     async def _stop(self, slot: _Slot) -> None:
         if slot.worker is not None:
@@ -357,17 +476,69 @@ class EngineManager:
             slot.worker = None
             slot.state = "idle"
 
+    async def _park_or_stop(self, slot: _Slot) -> None:
+        """Free the GPU: the worker moves its model to system RAM when its engine can (BaseEngine.park), so
+        coming back takes a second rather than a reload; otherwise it is stopped. Caller holds the slot's lock."""
+        w = slot.worker
+        if w is None or w.parked:
+            return
+        if w.alive and self.park_speech:
+            t0 = time.perf_counter()
+            try:
+                await w.send({"op": "park"})
+                reply = await w.expect_control({"parked"}, 60)
+                if reply.get("ok"):
+                    w.parked = True
+                    slot.state, slot.detail = "parked", "In system RAM while the GPU does background work"
+                    logger.info("%s moved to system RAM in %.1fs", w.spec.label, time.perf_counter() - t0)
+                    return
+            except EngineError as exc:
+                logger.warning("%s could not move to RAM (%s); stopping it", w.spec.label, exc.detail)
+        await self._stop(slot)
+
+    @property
+    def parked_vram_gb(self) -> float:
+        """VRAM the parked speech models still hold (their CUDA context and graphs): the LLM leaves room for it."""
+        return sum(w.spec.parked_vram_gb for w in (self._main.worker, self._narrator.worker)
+                   if w is not None and w.alive and w.parked)
+
+    async def wait_settled(self, timeout: float = 30.0) -> None:
+        """Wait (at most `timeout`) until the speech model is back on the GPU and the speech asked for meanwhile
+        is made: an LLM starting next to it at the same time (4 GB onto the GPU) made the first line after a
+        return from idle take 23 s instead of 2."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            busy = self._speaking or any(
+                slot.loading or (slot.worker is not None and slot.worker.parked) or slot.waiting or slot.lock.locked()
+                for slot in (self._main, self._narrator))
+            if not busy:
+                return
+            await asyncio.sleep(0.25)
+
     async def preload(self, engine_id: str) -> None:
         """Load the speech model the site reads with (replacing another one)."""
         spec = self.spec(engine_id)
         self.resident = engine_id
         async with self._main.lock:
             await self._ensure(self._main, spec)
+        if self.narration == engine_id:  # it reads the narration too now: the narration place isn't needed
+            async with self._narrator.lock:
+                await self._stop(self._narrator)
+
+    async def preload_narration(self, engine_id: str | None) -> None:
+        """Load the narration model next to the speech model (None, or the speech model itself: stop it)."""
+        self.narration = engine_id or None
+        async with self._narrator.lock:
+            if not engine_id or engine_id == self.resident:
+                await self._stop(self._narrator)
+                return
+            await self._ensure(self._narrator, self.spec(engine_id))
 
     async def unload(self) -> None:
         """Free the GPU entirely (e.g. before running something else on it)."""
-        async with self._main.lock, self._design.lock:
+        async with self._main.lock, self._narrator.lock, self._design.lock:
             await self._stop(self._design)
+            await self._stop(self._narrator)
             await self._stop(self._main)
 
     async def unload_designer(self) -> None:
@@ -379,9 +550,10 @@ class EngineManager:
         """Hold the GPU for something else (the dramatization LLM). The voice designer is unloaded; the speech
         model too only with `evict` (otherwise it stays loaded and speech keeps being served meanwhile)."""
         if evict:
-            async with self._main.lock, self._design.lock:
+            async with self._main.lock, self._narrator.lock, self._design.lock:
                 await self._stop(self._design)
-                await self._stop(self._main)
+                await self._park_or_stop(self._narrator)
+                await self._park_or_stop(self._main)
                 yield
         else:
             # Someone is designing voices: wait until the designer has been idle (it is unloaded then), so
@@ -407,7 +579,7 @@ class EngineManager:
     @property
     def tts_waiting(self) -> bool:
         """True when synthesis requests are queued behind the current GPU holder."""
-        return self._main.waiting > 0
+        return self._main.waiting > 0 or self._narrator.waiting > 0
 
     def idle_seconds(self) -> float:
         """Seconds since speech was last requested or produced (voice design doesn't count)."""
@@ -419,13 +591,15 @@ class EngineManager:
         if self._reaper:
             self._reaper.cancel()
         await self._stop(self._design)
+        await self._stop(self._narrator)
         await self._stop(self._main)
 
     # -- synthesis -----------------------------------------------------------
 
-    def synthesize(self, engine_id: str, payload: dict):
-        """Async iterator: StreamStart, AudioChunk..., Done. Raises EngineError."""
-        return self._speech(self._run(self._main, engine_id, {"op": "synth", **payload}))
+    def synthesize(self, engine_id: str, payload: dict, rank: Callable[[], float] | None = None):
+        """Async iterator: StreamStart, AudioChunk..., Done. Raises EngineError. `rank`: how urgent it is (lower
+        first; see RankedLock), e.g. how far ahead of a reader's playback the passage is."""
+        return self._speech(self._run(self._slot_for(engine_id), engine_id, {"op": "synth", **payload}, rank=rank))
 
     async def _speech(self, stream):
         """Marks speech (reading) as going on, for idle_seconds: voice design doesn't count as listening."""
@@ -460,12 +634,13 @@ class EngineManager:
 
         self._reaper = asyncio.ensure_future(reap())
 
-    async def _run(self, slot: _Slot, engine_id: str, msg: dict, extra: dict | None = None):
+    async def _run(self, slot: _Slot, engine_id: str, msg: dict, extra: dict | None = None,
+                   rank: Callable[[], float] | None = None):
         spec = self.spec(engine_id)
         slot.waiting += 1
         slot.last_activity = time.monotonic()
         try:
-            await slot.lock.acquire()
+            await slot.lock.acquire(rank)
         finally:
             slot.waiting -= 1
         worker: _Worker | None = None

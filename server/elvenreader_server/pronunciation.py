@@ -1,8 +1,10 @@
 """User-corrected pronunciations ("Hermione" -> "her-MY-oh-nee").
 
-Entries are global, belong to a series (every book of it) or to one book; for the same term
-the narrower one wins (book over series over global). They are applied on the server before synthesis, so
-they work with every engine and are part of the audio cache key.
+Each entry belongs to a user (every book in their library), a series (every book of it) or one book; there are
+no site-wide entries, so each user's fixes stay with their books. For the same term the narrower one wins (book
+over series over user). They follow the book, not the listener: a book is read with its users' entries whoever
+plays it. They are applied on the server before synthesis, so they work with every engine and are part of the
+audio cache key.
 
 A respelling works with every engine. An entry may also carry ARPAbet
 phonemes (the CMU dictionary notation, e.g. ``HH ER0 M AY1 AH0 N IY0``);
@@ -31,14 +33,15 @@ class Entry:
     respelling: str
     phonemes: str = ""
     case_sensitive: bool = False
-    book: str | None = None  # None = global
+    book: str | None = None  # one book's entry
     series: str | None = None  # the series' name; matched like series names are (case and punctuation aside)
+    user: str | None = None  # a user's entry, for every book in their library (profiles.py ids)
     id: str = field(default_factory=lambda: secrets.token_hex(5))
     updated: float = field(default_factory=time.time)
 
     @property
     def scope(self) -> str:
-        return "book" if self.book else "series" if self.series else "global"
+        return "book" if self.book else "series" if self.series else "user"
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -73,13 +76,15 @@ def series_key(name: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
 
 
-def effective_entries(entries: Iterable[Entry], book: str | None, series: str | None = None) -> list[Entry]:
-    """Global entries, then the book's series' entries, then the book's own; on the same term the later
-    (narrower) one wins."""
+def effective_entries(entries: Iterable[Entry], book: str | None, series: str | None = None,
+                      users: Iterable[str] = ()) -> list[Entry]:
+    """The entries of the book's users (whose library has it), then its series', then the book's own; on the same
+    term the later (narrower) one wins."""
     entries = list(entries)
     skey = series_key(series)
+    users = list(users)
     layers = [
-        [e for e in entries if e.book is None and not e.series],
+        [e for u in users for e in entries if e.user == u and not e.book and not e.series],
         [e for e in entries if e.book is None and e.series and skey and series_key(e.series) == skey],
         [e for e in entries if book and e.book == book],
     ]
@@ -164,18 +169,19 @@ class PronunciationStore:
     def all(self) -> list[Entry]:
         return list(self._entries)
 
-    def for_book(self, book: str | None, series: str | None = None) -> list[Entry]:
-        return effective_entries(self._entries, book, series)
+    def for_book(self, book: str | None, series: str | None = None, users: Iterable[str] = ()) -> list[Entry]:
+        return effective_entries(self._entries, book, series, users)
 
-    def listing(self, book: str | None, series: str | None = None) -> dict:
-        skey = series_key(series)
+    def listing(self, book: str | None, series: str | None = None, users: Iterable[str] = ()) -> dict:
+        """`users`: whose user-wide entries to list (the book's users)."""
+        skey, users = series_key(series), list(users)
         return {
-            "global": [e.to_json() for e in self._entries if e.book is None and not e.series],
+            "user": [e.to_json() for u in users for e in self._entries if e.user == u and not e.book and not e.series],
             "series": [e.to_json() for e in self._entries
                        if e.book is None and e.series and skey and series_key(e.series) == skey],
             "book": [e.to_json() for e in self._entries if book and e.book == book],
             "series_name": series or "",
-            "version": entries_version(self.for_book(book, series)),
+            "version": entries_version(self.for_book(book, series, users)),
         }
 
     def rename_series(self, old: str, new: str) -> int:
@@ -198,21 +204,24 @@ class PronunciationStore:
         return n
 
     def add(self, term: str, respelling: str, *, phonemes: str = "", case_sensitive: bool = False,
-            book: str | None = None, series: str | None = None) -> Entry:
+            book: str | None = None, series: str | None = None, user: str | None = None) -> Entry:
         term = " ".join(term.split())
         if not term or not any(ch.isalnum() for ch in term):
             raise ValueError("term must contain a letter or digit")
         phonemes = normalize_phonemes(phonemes)
         if not respelling.strip() and not phonemes:
             raise ValueError("give a respelling or phonemes")
+        series = None if book else (" ".join((series or "").split()) or None)
+        user = None if book or series else (user or None)
+        if not (book or series or user):
+            raise ValueError("a pronunciation is for a book, a series or a user's books")
         entry = Entry(term=term, respelling=respelling.strip(), phonemes=phonemes,
-                      case_sensitive=bool(case_sensitive), book=book or None,
-                      series=None if book else (" ".join((series or "").split()) or None))
+                      case_sensitive=bool(case_sensitive), book=book or None, series=series, user=user)
         with self._lock:
             # Re-adding the same term in the same scope replaces the old entry.
             self._entries = [e for e in self._entries
                              if not (e.book == entry.book and series_key(e.series) == series_key(entry.series)
-                                     and e.key() == entry.key())]
+                                     and e.user == entry.user and e.key() == entry.key())]
             self._entries.append(entry)
             self._save()
         return entry

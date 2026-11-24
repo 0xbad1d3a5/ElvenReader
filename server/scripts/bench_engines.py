@@ -31,9 +31,10 @@ PASSAGE = [
 ]
 
 
-async def bench(engine_id: str, voice_id: str, out_dir: Path) -> dict:
+async def bench(engine_id: str, voice_id: str, out_dir: Path, options: dict | None = None, tag: str = "") -> dict:
     cfg = load_config()
-    manager = EngineManager(ENGINES, cfg.models_path, options=cfg.engine_options, load_timeout_s=1800)
+    engine_options = {**cfg.engine_options, engine_id: {**cfg.engine_options.get(engine_id, {}), **(options or {})}}
+    manager = EngineManager(ENGINES, cfg.models_path, options=engine_options, load_timeout_s=1800)
     voice = VoiceStore(cfg.data_path / "voices").get(voice_id)
     if voice is None:
         raise SystemExit(f"no voice {voice_id}")
@@ -71,12 +72,12 @@ async def bench(engine_id: str, voice_id: str, out_dir: Path) -> dict:
         first_latency.append(first or gen)
         clips.append(pcm + bytes(int(rate * 0.35) * 2))
         print(f"  {engine_id}: {dur:5.2f}s audio in {gen:5.2f}s  {text[:50]!r}", flush=True)
-    out = out_dir / f"{engine_id}-{voice_id}.wav"
+    out = out_dir / f"{engine_id}{tag}-{voice_id}.wav"
     out.write_bytes(wav_bytes(b"".join(clips), rate))
     stats = manager.stats[engine_id].to_json()
     await manager.close()
     return {
-        "engine": engine_id, "load_s": round(load_s, 1), "rtf": round(gen_total / audio_total, 3),
+        "engine": engine_id + tag, "load_s": round(load_s, 1), "rtf": round(gen_total / audio_total, 3),
         "first_audio_s": round(sum(first_latency) / len(first_latency), 2),
         "vram_mb": stats.get("vram_mb"), "sample_rate": rate, "file": str(out),
     }
@@ -91,13 +92,21 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("engines", nargs="*", default=list(ENGINES))
     parser.add_argument("--voice", default="a304a8d5")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="engine option for this run, e.g. --set mode=reference (repeatable)")
     args = parser.parse_args()
+    options = {}
+    for kv in args.set:
+        key, _, value = kv.partition("=")
+        options[key] = int(value) if value.isdigit() else float(value) if value.replace(".", "", 1).isdigit() \
+            else {"true": True, "false": False}.get(value.lower(), value)
+    tag = "".join(f"-{k}={v}" for k, v in options.items())
     out_dir = load_config().data_path / "bench"
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
     for engine in args.engines:
         try:
-            results.append(await bench(engine, args.voice, out_dir))
+            results.append(await bench(engine, args.voice, out_dir, options, tag))
         except Exception as exc:  # noqa: BLE001
             print(f"{engine} FAILED: {exc}", flush=True)
             results.append({"engine": engine, "error": str(exc)})

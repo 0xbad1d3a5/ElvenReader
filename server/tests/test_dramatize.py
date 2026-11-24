@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -60,6 +61,39 @@ def test_interrupted_quotation_is_one_numbered_turn():
     assert script["lines"]["c0p0q26"]["speaker"] == "hatter"
 
 
+def test_a_spoken_form_is_kept_only_for_a_quotation_in_one_piece():
+    script = {"characters": {}, "lines": {}}
+    wh = "\u201cWh\u2026 whaaaaaaat?!\u201d"
+    dz.apply_chunk_result(script, {"speakers": [], "quotes": [
+        {"id": "1", "starts": "Wh", "speaker": "Ronie", "delivery": "shouting, drawn out", "_text": wh,
+         "respell": [{"written": "whaaaaaaat", "said": "what"}]},
+        {"id": "2", "starts": "Yes", "speaker": "Tom", "delivery": "calm", "_text": "\u201cYesss,\u201d",
+         "respell": [{"written": "Yesss", "said": "yes"}]},
+        {"id": "3", "starts": "No", "speaker": "Tom", "delivery": "calm", "_text": "\u201cNo.\u201d", "respell": []},
+        {"id": "4", "starts": "Krrr", "speaker": "Tom", "delivery": "growling", "_text": "\u201cKrrrr!\u201d",
+         "respell": [{"written": "Grrr", "said": "grr"}]},  # not in the quotation: ignored
+    ]}, {"1": ["c0p0q0"], "2": ["c0p1q0", "c0p1q9"], "3": ["c0p2q0"], "4": ["c0p3q0"]})
+    assert script["lines"]["c0p0q0"]["say"] == "\u201cWh\u2026 what?!\u201d"
+    assert "say" not in script["lines"]["c0p1q0"] and "say" not in script["lines"]["c0p1q9"]
+    assert "say" not in script["lines"]["c0p2q0"] and "say" not in script["lines"]["c0p3q0"]
+    assert "respell" in dz.chunk_schema(["1"])["properties"]["quotes"]["items"]["required"]
+
+
+def test_respelling_swaps_only_the_named_words():
+    text = "\u201cY-yeah\u2026 Nooooo, please, I mean\u2026 how do you build trust that way\u2026?\u201d"
+    assert dz.respelled(text, [{"written": "nooooo", "said": "no"}]) == \
+        "\u201cY-yeah\u2026 No, please, I mean\u2026 how do you build trust that way\u2026?\u201d"
+    assert dz.respelled(text, [{"written": "Y-yeah", "said": "Y-yeah"}]) == ""  # unchanged
+    assert dz.respelled(text, [{"written": "Y-yeah", "said": "Yeah"}]) == ""  # stutters stay
+    assert dz.respelled("\u201cSo-o-o tired\u201d", [{"written": "So-o-o", "said": "so"}]) == "\u201cSo tired\u201d"
+    wh = "\u201cWh\u2026whaaaaaaat?!\u201d"
+    assert dz.respelled(wh, [{"written": "Wh\u2026whaaaaaaat?!", "said": "What?"}]) == ""  # one word only
+    # A word cut off mid-way stays cut off.
+    assert dz.respelled("\u201cJust drive safely, plea\u2014,\u201d", [{"written": "plea", "said": "please"}]) == ""
+    assert dz.respelled(text, [{"written": "oo", "said": "o"}]) == ""  # only whole words
+    assert dz.respelled(text, []) == "" and dz.respelled(text, None) == ""
+
+
 def test_chunk_schema_forces_every_id():
     schema = dz.chunk_schema(["1", "2"])
     q = schema["properties"]["quotes"]
@@ -73,15 +107,15 @@ def test_apply_result_creates_characters_and_matches_aliases():
     dz.apply_chunk_result(script, {
         "speakers": [{"name": "Mrs. Bennet", "gender": "female", "age": "middle-aged"}],
         "quotes": [
-            {"id": "1", "speaker": "Mrs. Bennet", "delivery": "excited"},
-            {"id": "2", "speaker": "mrs bennet", "delivery": "neutral"},
+            {"id": "1", "speaker": "Mrs. Bennet", "delivery": ["very happy", "loud", "shout", "made-up"]},
+            {"id": "2", "speaker": "mrs bennet", "delivery": []},
             {"id": "3", "speaker": "Mr. Bennet", "delivery": "dry, sarcastic"},
             {"id": "4", "speaker": "NARRATOR", "delivery": "neutral"},
         ],
     }, local)
-    assert script["lines"]["a"] == {"speaker": "mrs-bennet", "delivery": "excited"}
+    assert script["lines"]["a"] == {"speaker": "mrs-bennet", "delivery": "very happy, loud"}  # one volume
     assert script["lines"]["b"] == {"speaker": "mrs-bennet", "delivery": None}
-    assert script["lines"]["c"]["speaker"] == "mr-bennet"
+    assert script["lines"]["c"] == {"speaker": "mr-bennet", "delivery": "sarcastic"}  # a cached free-text answer
     assert script["lines"]["d"]["speaker"] is None
     assert script["characters"]["mrs-bennet"]["gender"] == "female"
     assert "Mrs. Bennet (female, middle-aged)" in dz.roster_text(script)
@@ -93,6 +127,8 @@ async def drama_client(aiohttp_client, tmp_path, monkeypatch):
 
     async def fake_complete(self, session, system, user, schema, max_tokens=2048, **kw):
         item = (schema["properties"].get("characters") or {}).get("items", {}).get("properties", {})
+        if "voice" in item and "id" in item:  # which generic voice fits
+            return {"characters": [{"id": i, "voice": {"tom": "Male Child"}.get(i, "Female Adult")} for i in item["id"]["enum"]]}
         if "role" in item:  # the tier question
             roles = {"Alice": ("main", "the heroine"), "Tom": ("extra", "one scene")}
             return {"characters": [{"name": n, "role": roles.get(n, ("extra", ""))[0], "reason": roles.get(n, ("", "?"))[1]}
@@ -100,8 +136,8 @@ async def drama_client(aiohttp_client, tmp_path, monkeypatch):
         if "quotes" in schema["properties"]:
             ids = schema["properties"]["quotes"]["items"]["properties"]["id"]["enum"]
             names = {"1": "Alice", "2": "Alice", "3": "Tom", "4": "NARRATOR"}
-            deliveries = {"1": "shouting, urgent", "3": "whispering"}
-            return {"quotes": [{"id": i, "starts": "", "speaker": names[i], "delivery": deliveries.get(i, "neutral")} for i in ids],
+            deliveries = {"1": ["angry", "shout"], "3": ["whisper"]}
+            return {"quotes": [{"id": i, "starts": "", "speaker": names[i], "delivery": deliveries.get(i, [])} for i in ids],
                     "speakers": [{"name": "Alice", "gender": "female", "age": "young adult"},
                                  {"name": "Tom", "gender": "male", "age": "child"}],
                     "_usage": {"total_tokens": 100}}
@@ -129,7 +165,7 @@ async def test_upload_analyse_correct_and_cast(drama_client):
     assert r.status == 200
     s = await wait_done(c)
     assert s["status"] == "done", s
-    assert s["lines"]["c0p1q0"] == {"speaker": "alice", "delivery": "shouting, urgent", "corrected": False}
+    assert s["lines"]["c0p1q0"] == {"speaker": "alice", "delivery": "angry, shout", "corrected": False}
     assert s["lines"]["c0p3q14"]["speaker"] is None
     alice = next(ch for ch in s["characters"] if ch["id"] == "alice")
     assert alice["lines"] == 2 and alice["description"].startswith("A young British woman")
@@ -137,7 +173,8 @@ async def test_upload_analyse_correct_and_cast(drama_client):
     # A user correction wins over the model and survives.
     r = await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "alice", "delivery": "scared"}, headers=AUTH)
     line = (await r.json())["lines"]["c0p2q11"]
-    assert line == {"speaker": "alice", "delivery": "scared", "corrected": True}
+    assert line == {"speaker": "alice", "delivery": "scared", "corrected": True,
+                    "analysis": {"speaker": "tom", "delivery": "whisper"}}  # what the model had said
 
     # Merging Tom into Alice moves his lines and keeps his name as an alias.
     r = await c.patch("/api/books/book1/characters/tom", json={"merge_into": "alice"}, headers=AUTH)
@@ -158,6 +195,54 @@ async def test_upload_analyse_correct_and_cast(drama_client):
     # Character voices are hidden from the normal voice list.
     plain = await (await c.get("/api/voices", headers=AUTH)).json()
     assert vid not in [v["id"] for v in plain["voices"]]
+
+
+async def test_books_can_be_analysed_on_an_inference_server(aiohttp_client, aiohttp_server, tmp_path, monkeypatch):
+    """Settings' "remote" analysis: the same requests go to an OpenAI-compatible server (llama-swap). Like vLLM with
+    speculative decoding there, this one fails JSON-schema requests, so the schema moves into the prompt; and like
+    llama-swap at its request limit, it sometimes answers 429, and the request waits for a free slot."""
+    from aiohttp import web
+
+    monkeypatch.setattr(dz, "REMOTE_BUSY_DELAY_S", 0.01)
+    seen, busy = [], [2]
+
+    async def chat(request):
+        body = await request.json()
+        seen.append(body)
+        if busy[0]:
+            busy[0] -= 1
+            return web.json_response({"error": {"message": "Too many requests", "code": "concurrency_limit"}}, status=429)
+        if "response_format" in body:
+            return web.json_response({"error": {"message": "Internal server error"}}, status=500)
+        schema = json.loads(body["messages"][0]["content"].rsplit("\n", 1)[1])
+        props = schema["properties"]
+        if "quotes" in props:
+            ids = props["quotes"]["items"]["properties"]["id"]["enum"]
+            names = {"1": "Alice", "2": "Alice", "3": "Tom", "4": "NARRATOR"}
+            answer = {"quotes": [{"id": i, "starts": "", "speaker": names[i], "delivery": []} for i in ids],
+                      "speakers": [{"name": "Alice", "gender": "female", "age": "young adult", "aliases": []},
+                                   {"name": "Tom", "gender": "male", "age": "child", "aliases": []}]}
+        else:
+            answer = {k: [] for k in props}
+        return web.json_response({"choices": [{"message": {"content": "```json\n" + json.dumps(answer) + "\n```"}}],
+                                  "usage": {"total_tokens": 50}})
+
+    remote = web.Application()
+    remote.router.add_post("/v1/chat/completions", chat)
+    server = await aiohttp_server(remote)
+    cfg = make_cfg(tmp_path, llm_backend="remote", llm_remote_url=str(server.make_url("/v1")), llm_remote_model="qwen-x")
+    c = await aiohttp_client(make_app(cfg, specs=SPECS))
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    s = await wait_done(c)
+    assert s["status"] == "done", s
+    assert s["lines"]["c0p1q0"]["speaker"] == "alice" and s["lines"]["c0p2q11"]["speaker"] == "tom"
+    assert seen[2].get("response_format") and not any("response_format" in b for b in seen[3:])
+    label = next(b for b in seen[1:] if "quotes" in b["messages"][0]["content"])
+    assert label["model"] == "qwen-x" and label["chat_template_kwargs"] == {"enable_thinking": False}
+    assert label["logprobs"] and label["top_logprobs"]
+    analyzer = c.server.app[dz.ANALYZER_KEY]
+    assert analyzer.llm.proc is None  # this PC's llama-server never started
+    assert c.server.app[dz.DRAMA_STORE_KEY].script("book1")["model"] == "qwen-x"
 
 
 async def test_analysis_error_is_reported(aiohttp_client, tmp_path, monkeypatch):
@@ -224,8 +309,9 @@ async def test_viewer_is_served_on_the_lan_without_the_token(drama_client):
     # the pairing page with the token stays on the PC
     with pytest.raises(web.HTTPNotFound):
         await auth_middleware(req("/"), handler)
-    index = await (await drama_client.get("/")).text()
-    assert "/books#token=testtoken" in index
+    # the PC's start page is the Users page (each user's link), with the admin's token
+    r = await drama_client.get("/")
+    assert r.url.path == "/books/users" and 'const EMBEDDED_TOKEN = "testtoken";' in await r.text()
 
 
 async def test_reanalyze_keeps_corrections(drama_client):
@@ -236,7 +322,8 @@ async def test_reanalyze_keeps_corrections(drama_client):
     await c.post("/api/books/book1", json={**book_payload(), "analyze": True, "reanalyze": True}, headers=AUTH)
     s = await wait_done(c)
     assert s["status"] == "done"
-    assert s["lines"]["c0p1q0"] == {"speaker": "tom", "delivery": "calm", "corrected": True}
+    assert s["lines"]["c0p1q0"] == {"speaker": "tom", "delivery": "calm", "corrected": True,
+                                    "analysis": {"speaker": "alice", "delivery": "angry, shout"}}
     assert s["lines"]["c0p2q11"]["speaker"] == "tom"
 
 
@@ -272,12 +359,78 @@ def test_speaker_resolution_first_person_parentheses_and_aliases():
     }, local)
     speakers = [script["lines"][f"q{i}"]["speaker"] for i in range(1, 7)]
     assert speakers == ["sasaki", "nick", "miss-hoshizaki", "sasaki", "guard", None]
-    assert script["characters"]["miss-hoshizaki"]["aliases"] == ["Makeup"]  # "the girl" is a description
+    # An alias unrelated to the name resolves its own passage's labels, but waits for a second passage to stick
+    # ("the girl" is a description and never counts).
+    assert script["characters"]["miss-hoshizaki"]["aliases"] == []
+    assert list(script["characters"]["miss-hoshizaki"]["alias_votes"]) == ["Makeup"]
     assert script["narrator"] == "Sasaki"
+    dz.apply_chunk_result(script, {"narrator": "third person", "quotes": [], "speakers": [
+        {"name": "Miss Hoshizaki", "aliases": ["Makeup"], "gender": "female", "age": "teen"}]}, {}, vote="chunk-2")
+    assert script["characters"]["miss-hoshizaki"]["aliases"] == ["Makeup"]
     # An alias never takes over another character's name.
     dz.apply_chunk_result(script, {"narrator": "third person", "quotes": [],
                                    "speakers": [{"name": "Nick", "aliases": ["Miss Hoshizaki"], "gender": "male", "age": "adult"}]}, {})
     assert "Miss Hoshizaki" not in script["characters"]["nick"]["aliases"]
+
+
+def test_a_shared_title_never_folds_a_new_speaker_into_someone_else():
+    """Asuna once picked up "Commander"; then "Fanatio" (also called Commander) joined her, and every one of
+    Fanatio's lines went to Asuna."""
+    script = {"characters": {}, "lines": {}, "narrator": "third person"}
+    dz.ensure_character(script, "Asuna", "female", "young adult", ["Commander"])  # series memory: taken at once
+    dz.apply_chunk_result(script, {"narrator": "third person", "speakers": [
+        {"name": "Fanatio", "aliases": ["Commander", "Fanatio Synthesis Two"], "gender": "female", "age": "adult"}],
+        "quotes": [{"id": "1", "starts": "", "speaker": "Fanatio", "delivery": "calm"}]}, {"1": ["q1"]}, vote="c1")
+    assert script["lines"]["q1"]["speaker"] == "fanatio"
+    assert "Fanatio" not in script["characters"]["asuna"]["aliases"]
+    assert "Fanatio Synthesis Two" in script["characters"]["fanatio"]["aliases"]  # shares her name: taken at once
+    # A real name given with the character's own name still joins them.
+    dz.apply_chunk_result(script, {"narrator": "third person", "quotes": [], "speakers": [
+        {"name": "Asuna Yuuki", "aliases": ["Asuna"], "gender": "female", "age": "young adult"}]}, {}, vote="c2")
+    assert "Asuna Yuuki" in script["characters"]["asuna"]["aliases"] and len(script["characters"]) == 2
+    # The cast list shown to the model never offers an alias another character answers to.
+    script["characters"]["fanatio"]["aliases"].append("Commander")
+    assert "Commander" not in dz.roster_text(script).split("Fanatio")[1]
+
+
+def test_a_cover_name_linked_once_still_finds_the_character_later():
+    """Sasaki undercover: one passage says "Sasaki, also called Kenta Nakano"; later ones only say "Kenta
+    Nakano". He stays one character, and the cover name becomes his alias."""
+    script = {"characters": {}, "lines": {}, "narrator": "third person"}
+    dz.ensure_character(script, "Sasaki", "male", "middle-aged")
+    male = {"gender": "male", "age": "middle-aged"}
+    passages = [([{"name": "Sasaki", "aliases": ["Kenta Nakano"], **male}], "Kenta Nakano"),
+                ([], "Kenta Nakano"),  # the model just labels the cover name
+                ([{"name": "Kenta Nakano", "aliases": [], **male}], "Kenta Nakano")]
+    for i, (speakers, label) in enumerate(passages):
+        dz.apply_chunk_result(script, {"narrator": "third person", "speakers": speakers, "quotes": [
+            {"id": "1", "starts": "", "speaker": label, "delivery": ""}]}, {"1": [f"q{i}"]}, vote=f"p{i}")
+    assert [script["lines"][f"q{i}"]["speaker"] for i in range(3)] == ["sasaki"] * 3
+    assert list(script["characters"]) == ["sasaki"] and script["characters"]["sasaki"]["aliases"] == ["Kenta Nakano"]
+
+
+def test_pronouns_are_never_names():
+    assert not dz.is_proper_alias("I") and not dz.is_proper_alias("She")
+    book = {"chapters": [{"title": "x", "paragraphs": ["I said I would. I did. I know Kirito."], "quotes": []}]}
+    script = {"characters": {"kirito": {"name": "Kirito", "aliases": ["I"]}}, "lines": {}}
+    dz.canonical_names(book, script, ratio=1)
+    assert script["characters"]["kirito"]["name"] == "Kirito"
+
+
+def test_speaker_odds_come_from_the_token_probabilities():
+    import math
+
+    def tok(t, p, alts=()):
+        return {"token": t, "logprob": math.log(p), "top_logprobs": [{"token": t, "logprob": math.log(p)},
+                                                                     *({"token": a, "logprob": math.log(q)} for a, q in alts)]}
+    tokens = [tok('{"quotes":[{"id":"1","starts":"That","speaker":"', 1.0), tok("As", 0.6, [("Fan", 0.3), ("NAR", 0.05)]),
+              tok("una", 0.95), tok('","delivery":"calm"}]}', 1.0)]
+    [(p, alts)] = dz.speaker_odds(tokens)
+    assert abs(p - 0.57) < 0.01 and [(t, round(q, 3)) for t, q in alts] == [("Fan", 0.3), ("NAR", 0.05)]
+    script = {"characters": {"asuna": {"name": "Asuna", "aliases": []}, "fanatio": {"name": "Fanatio", "aliases": []}},
+              "lines": {}}
+    odds = dz.line_odds(script, {"_p": p, "_alts": alts}, "asuna")
+    assert odds == {"conf": 0.57, "alts": [["fanatio", 0.3], [None, 0.05]]}
 
 
 def test_pov_marker_starts_a_new_chunk():
@@ -316,6 +469,52 @@ def test_narration_follows_first_person_evidence_and_pov_changes():
     chapters[0]["paragraphs"].append(f"{Q}Fine,{E} I replied.")
     chapters[0]["quotes"].append(["extra", 3, 0, 7])
     assert dz.compute_narration(book, script) == [[0, 0, "sasaki"], [1, 1, "neighbor"], [2, 0, "sasaki"]]
+    # The reader's corrections hold to the end of their section (the next POV heading or chapter), and survive
+    # every recompute.
+    script["narration_fixed"] = {"1:1": "tom"}
+    assert dz.compute_narration(book, script) == [[0, 0, "sasaki"], [1, 1, "tom"], [2, 0, "sasaki"]]
+    script["narration_fixed"] = {"1:0": None}  # chapter Two's opening to the book's narrator voice, up to the POV
+    assert dz.compute_narration(book, script) == [[0, 0, "sasaki"], [1, 0, None], [1, 1, "neighbor"], [2, 0, "sasaki"]]
+    script["narration_fixed"] = {"2:0": "neighbor"}  # the last section: to the end of the book
+    assert dz.compute_narration(book, script) == [[0, 0, "sasaki"], [1, 1, "neighbor"]]
+    # a third-person book can be given a narrator too
+    assert dz.compute_narration(third_person, {"lines": {"a": {"speaker": "tom"}}, "narration_fixed": {"0:0": "tom"}}) \
+        == [[0, 0, "tom"]]
+    # a third-person scene after a scene break goes to the book's narrator voice; the next one to its "I"
+    Q, E = "\u201c", "\u201d"
+    third = " ".join(["Asuna walked to class and thought about the cabin, and she sat down."] * 12)
+    ch = {"title": "Nine", "paragraphs": [third, f"{Q}Who are you?{E} Asuna asked.", f"{Q}Um,{E} I said.",
+                                          "I yawned and rubbed my eyes."], "breaks": [2]}
+    ch["quotes"] = [[f"z{pi}-{s}", pi, s, e] for pi, t in enumerate(ch["paragraphs"]) for s, e in dz.quote_regions(t)]
+    book["chapters"].append(ch)
+    lines.update({ch["quotes"][0][0]: {"speaker": "asuna"}, ch["quotes"][1][0]: {"speaker": "sasaki"}})
+    script["narration_fixed"] = {}
+    assert dz.compute_narration(book, script)[-2:] == [[3, 0, None], [3, 2, "sasaki"]]
+    assert dz.section_end(book, 3, 0) == (3, 2)
+    # a first-person scene after a break with no "I said" in it (a flashback) goes on with the narrator before it
+    flash = " ".join(["I remembered the old days and walked home slowly with my sister."] * 12)
+    ch2 = {"title": "Ten", "paragraphs": [f"{Q}Wait,{E} I said.", flash], "breaks": [1]}
+    ch2["quotes"] = [["w0", 0, 0, 7]]
+    book["chapters"].append(ch2)
+    lines["w0"] = {"speaker": "tom"}
+    assert dz.compute_narration(book, script)[-1:] == [[4, 0, "tom"]]
+    # first person carried by "we" (one "I" among them) stays first person; "we" with no "I" (reported speech) doesn't
+    we = " ".join(["We walked on and our packs grew heavy as the road climbed past us."] * 12) + " I sighed."
+    ours = " ".join(["The elder said our city stood in the north before the flood took us."] * 12)
+    ch2["paragraphs"][1], ch2["breaks"] = we, [1]
+    assert dz.compute_narration(book, script)[-1:] == [[4, 0, "tom"]]
+    ch2["paragraphs"].append(ours)
+    ch2["breaks"] = [1, 2]
+    assert dz.compute_narration(book, script)[-2:] == [[4, 0, "tom"], [4, 2, None]]
+    book["chapters"].pop()
+    del lines["w0"]
+    # and the LLM is told: the passage and its context show the break on a line of its own
+    text, local = dz.render_chunk(book, dz.Chunk("c3k0", 3, [0, 1, 2, 3], [tuple(q) for q in ch["quotes"]]))
+    assert text.count(dz.SCENE_BREAK) == 1 and text.index(dz.SCENE_BREAK) < text.index("[2]")
+    assert list(local) == ["1", "2"]  # the numbering is as before
+    ch["silent"] = {"3": ["\u201c\u2026?\u201d"]}  # a wordless line before paragraph 3: shown, unnumbered
+    text, local = dz.render_chunk(book, dz.Chunk("c3k0", 3, [0, 1, 2, 3], [tuple(q) for q in ch["quotes"]]))
+    assert "\u201c\u2026?\u201d\n\nI yawned" in text and list(local) == ["1", "2"]
 
 
 def test_reconcile_narrators_by_tense():
@@ -901,6 +1100,60 @@ async def test_names_the_reader_types_are_kept_exactly(drama_client):
     assert {"the butler", "tom the piper's son"} <= {ch["name"] for ch in s["characters"].values()}
 
 
+async def test_a_new_name_that_was_filed_under_someone_else_becomes_its_own_character(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    app = c.server.app
+    store = app[dz.DRAMA_STORE_KEY]
+    s = store.script("book1")
+    s["characters"]["tom"]["aliases"] += ["Fanatio", "Fanatio Synthesis Two", "Tommy"]  # the analysis mixed them up
+    store.save_script("book1", s)
+    from elvenreader_server.series import SERIES_KEY, book_series, remember
+
+    remember(app, "book1")
+    r = await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "Fanatio", "delivery": ""}, headers=AUTH)
+    s = await r.json()
+    chars = {ch["id"]: ch for ch in s["characters"]}
+    new = chars[s["lines"]["c0p2q11"]["speaker"]]
+    assert new["id"] != "tom" and new["name"] == "Fanatio"
+    assert "Tommy" in chars["tom"]["aliases"] and not any("Fanatio" in a for a in chars["tom"]["aliases"])
+    series = app[SERIES_KEY].get(book_series(app, "book1"))
+    assert not any("Fanatio" in a for e in series["characters"].values() for a in e.get("aliases", []))
+    # A character's own name still picks that character.
+    r = await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "Tom", "delivery": ""}, headers=AUTH)
+    assert (await r.json())["lines"]["c0p2q11"]["speaker"] == "tom"
+
+
+async def test_manual_edits_and_flags_are_kept_as_reports_of_incorrect_analysis(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "alice", "delivery": "scared"}, headers=AUTH)
+    await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "alice", "delivery": "scared"}, headers=AUTH)  # no change
+    await c.patch("/api/books/book1/lines/c0p1q0", json={"speaker": "The Butler"}, headers=AUTH)
+    await c.patch("/api/books/book1/characters/tom", json={"name": "Tom Thumb", "role": "main"}, headers=AUTH)
+    r = await c.post("/api/books/book1/reports", json={"line": "c0p3q14", "note": "this is Alice thinking"}, headers=AUTH)
+    assert r.status == 201
+    assert (await c.post("/api/books/book1/reports", json={}, headers=AUTH)).status == 400
+    reports = (await (await c.get("/api/books/book1/reports", headers=AUTH)).json())["reports"]
+    kinds = [r["type"] for r in reports]
+    assert kinds == ["speaker", "delivery", "new_character", "name", "role", "flag"]
+    first = reports[0]
+    assert first["line"] == "c0p2q11" and first["before"]["speaker"] == "tom" and first["after"]["name"] == "Alice"
+    assert first["text"].startswith("\u201c")
+    assert reports[-1]["note"] == "this is Alice thinking" and reports[-1]["before"]["speaker"] is None
+    everything = (await (await c.get("/api/reports?type=flag", headers=AUTH)).json())["reports"]
+    assert [r["type"] for r in everything] == ["flag"]
+    # Voice-editor changes are casting fixes: reported in every book whose characters use the voice.
+    await c.patch("/api/books/book1/characters/alice", json={"voice": "nar"}, headers=AUTH)
+    r = await c.patch("/api/voices/nar", json={"description": "older, slower"}, headers=AUTH)
+    assert r.status == 200
+    voice_reports = [x for x in (await (await c.get("/api/books/book1/reports", headers=AUTH)).json())["reports"]
+                     if x["type"] == "voice" and x.get("edit") == "details"]
+    assert [(x["character"], x["after"]["description"]) for x in voice_reports] == [("alice", "older, slower")]
+
+
 async def test_characters_are_described_by_their_own_voice(drama_client):
     c = drama_client
     await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
@@ -921,6 +1174,153 @@ async def test_characters_are_described_by_their_own_voice(drama_client):
     class V:
         description, instruct = "An adult man with an ordinary voice.", ""
     assert dz.follow_voice(pool, {"pool-male-adult": V()}) is False and pool["description"] == "A gruff old sailor."
+
+
+def test_unused_character_voices_are_deleted(tmp_path):
+    from elvenreader_server import reports
+    from elvenreader_server.app import VOICES_KEY
+
+    voices, store = VoiceStore(tmp_path / "voices"), dz.ScriptStore(tmp_path / "books")
+    wav = b"RIFF" + b"\0" * 64
+    for vid, source in (("used", "character"), ("orphan", "character"), ("past", "character"), ("mine", "upload"),
+                        ("pool-m-adult", "character")):
+        voices.add(vid, wav, "hi", source=source, voice_id=vid)
+    voices.update("orphan", description="edited")  # its earlier versions go with it
+    (tmp_path / "books" / "b1").mkdir(parents=True)
+    (tmp_path / "books" / "b1" / "book.json").write_text("{}")
+    store.save_script("b1", {"characters": {"tom": {"name": "Tom", "voice": "used"}}})
+    app = {dz.DRAMA_STORE_KEY: store, VOICES_KEY: voices}
+    reports.record(app, "b1", "voice", character="tom", before={"voice": "past"}, after={"voice": "used"})
+    assert dz.delete_unused_voices(app) == ["orphan"]
+    assert voices.get("orphan") is None and not (tmp_path / "voices" / ".history" / "orphan").exists()
+    assert all(voices.get(v) for v in ("used", "past", "mine", "pool-m-adult"))
+    assert dz.delete_unused_voices(app) == []
+
+
+def test_name_voices_follows_renamed_characters(tmp_path):
+    from elvenreader_server.app import VOICES_KEY
+    from elvenreader_server.voices import VoiceStore
+
+    voices, store = VoiceStore(tmp_path / "voices"), dz.ScriptStore(tmp_path / "books")
+    wav = b"RIFF" + b"\0" * 64
+    for vid, name, source in (("ch-dad", "Dad", "character"), ("ch-ortwin", "Lord Ortwin", "character"),
+                              ("ch-mine", "Grumpy Guard", "character"), ("studio", "Mother", "voicestudio")):
+        voices.add(name, wav, "hi", source=source, voice_id=vid)
+
+    def book(book_id, **characters):
+        (tmp_path / "books" / book_id).mkdir(parents=True)
+        (tmp_path / "books" / book_id / "book.json").write_text("{}")
+        store.save_script(book_id, {"characters": characters})
+
+    book("vol1", dad={"name": "Gunther", "aliases": ["Dad", "Captain"], "voice": "ch-dad"},
+         ortwin={"name": "Ortwin", "aliases": ["Lord Ortwin"], "voice": "ch-ortwin"},
+         guard={"name": "Guard", "aliases": ["a guard"], "voice": "ch-mine"},
+         mother={"name": "Effa", "aliases": ["Mother"], "voice": "studio"})
+    book("vol2", gunther={"name": "Gunther", "aliases": ["Dad"], "voice": "ch-dad"},
+         ortwin={"name": "Lord Ortwin", "aliases": ["Ortwin"], "voice": "ch-ortwin"})
+    app = {dz.DRAMA_STORE_KEY: store, VOICES_KEY: voices}
+    assert dz.name_voices(app) == [("Dad", "Gunther")]
+    # still "Lord Ortwin" in vol2: the voice keeps that name rather than flip between books;
+    # a name the reader gave the voice, and their own voices, are kept
+    assert [voices.get(v).name for v in ("ch-dad", "ch-ortwin", "ch-mine", "studio")] == \
+        ["Gunther", "Lord Ortwin", "Grumpy Guard", "Mother"]
+    assert dz.name_voices(app) == []
+
+
+# ---------------------------------------------------------------- the voice pool
+
+
+def test_pool_options_follow_gender_and_age():
+    teen = {"name": "Kid", "gender": "female", "age": "teen"}
+    assert dz.pool_options(teen) == ["pool-f-teen", "pool-f-teen-strong", "pool-f-teen-soft"]
+    assert dz.pool_voice(teen) == "pool-f-teen"
+    assert dz.pool_voice({**teen, "pool_pick": "pool-f-teen-soft"}) == "pool-f-teen-soft"
+    # a pick that no longer suits them (the profile now says elderly) gives way to the plain voice
+    old = {**teen, "pool_pick": "pool-f-teen-soft", "profile_user": {"apparent_age": "elderly"}}
+    assert dz.pool_voice(old) == "pool-f-elderly"
+    assert dz.pool_options({"name": "Guard", "gender": "male", "age": "young adult"})[0] == "pool-m-adult-young"
+    # unknown gender: both; unknown age: every age
+    assert {"pool-f-child", "pool-m-child"} <= set(dz.pool_options({"name": "Voice", "gender": "unknown", "age": "child"}))
+    assert len(dz.pool_options({"name": "Voice"})) == len(dz.POOL)
+    assert dz.pool_voice({"name": "Voice"}) == "pool-m-adult"
+    assert all(vid.startswith("pool-") for vid in dz.POOL)
+
+
+async def test_pick_pool_voices_keeps_only_fitting_picks():
+    script = {"characters": {"tom": {"name": "Tom", "gender": "male", "age": "child"},
+                             "ann": {"name": "Ann", "gender": "female", "age": "adult",
+                                     "profile": {"speech_style": "loud, bossy"}}}}
+
+    class FakeLlm:
+        async def complete(self, session, system, user, schema, max_tokens=0, **kw):
+            assert "Female Adult - Strong" in user and "speaks: loud, bossy" in user
+            return {"characters": [{"id": "tom", "voice": "Female Child"},  # wrong gender: dropped
+                                   {"id": "ann", "voice": "Female Adult - Strong"}]}
+
+    picks = await dz.pick_pool_voices(FakeLlm(), None, {"title": "B"}, script, ["tom", "ann"])
+    assert picks == {"ann": "pool-f-adult-strong"}
+
+
+async def test_generic_voices_are_picked_and_old_pool_voices_replaced(drama_client, monkeypatch):
+    import aiohttp
+
+    from elvenreader_server.app import VOICES_KEY
+
+    c = drama_client
+    app = c.server.app
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    assert app[dz.DRAMA_STORE_KEY].script("book1")["characters"]["tom"]["pool_pick"] == "pool-m-child"
+    # A book cast with the old pool: its characters move to the new one, and the old voices go.
+    voices = app[VOICES_KEY]
+    voices.add("Pool: unknown child", wav_bytes(b"\x10\x00" * 2400, 24000), "Hi.", source="character",
+               voice_id="pool-unknown-child")
+    store = app[dz.DRAMA_STORE_KEY]
+    script = store.script("book1")
+    script["characters"]["tom"]["voice"] = "pool-unknown-child"
+    script["characters"]["tom"].pop("pool_pick")
+    script.pop("pool_v", None)
+    store.save_script("book1", script)
+    async with aiohttp.ClientSession() as session:
+        await app[dz.ANALYZER_KEY]._backfill_pool(session)
+    script = store.script("book1")
+    assert script["characters"]["tom"]["voice"] == "pool-m-child" and script["pool_v"] == dz.POOL_V
+    assert voices.get("pool-unknown-child") is None
+    assert all(voices.get(vid) for vid in dz.POOL)  # every generic voice exists, for switching to
+    # A pool voice whose description changed is designed again in place; one the reader edited is kept.
+    analyzer = app[dz.ANALYZER_KEY]
+    monkeypatch.setitem(dz.POOL, "pool-m-child", ("Male Child", "A boy of about nine with a bright voice."))
+    monkeypatch.setitem(dz.POOL, "pool-f-child", ("Female Child", "A girl of about nine with a bright voice."))
+    voices.update("pool-f-child", description="My own girl.")  # edited: it has a history now
+    assert await analyzer._ensure_pool()
+    assert voices.get("pool-m-child").instruct == "A boy of about nine with a bright voice."
+    assert voices.get("pool-f-child").description == "My own girl."
+    assert store.script("book1")["characters"]["tom"]["voice"] == "pool-m-child"
+
+async def test_past_voices_list_earlier_versions_and_voices_and_bring_one_back(drama_client):
+    from elvenreader_server.app import VOICES_KEY
+
+    c = drama_client
+    app = c.server.app
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    voices = app[VOICES_KEY]
+    voices.add("Second", wav_bytes(b"\x20\x00" * 2400, 24000), "Hi.", voice_id="v2")
+    await c.patch("/api/books/book1/characters/alice", json={"voice": "nar"}, headers=AUTH)
+    await c.patch("/api/books/book1/characters/alice", json={"voice": "v2"}, headers=AUTH)  # nar: a voice she had
+    await asyncio.sleep(0.2)  # reports keep the time to 0.1 s: the change below comes after
+    first_audio = voices.get("v2").audio_sha
+    voices.replace_audio("v2", wav_bytes(b"\x30\x00" * 2400, 24000), "New.")  # v2 as it was: an earlier version
+    past = (await (await c.get("/api/books/book1/characters/alice/past-voices", headers=AUTH)).json())["past"]
+    assert [(p["kind"], p["voice"]) for p in past] == [("version", "v2"), ("voice", "nar")]
+    audio = await c.get(f"/api/voices/v2/history/{past[0]['stamp']}/audio", headers=AUTH)
+    assert audio.status == 200 and (await audio.read())[:4] == b"RIFF"
+    r = await c.post(f"/api/voices/v2/history/{past[0]['stamp']}/restore", headers=AUTH)
+    assert r.status == 200 and voices.get("v2").audio_sha == first_audio
+    # the version it replaced is a past voice now (so bringing one back can be undone the same way)
+    past = (await (await c.get("/api/books/book1/characters/alice/past-voices", headers=AUTH)).json())["past"]
+    assert past[0]["kind"] == "version" and len(past) <= 3
+    assert (await c.get("/api/books/book1/characters/nobody/past-voices", headers=AUTH)).status == 404
 
 
 # ---------------------------------------------------------------- voice profiles
@@ -1038,6 +1438,36 @@ async def test_an_uploaded_epub_is_parsed_analysed_and_cast(drama_client, tmp_pa
     r = await c.post("/api/library/import", json={"path": str(tmp_path / "missing.epub")}, headers=AUTH)
     assert r.status == 400
     assert (await c.post("/api/library/import", data=aiohttp.FormData({"x": "1"}), headers=AUTH)).status == 400
+
+
+async def test_books_labelled_before_spoken_forms_get_them_between_analyses(aiohttp_client, tmp_path, monkeypatch):
+    asked = []
+
+    async def fake(self, session, system, user, schema, max_tokens=2048, **kw):
+        assert "spoken" in schema["properties"], "only the spoken forms are asked for"
+        asked.append(user)
+        return {"spoken": [{"id": n, "written": "whaaaaaaat", "said": "what"}
+                           for n, line in (ln.split("] ", 1) for ln in (x[1:] for x in user.splitlines()))
+                           if "whaaa" in line]}
+
+    monkeypatch.setattr(dz.LocalLlm, "complete", fake)
+    app = make_app(make_cfg(tmp_path), specs=SPECS)
+    store = app[dz.DRAMA_STORE_KEY]
+    paras = ["\u201cWh\u2026 whaaaaaaat?!\u201d she cried.", "\u201cIt\u2019s fine,\u201d he said."]
+    store.save_book("old1", {"title": "Old", "chapters": [{"title": "One", "paragraphs": paras, "quotes": [
+        ["c0p0q0", 0, 0, paras[0].index("\u201d") + 1], ["c0p1q0", 1, 0, paras[1].index("\u201d") + 1]]}]})
+    store.save_script("old1", {**store.script("old1"), "status": "done", "lines": {
+        "c0p0q0": {"speaker": "ann", "delivery": "shouting"}, "c0p1q0": {"speaker": "tom", "delivery": None}}})
+    c = await aiohttp_client(app)
+    for _ in range(100):
+        if store.script("old1").get("spoken_forms") == dz.SPOKEN_FORMS:
+            break
+        await asyncio.sleep(0.05)
+    s = store.script("old1")
+    assert s.get("spoken_forms") == dz.SPOKEN_FORMS and len(asked) == 1
+    assert s["lines"]["c0p0q0"]["say"] == "\u201cWh\u2026 what?!\u201d" and "say" not in s["lines"]["c0p1q0"]
+    pub = await (await c.get("/api/books/old1/script", headers=AUTH)).json()
+    assert pub["lines"]["c0p0q0"]["say"] == "\u201cWh\u2026 what?!\u201d"
 
 
 def test_llm_restarts_after_crash_mid_request(monkeypatch, tmp_path):
@@ -1175,6 +1605,16 @@ def test_applying_a_series_keeps_voices_the_reader_chose():
     assert script["characters"]["ann"]["voice"] == "pool-female-adult"
     assert sr.unseed(script, "Saga") == 3  # none of them has a line here
     assert script["characters"] == {}
+    # Only characters of earlier volumes come in; a walk-on of one of them doesn't, one who recurs does.
+    data["books"].update({"v0": "Saga 0", "v3": "Saga 3"})
+    data["characters"]["toto"] = {"name": "Toto", "aliases": [], "role": "extra", "books": ["v1"]}
+    data["characters"]["guard"] = {"name": "Guard", "aliases": [], "role": "extra", "books": ["v0", "v1"]}
+    data["characters"]["kirito"] = {"name": "Kirito", "aliases": [], "role": "main", "books": ["v3"]}
+    sr.seed(app, "v2v2v2v2", script)
+    names = [c["name"] for c in script["characters"].values()]
+    assert "Guard" in names and "Toto" not in names and "Kirito" not in names
+    sr.seed(app, "v2v2v2v2", script, earlier_only=False)  # a labelled book taking the series' voices
+    assert "Kirito" in [c["name"] for c in script["characters"].values()]
 
 
 async def wait_cast(c, book):
@@ -1389,7 +1829,7 @@ async def test_gpu_status_for_the_banner(drama_client):
     g = await (await drama_client.get("/api/gpu", headers=AUTH)).json()
     assert g["mode"] == "adaptive" and g["activity"]["state"] == "idle"
     assert set(g["engines"]["speech"]) >= {"state", "loading_s", "expected_s"} and "voice_designer" in g["engines"]
-    assert g["llm"]["state"] == "stopped" and g["llm"]["book"] is None
+    assert g["llm"]["state"] == "stopped" and g["llm"]["book"] is None and g["llm"]["backend"] == "local"
 
 def test_book_queue_reorders_removes_and_persists(tmp_path):
     q = dz.BookQueue(tmp_path / "q.json")
@@ -1524,6 +1964,40 @@ async def test_queue_analyse_now_and_send_to_bottom_set_the_current_book_aside(a
     saved = next(tmp_path.rglob("analysis-queue.json"))
     assert json.loads(saved.read_text())["order"] == ["b2", "b1", "b3"]  # no duplicates of the set-aside book
 
+
+async def test_series_volumes_are_always_analysed_in_order(aiohttp_client, tmp_path, monkeypatch):
+    async def blocking(self, *a, **k):  # every book stays "being analysed" until set aside
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(dz.LocalLlm, "complete", blocking)
+    c = await aiohttp_client(make_app(make_cfg(tmp_path), specs=SPECS))
+
+    async def add(b, title):
+        await c.post(f"/api/books/{b}", json={**book_payload(), "title": title, "analyze": True}, headers=AUTH)
+
+    async def current_is(book):
+        for _ in range(100):
+            q = await (await c.get("/api/queue", headers=AUTH)).json()
+            if q["current"] and q["current"]["id"] == book:
+                return q
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"{book} never started: {q}")
+
+    await add("s3", "Saga, Vol. 3")
+    await current_is("s3")
+    await add("s1", "Saga, Vol. 1")  # an earlier volume: the later one steps aside for it
+    q = await current_is("s1")
+    assert [b["id"] for b in q["queued"]] == ["s3"]
+    await add("s2", "Saga, Vol. 2")
+    assert [b["id"] for b in (await current_is("s1"))["queued"]] == ["s2", "s3"]
+    # "Analyse now" on a later volume doesn't stop an earlier one; a hand-made order is followed by volume
+    await c.post("/api/queue/s3/now", headers=AUTH)
+    await c.put("/api/queue", json={"order": ["s3", "s2"]}, headers=AUTH)
+    await asyncio.sleep(0.2)
+    assert (await current_is("s1"))["current"]["id"] == "s1"
+    await c.post("/api/queue/s1/bottom", headers=AUTH)  # sent to the back, it still goes first: the earliest volume
+    await current_is("s1")
+
 def test_labelling_prompt_shows_the_text_after_the_passage():
     paras = [f"Paragraph {i} \u201cLine {i}.\u201d" if i % 2 else f"Narration {i} " + "word " * 40 for i in range(30)]
     quotes = [[f"c0p{i}q0", i, *dz.quote_regions(p)[0]] for i, p in enumerate(paras) if dz.quote_regions(p)]
@@ -1577,3 +2051,142 @@ async def test_cover_thumbnails_and_series_sheets(drama_client):
     assert max(sheet.getpixel((180, 90))) - min(sheet.getpixel((180, 90))) < 20  # no cover: a grey cell
     assert (await c.get("/api/covers?ids=../x", headers=AUTH)).status == 400
     assert (await c.get("/api/covers", headers=AUTH)).status == 400
+
+def test_describing_the_cast_copes_with_a_profile_stored_as_null():
+    class Llm:
+        class cfg:
+            llm_context = 32768
+
+        async def complete(self, session, system, user, schema, max_tokens=2048, **kw):
+            return {"characters": [{"name": "Tom", "appearance": "a small boy", "gender": "male", "age": "child",
+                                    "accent": "neutral", "temperament": "shy", "voice": "A shy boy."}]}
+
+    book = {"title": "T", "chapters": [{"title": "x", "paragraphs": ["\u201cHi,\u201d Tom said.", "\u201cBye.\u201d"],
+                                        "quotes": [["c0p0q0", 0, 0, 5], ["c0p1q0", 1, 0, 6]]}]}
+    script = {"characters": {"tom": {"name": "Tom", "aliases": [], "profile": None}},
+              "lines": {"c0p0q0": {"speaker": "tom", "delivery": None}, "c0p1q0": {"speaker": "tom", "delivery": None}}}
+    asyncio.run(dz.describe_cast(Llm(), None, book, script))
+    assert script["characters"]["tom"]["profile"]["appearance"] == "a small boy"
+
+
+async def test_who_narrates_a_section_can_be_corrected(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    r = await c.patch("/api/books/book1/narration", json={"chapter": 0, "paragraph": 0, "narrator": "alice"}, headers=AUTH)
+    assert r.status == 200
+    s = await r.json()
+    assert s["narration"][0] == [0, 0, "alice"] and s["narration_fixed"] == {"0:0": "alice"}
+    reports = [json.loads(x) for x in (c.server.app[dz.DRAMA_STORE_KEY].dir("book1") / "reports.jsonl")
+               .read_text(encoding="utf-8").splitlines()]
+    assert reports[-1]["type"] == "narration" and reports[-1]["after"]["narrator"] == "alice"
+    # the analysis running again keeps it
+    script = c.server.app[dz.DRAMA_STORE_KEY].script("book1")
+    assert dz.compute_narration(c.server.app[dz.DRAMA_STORE_KEY].book("book1"), script)[0] == [0, 0, "alice"]
+    # back to what the analysis found
+    s = await (await c.patch("/api/books/book1/narration", json={"chapter": 0, "paragraph": 0, "narrator": "auto"},
+                             headers=AUTH)).json()
+    assert s["narration_fixed"] == {} and [0, 0, "alice"] not in s["narration"]
+    assert (await c.patch("/api/books/book1/narration", json={"chapter": 0, "paragraph": 0, "narrator": "nobody"},
+                          headers=AUTH)).status == 404
+    assert (await c.patch("/api/books/book1/narration", json={"chapter": 9, "paragraph": 0, "narrator": None},
+                          headers=AUTH)).status == 400
+
+
+async def test_a_line_can_be_read_as_part_of_the_narration(drama_client):
+    from elvenreader_server import bookfile
+
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    r = await c.patch("/api/books/book1/lines/c0p2q11", json={"mention": True}, headers=AUTH)
+    line = (await r.json())["lines"]["c0p2q11"]
+    assert line["mention"] and line["speaker"] is None and line["delivery"] is None and line["corrected"]
+    pub = await (await c.get("/api/books/book1/script", headers=AUTH)).json()
+    book = c.server.app[dz.DRAMA_STORE_KEY].book("book1")
+    segs = bookfile.segments(book, pub)
+    assert "c0p2q11" not in [s["id"] for s in segs]  # read inside the paragraph's narration
+    assert any(s["paragraph"] == 2 and s["kind"] == "narration" for s in segs)
+    # and back: a line of its own, with the speaker given
+    r = await c.patch("/api/books/book1/lines/c0p2q11", json={"mention": False, "speaker": "alice"}, headers=AUTH)
+    line = (await r.json())["lines"]["c0p2q11"]
+    assert line["speaker"] == "alice" and not line.get("mention")
+    reports = (await (await c.get("/api/books/book1/reports", headers=AUTH)).json())["reports"]
+    assert [x["type"] for x in reports if x["type"] == "mention"] == ["mention", "mention"]
+
+
+async def test_users_read_everything_but_change_only_their_books(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)
+    await wait_done(c)
+    assert (await (await c.get("/api/me", headers=AUTH)).json())["owner"] is True
+    sam = await (await c.post("/api/users", json={"name": "Sam"}, headers=AUTH)).json()
+    SAM = {"Authorization": f"Bearer {sam['token']}"}
+    assert await (await c.get("/api/me", headers=SAM)).json() == {"id": sam["id"], "name": "Sam", "owner": False}
+
+    # Sam reads the admin's book, read-only.
+    books = (await (await c.get("/api/books", headers=SAM)).json())["books"]
+    assert [(b["id"], b["can_edit"]) for b in books] == [("book1", False)]
+    assert (await (await c.get("/api/books/book1/script", headers=SAM)).json())["can_edit"] is False
+    assert (await (await c.get("/api/books/book1/script", headers=AUTH)).json())["can_edit"] is True
+    r = await c.patch("/api/books/book1/lines/c0p2q11", json={"speaker": "alice"}, headers=SAM)
+    assert r.status == 403 and "books you added" in (await r.json())["error"]
+    assert (await c.patch("/api/books/book1/characters/alice", json={"role": "extra"}, headers=SAM)).status == 403
+    assert (await c.post("/api/books/book1/analyze", json={}, headers=SAM)).status == 403
+    assert (await c.post("/api/pronunciations", json={"term": "Alice", "respelling": "Aleese", "scope": "book",
+                                                      "book": "book1"}, headers=SAM)).status == 403
+    # ...but may report wrong analysis and keep a place in it.
+    assert (await c.post("/api/books/book1/reports", json={"line": "c0p3q14"}, headers=SAM)).status in (200, 201)
+    assert (await c.put("/api/books/book1/bookmark", json={"chapter": 0, "paragraph": 1}, headers=SAM)).status == 200
+
+    # A book Sam adds is his to change (and the admin's).
+    await c.post("/api/books/book2", json={**book_payload(), "analyze": True}, headers=SAM)
+    await wait_done(c, "book2")
+    books = {b["id"]: b["can_edit"] for b in (await (await c.get("/api/books", headers=SAM)).json())["books"]}
+    assert books == {"book1": False, "book2": True}
+    assert (await c.patch("/api/books/book2/lines/c0p2q11", json={"speaker": "alice"}, headers=SAM)).status == 200
+    assert (await c.post("/api/pronunciations", json={"term": "Alice", "respelling": "Aleese", "scope": "book",
+                                                      "book": "book2"}, headers=SAM)).status in (200, 201)
+    assert (await c.patch("/api/books/book2/lines/c0p2q11", json={"speaker": "tom"}, headers=AUTH)).status == 200
+
+    # Site-wide things are the admin's.
+    assert (await c.get("/api/users", headers=SAM)).status == 403
+    assert (await c.post("/api/users", json={"name": "Eve"}, headers=SAM)).status == 403
+    assert (await c.delete("/api/voices/nar", headers=SAM)).status == 403
+    assert (await c.put("/api/queue", json={"order": []}, headers=SAM)).status == 403
+
+
+async def test_user_pronunciations_follow_the_users_books(drama_client):
+    c = drama_client
+    await c.post("/api/books/book1", json={**book_payload(), "analyze": True}, headers=AUTH)  # the admin's
+    await wait_done(c)
+    sam = await (await c.post("/api/users", json={"name": "Sam"}, headers=AUTH)).json()
+    SAM = {"Authorization": f"Bearer {sam['token']}"}
+    await c.post("/api/books/book2", json={**book_payload(), "analyze": True}, headers=SAM)
+    await wait_done(c, "book2")
+    r = await c.post("/api/pronunciations", json={"term": "Alice", "respelling": "Aleese", "scope": "user"}, headers=AUTH)
+    assert r.status == 201 and (await r.json())["scope"] == "user"
+    entry = await r.json()
+    mine = await (await c.get("/api/pronunciations?book=book1", headers=SAM)).json()
+    assert [e["term"] for e in mine["user"]] == ["Alice"]  # the admin's book is read with the admin's entries
+    his = await (await c.get("/api/pronunciations?book=book2", headers=SAM)).json()
+    assert his["user"] == [] and his["users"] == [sam["id"]]
+    # Sam keeps his own, and can't change the admin's.
+    assert (await c.post("/api/pronunciations", json={"term": "Tom", "respelling": "Tome", "scope": "user"},
+                         headers=SAM)).status == 201
+    assert [e["term"] for e in (await (await c.get("/api/pronunciations?book=book2", headers=SAM)).json())["user"]] == ["Tom"]
+    assert (await c.patch(f"/api/pronunciations/{entry['id']}", json={"respelling": "x"}, headers=SAM)).status == 403
+    assert (await c.delete(f"/api/pronunciations/{entry['id']}", headers=SAM)).status == 403
+    for body in ({"term": "X", "respelling": "y", "scope": "global"}, {"term": "X", "respelling": "y"}):
+        assert (await c.post("/api/pronunciations", json=body, headers=AUTH)).status == 400
+    # The Pronunciations page: Sam sees his own and those of his books' series; the admin sees everyone's.
+    await c.post("/api/pronunciations", json={"term": "Bob", "respelling": "Bawb", "scope": "series", "book": "book1"},
+                 headers=AUTH)
+    his = await (await c.get("/api/pronunciations?all=1", headers=SAM)).json()
+    assert sorted(e["term"] for e in his["entries"]) == ["Bob", "Tom"]  # book2 is in book1's series; not the admin's own
+    assert {e["term"]: e["can_edit"] for e in his["entries"]} == {"Bob": False, "Tom": True}
+    assert list(his["books"]) == ["book2"] and [x["can_edit"] for x in his["series"]] == [False]
+    everyone = await (await c.get("/api/pronunciations?all=1", headers=AUTH)).json()
+    assert sorted(e["term"] for e in everyone["entries"]) == ["Alice", "Bob", "Tom"]
+    assert everyone["users"][sam["id"]] == "Sam" and all(e["can_edit"] for e in everyone["entries"])
+

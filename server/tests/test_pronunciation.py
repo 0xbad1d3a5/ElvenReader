@@ -70,27 +70,27 @@ def test_speakable_respelling_lowercases_stress_caps_only():
     assert speakable_respelling("Siobhan Shivawn") == "Siobhan Shivawn"
 
 
-def test_book_entries_override_global_for_same_term():
+def test_book_entries_override_the_series_for_same_term():
     entries = [
-        E("Hermione", "her-MY-oh-nee"),
+        E("Hermione", "her-MY-oh-nee", series="Potter"),
         E("hermione", "HER-mee-own", book="b1"),
-        E("Gandalf", "GAN-dalf"),
+        E("Gandalf", "GAN-dalf", series="Potter"),
     ]
-    for_b1 = {e.term.casefold(): e.respelling for e in effective_entries(entries, "b1")}
+    for_b1 = {e.term.casefold(): e.respelling for e in effective_entries(entries, "b1", "Potter")}
     assert for_b1 == {"hermione": "HER-mee-own", "gandalf": "GAN-dalf"}
-    for_other = {e.term.casefold(): e.respelling for e in effective_entries(entries, "b2")}
+    for_other = {e.term.casefold(): e.respelling for e in effective_entries(entries, "b2", "Potter")}
     assert for_other["hermione"] == "her-MY-oh-nee"
-    assert len(effective_entries(entries, None)) == 2  # no book: global entries only
+    assert effective_entries(entries, None) == []  # no book or series: nothing applies
 
 
 def test_store_crud_and_listing(tmp_path):
     store = PronunciationStore(tmp_path / "p.json")
-    g = store.add("Hermione", "her-MY-oh-nee")
+    g = store.add("Hermione", "her-MY-oh-nee", series="Potter")
     b = store.add("Hermione", "HER-mee-own", book="b1")
-    store.add("Hermione", "her-MY-oh-nee-2")  # same scope + term replaces
+    store.add("Hermione", "her-MY-oh-nee-2", series="potter")  # same scope + term replaces
     assert len(store.all()) == 2
-    listing = store.listing("b1")
-    assert [e["respelling"] for e in listing["global"]] == ["her-MY-oh-nee-2"]
+    listing = store.listing("b1", "Potter")
+    assert [e["respelling"] for e in listing["series"]] == ["her-MY-oh-nee-2"] and "global" not in listing
     assert [e["scope"] for e in listing["book"]] == ["book"]
     assert store.update(b.id, respelling="her-MEE-own").respelling == "her-MEE-own"
     assert store.delete(b.id) and not store.delete(b.id)
@@ -98,9 +98,11 @@ def test_store_crud_and_listing(tmp_path):
     assert [e.respelling for e in reloaded.all()] == ["her-MY-oh-nee-2"]
     assert g.id not in [e.id for e in reloaded.all()]  # replaced entry is gone
     with pytest.raises(ValueError):
-        store.add("...", "x")
+        store.add("...", "x", series="Potter")
     with pytest.raises(ValueError):
-        store.add("Name", "")
+        store.add("Name", "", series="Potter")
+    with pytest.raises(ValueError):  # no site-wide entries
+        store.add("Name", "nayme")
 
 
 def test_editing_an_entry_changes_text_version_and_cache_key():
@@ -128,9 +130,8 @@ def test_audio_cache_roundtrip_and_prune(tmp_path):
     assert cache.stats()["bytes"] <= 3000
 
 
-def test_series_entries_sit_between_global_and_book():
+def test_series_entries_apply_to_their_series_and_books_win():
     entries = [
-        E("Myne", "mine"),
         E("myne", "my-nuh", series="Ascendance of a Bookworm"),
         E("Myne", "MEE-nuh", book="v3", case_sensitive=True),
         E("Lutz", "loots", series="ascendance-of-a-bookworm!"),  # matched like series names are
@@ -139,8 +140,8 @@ def test_series_entries_sit_between_global_and_book():
     say = lambda book, series: {e.term.casefold(): e.respelling for e in effective_entries(entries, book, series)}
     assert say("v1", "Ascendance of a Bookworm") == {"myne": "my-nuh", "lutz": "loots"}
     assert say("v3", "Ascendance of a Bookworm") == {"myne": "MEE-nuh", "lutz": "loots"}
-    assert say("x", "Sasaki and Peeps") == {"myne": "mine"}
-    assert say(None, None) == {"myne": "mine"}
+    assert say("x", "Sasaki and Peeps") == {}
+    assert say(None, None) == {}
 
 
 def test_series_entries_follow_a_rename_or_merge(tmp_path):
@@ -152,4 +153,29 @@ def test_series_entries_follow_a_rename_or_merge(tmp_path):
     assert store.rename_series("Bookworm", "Ascendance of a Bookworm") == 1  # Myne moves; Lutz keeps the target's
     listing = store.listing(None, "ascendance of a bookworm")
     assert sorted((e["term"], e["respelling"]) for e in listing["series"]) == [("Lutz", "lootz"), ("Myne", "my-nuh")]
-    assert listing["global"] == [] and all(e["scope"] == "series" for e in listing["series"])
+    assert all(e["scope"] == "series" for e in listing["series"])
+
+
+def test_user_entries_apply_to_their_books_under_series_and_book():
+    entries = [
+        E("ma'am", "MAM", user="p-me"),
+        E("Myne", "mine", user="p-me"),
+        E("myne", "my-nuh", series="Bookworm"),
+        E("Lutz", "loots", user="p-her"),
+    ]
+    say = lambda book, series, users: {e.term.casefold(): e.respelling for e in effective_entries(entries, book, series, users)}
+    assert say("v1", "Bookworm", ["p-me"]) == {"ma'am": "MAM", "myne": "my-nuh"}  # the series wins
+    assert say("v1", "Bookworm", ["p-her"]) == {"lutz": "loots", "myne": "my-nuh"}  # another user's book: not mine
+    assert say("x", "Other", []) == {}
+
+
+def test_store_user_scope(tmp_path):
+    store = PronunciationStore(tmp_path / "p.json")
+    mine = store.add("ma'am", "MAM", user="p-me")
+    assert mine.scope == "user" and store.add("ma'am", "MAHM", user="p-me").id != mine.id
+    assert [e.respelling for e in store.all()] == ["MAHM"]  # same user + term replaces
+    assert store.add("ma'am", "x", user="p-me", book="b1").scope == "book"  # a book is narrower
+    listing = store.listing("b1", None, ["p-me"])
+    assert [e["respelling"] for e in listing["user"]] == ["MAHM"] and [e["respelling"] for e in listing["book"]] == ["x"]
+    assert store.listing("b2", None, ["p-other"])["user"] == []
+

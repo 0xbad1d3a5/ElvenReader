@@ -22,11 +22,12 @@ _LOOPBACK = {"127.0.0.1", "::1"}
 
 
 async def import_book(app: web.Application, path: Path, *, analyze: bool = True, cast: bool = True,
-                      reanalyze: bool = False, engine: str | None = None, series: str | None = None) -> dict:
+                      reanalyze: bool = False, engine: str | None = None, series: str | None = None,
+                      added_by: str | None = None) -> dict:
     """Parses and stores an EPUB; queues its analysis (and casting) unless it's already done. Returns the
     book's summary with its id and series. A book already in the library keeps its analysis (re-numbered if a
     newer parser split it differently). `series` names the book's series before the analysis starts (by default
-    it is detected from the title)."""
+    it is detected from the title). `added_by`: the user whose library it joins."""
     from .dramatize import ANALYZER_KEY, DRAMA_STORE_KEY, migrate_ids, picture_refs, reset_for_analysis
     from .series import _write_meta_series, series_info
 
@@ -38,7 +39,8 @@ async def import_book(app: web.Application, path: Path, *, analyze: bool = True,
     d.mkdir(parents=True, exist_ok=True)
     async with store.lock(book_id):
         old = store.book(book_id)
-        store.save_book(book_id, {**payload, **({"cover": base64.b64encode(cover).decode()} if cover else {})})
+        store.save_book(book_id, {**payload, **({"cover": base64.b64encode(cover).decode()} if cover else {})},
+                        added_by=added_by)
         if old is not None:
             s = store.script(book_id)
             if migrate_ids(old, store.book(book_id), s):
@@ -91,11 +93,26 @@ def _flag(value, default: bool) -> bool:
     return str(value).strip().lower() not in ("0", "false", "no", "off", "")
 
 
+async def import_package(app: web.Application, path: Path, replace: bool = False) -> dict:
+    """Adds a book file (.elvenbook, see bookfile.py) to the library; returns the book's summary."""
+    from .bookfile import import_file
+    from .dramatize import DRAMA_STORE_KEY
+    from .series import series_info
+
+    book_id = await asyncio.to_thread(import_file, app, path, replace)
+    store = app[DRAMA_STORE_KEY]
+    info = series_info(app, book_id)
+    return {**(store.summary(book_id) or {}), "id": book_id, "status": store.script(book_id).get("status", "none"),
+            "series": info["series"], "series_auto": info["auto"], "series_detected": info["detected"]}
+
+
 async def import_route(request: web.Request) -> web.Response:
-    """POST /api/library/import: multipart with an "epub" file (from any device; what the website uses), or JSON
-    {"path": ...} for a file on this PC (loopback requests only; for process_book.py). Options: analyze, cast
-    (default true), reanalyze, engine, series (default: detected from the title)."""
+    """POST /api/library/import: multipart with an "epub" (or "book") file, from any device; or JSON
+    {"path": ...} for a file on this PC (loopback requests only; for process_book.py). The file is an EPUB or a
+    book file (.elvenbook). EPUB options: analyze, cast (default true), reanalyze, engine, series (default:
+    detected from the title). Book file option: replace (a book already in the library; default false)."""
     from .app import CONFIG_KEY
+    from .bookfile import SUFFIX
 
     cfg = request.app[CONFIG_KEY]
     options: dict = {}
@@ -105,8 +122,9 @@ async def import_route(request: web.Request) -> web.Response:
             uploads = cfg.data_path / "uploads"
             uploads.mkdir(parents=True, exist_ok=True)
             async for part in await request.multipart():
-                if part.name == "epub":
-                    tmp = uploads / f"{uuid.uuid4().hex}.epub"
+                if part.name in ("epub", "book"):
+                    suffix = SUFFIX if (part.filename or "").lower().endswith(SUFFIX) else ".epub"
+                    tmp = uploads / f"{uuid.uuid4().hex}{suffix}"
                     with open(tmp, "wb") as f:
                         while chunk := await part.read_chunk(1 << 20):
                             f.write(chunk)
@@ -124,12 +142,36 @@ async def import_route(request: web.Request) -> web.Response:
                 return web.json_response({"error": "Paths can only be added from this PC; upload the file instead"},
                                          status=403)
             path = Path(str(options.get("path") or "").strip().strip('"'))
-            if not path.is_file() or path.suffix.lower() != ".epub":
-                return web.json_response({"error": f"No EPUB file at {path}"}, status=400)
+            if not path.is_file() or path.suffix.lower() not in (".epub", SUFFIX):
+                return web.json_response({"error": f"No EPUB or {SUFFIX} file at {path}"}, status=400)
+        if path.suffix.lower() == SUFFIX:
+            from .bookfile import book_id_of
+            from .dramatize import DRAMA_STORE_KEY
+            from .permissions import can_book
+            from .profiles import current
+
+            try:
+                existing = await asyncio.to_thread(book_id_of, path)
+            except (ValueError, OSError):
+                existing = None
+            if existing and request.app[DRAMA_STORE_KEY].book(existing) is not None and _flag(options.get("replace"), False) \
+                    and not can_book(request, existing):
+                return web.json_response({"error": "That book is someone else's: it can't be replaced from here"}, status=403)
+            try:
+                book = await import_package(request.app, path, _flag(options.get("replace"), False))
+            except FileExistsError as exc:
+                return web.json_response({"error": f"{exc}; add it with replace to overwrite it"}, status=409)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
+            request.app[DRAMA_STORE_KEY].add_user(book["id"], current(request))
+            return web.json_response(book)
         try:
+            from .profiles import current
+
             book = await import_book(request.app, path, analyze=_flag(options.get("analyze"), True),
                                      cast=_flag(options.get("cast"), True), reanalyze=_flag(options.get("reanalyze"), False),
-                                     engine=(options.get("engine") or None), series=(options.get("series") or None))
+                                     engine=(options.get("engine") or None), series=(options.get("series") or None),
+                                     added_by=current(request))
         except epub.EpubError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception as exc:  # noqa: BLE001 - zipfile and XML errors from a broken file

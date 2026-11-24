@@ -8,6 +8,11 @@ Three states:
   loaded; analysis stops at once and waits until `design_pause_s` after the last design.
 * idle: nobody has used the site for `idle_after_s`. Analysis gets the whole GPU and new books' voices are
   created; when someone comes back, the LLM is stopped and the speech model loads again.
+
+And on top of reading, `crowded`: two or more people are listening to speech that has to be made (a reader whose
+page asked for a passage not made yet within READER_WINDOW_S). The speech models need all the GPU's time then, so
+analysis stops at once and waits until there has been at most one such reader for CROWD_HOLD_S (moving the LLM
+costs tens of seconds, so it doesn't come and go with every pause).
 """
 from __future__ import annotations
 
@@ -21,6 +26,8 @@ from aiohttp import web
 logger = logging.getLogger("elvenreader")
 
 READING, DESIGNING, IDLE = "reading", "designing", "idle"
+READER_WINDOW_S = 60.0  # a reader counts while their page asked for new speech within this
+CROWD_HOLD_S = 180.0  # analysis comes back this long after the last moment with two such readers
 
 
 class Activity:
@@ -33,6 +40,10 @@ class Activity:
         # and when someone starts designing voices (stop the LLM to make room for the designer).
         self.on_use: list[Callable[[], Awaitable[None]]] = []
         self.on_design: list[Callable[[], Awaitable[None]]] = []
+        # Called when a second reader starts needing new speech (stop the LLM: the speech models need the GPU).
+        self.on_crowd: list[Callable[[], Awaitable[None]]] = []
+        self._making: dict[str, float] = {}  # reader -> when their page last asked for speech not made yet
+        self.last_crowded = float("-inf")
         self._tasks: set[asyncio.Task] = set()
 
     @property
@@ -42,6 +53,30 @@ class Activity:
     @property
     def in_use(self) -> bool:
         return self.designing or time.monotonic() - self.last_use < self.idle_after_s
+
+    def readers(self) -> int:
+        """How many people are listening to speech that has to be made now."""
+        cutoff = time.monotonic() - READER_WINDOW_S
+        for r in [r for r, t in self._making.items() if t < cutoff]:
+            del self._making[r]
+        return len(self._making)
+
+    @property
+    def crowded(self) -> bool:
+        """Two or more readers need new speech (or did within CROWD_HOLD_S): analysis stays off the GPU."""
+        if self.readers() >= 2:
+            self.last_crowded = time.monotonic()
+        return time.monotonic() - self.last_crowded < CROWD_HOLD_S
+
+    def making(self, reader: str) -> None:
+        """A reader's page asked for a passage that has to be made (not in the cache or the book file)."""
+        was = self.readers() >= 2
+        self._making[reader] = time.monotonic()
+        self.touch()
+        if not was and self.readers() >= 2:
+            self.last_crowded = time.monotonic()
+            logger.info("%d people are listening to new speech: analysis leaves the GPU", self.readers())
+            self._run(self.on_crowd)
 
     @property
     def state(self) -> str:
@@ -82,6 +117,7 @@ class Activity:
     def json(self) -> dict:
         now = time.monotonic()
         return {"state": self.state, "in_use": self.in_use, "designing": self.designing,
+                "readers": self.readers(), "crowded": self.crowded,
                 "idle_in_s": round(max(0.0, self.idle_after_s - (now - self.last_use),
                                        self.design_pause_s - (now - self.last_design))),
                 "design_pause_left_s": round(max(0.0, self.design_pause_s - (now - self.last_design))),

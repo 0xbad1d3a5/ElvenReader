@@ -127,6 +127,21 @@ def _speakable(text: str) -> bool:
     return any(ch.isalpha() or unicodedata.category(ch) == "Nd" for ch in text)
 
 
+# A scene break: <hr>, an ornament picture, or the class publishers put on the paragraph after one
+# (<p class="space-break">). Kept on that paragraph ("break"), never as a paragraph of its own, so numbering stays.
+_BREAK_CLASS = re.compile(r"(?:^|[\s_-])(?:space|scene|section)[-_]?break[\w-]*(?:$|\s)", re.IGNORECASE)
+# A paragraph of nothing but separator signs ("* * *", "◆ ◆ ◆", "＊＊＊", "⁂"): a scene break written as text.
+_SEPARATOR = re.compile(r"(?:[*\u2042\u25c6\u25c7\u25cf\u25cb\u25a0\u25a1\u2666\u2726\u2727\u2756\u203b#~\uff0a\u2605\u2606]\s*){1,}")
+_QUOTE_MARK = re.compile("[\"\u201c\u201d\u300c\u300d\u300e\u300f\u00ab\u00bb]")
+
+
+def _is_break(el: Node) -> bool:
+    if el.tag == "hr":
+        return True
+    cls = el.attrs.get("class", "")
+    return bool(_BREAK_CLASS.search(cls)) or (el.tag == "img" and "ornament" in cls.lower().split())
+
+
 def _skip(el: Node) -> bool:
     if el.tag in SKIP:
         return True
@@ -147,8 +162,13 @@ class _Walker:
         self.base = base
         self.out: list[dict] = []
         self.pending: list[str] = []
+        self.brk = False  # a scene break before the next paragraph
+        self.silent: list[str] = []  # wordless lines before the next paragraph
+        self.alone: set[str] = set()  # pictures standing in a block of their own
 
     def picture(self, el: Node) -> None:
+        if _is_break(el):
+            self.brk = True
         if el.tag == "img":
             refs = [el.attrs.get("src", "")]
         elif el.tag == "svg":
@@ -164,7 +184,11 @@ class _Walker:
         if _skip(el):
             return
         if not any(c.tag in BLOCKS and not _skip(c) for c in el.elements()):
-            self.emit(self.inline_text(el), el.tag in HEADINGS)
+            before = len(self.pending)
+            text = self.inline_text(el)
+            if not clean(text) and len(self.pending) > before:
+                self.alone.update(self.pending[before:])  # pictures in a block of their own (no text at all)
+            self.emit(text, el.tag in HEADINGS)
             return
         run = []
         for node in el.children:
@@ -194,8 +218,17 @@ class _Walker:
     def emit(self, raw: str, heading: bool) -> None:
         text = clean(raw)
         if _speakable(text):
-            self.out.append({"text": text, "heading": heading, "images": list(self.pending)})
+            self.out.append({"text": text, "heading": heading, "images": list(self.pending), "break": self.brk,
+                             "silent": list(self.silent), "alone": [p for p in self.pending if p in self.alone]})
             self.pending.clear()
+            self.silent.clear()
+            self.brk = False
+        elif _SEPARATOR.fullmatch(text):
+            self.brk = True  # "* * *", "◆◆◆": a scene break written as text
+        elif text and _QUOTE_MARK.search(text):
+            # A wordless line ("“…?”", "“……!”"): nothing to say aloud, but someone reacts. Kept with the next
+            # paragraph, like a picture, so the paragraphs (and quotation IDs) are numbered as before.
+            self.silent.append(text)
 
 
 def extract_document(html: str, base: str = "") -> tuple[list[dict], list[str]]:
@@ -407,8 +440,42 @@ def parse(path: Path) -> dict:
             raise EpubError("No readable text in this EPUB")
         if carry:
             chapters[-1]["end_images"] += [p for p, _ in carry]
+        _ornament_breaks(chapters, read)
         cover = read(cover_path) if cover_path else None
     return _payload(title.strip(), author.strip(), language.strip() if language else None, chapters, cover)
+
+
+# A picture this small, standing alone between paragraphs, is an ornament marking a scene break (Way of Kings: a 14x12
+# glyph in <p class="centerimage">, with no class saying so). Illustrations are hundreds of pixels; small pictures
+# inside a sentence (Yen On draws some em dashes and foreign letters as pictures) are not breaks.
+ORNAMENT_MAX_PX = (240, 48)  # (width, height)
+
+
+def _ornament_breaks(chapters: list[dict], read) -> None:
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - Pillow is a server dependency
+        return
+    import io
+
+    sizes: dict[str, tuple[int, int] | None] = {}
+
+    def size(path: str):
+        if path not in sizes:
+            try:
+                data = read(path)
+                sizes[path] = Image.open(io.BytesIO(data)).size if data else None
+            except Exception:  # noqa: BLE001 - an unreadable picture is not an ornament
+                sizes[path] = None
+        return sizes[path]
+
+    for ch in chapters:
+        for pi, p in enumerate(ch["paragraphs"]):
+            alone = p.get("alone") or []
+            if pi and alone and not p.get("break"):
+                dims = [size(i) for i in alone]
+                if all(d and d[0] <= ORNAMENT_MAX_PX[0] and d[1] <= ORNAMENT_MAX_PX[1] for d in dims):
+                    p["break"] = True
 
 
 def _find_cover(opf: ET.Element, manifest: dict[str, tuple[str, str, str]]) -> str | None:
@@ -429,16 +496,24 @@ def _payload(title: str, author: str, language: str | None, chapters: list[dict]
     """BookPayload.build: paragraphs, quotations with their IDs, pictures."""
     out = []
     for ci, ch in enumerate(chapters):
-        paragraphs, quotes, images = [], [], {}
+        paragraphs, quotes, images, breaks, silent = [], [], {}, [], {}
         for pi, p in enumerate(ch["paragraphs"]):
             paragraphs.append(p["text"])
             for s, e in quote_regions(p["text"]):
                 quotes.append([f"c{ci}p{pi}q{s}", pi, s, e])
             if p["images"]:
                 images[str(pi)] = p["images"]
+            if p.get("break") and pi > 0:
+                breaks.append(pi)
+            if p.get("silent"):
+                silent[str(pi)] = p["silent"]
         entry = {"title": ch["title"], "paragraphs": paragraphs, "quotes": quotes}
         if images:
             entry["images"] = images
+        if breaks:
+            entry["breaks"] = breaks  # paragraphs that start a new scene
+        if silent:
+            entry["silent"] = silent  # wordless lines ("…?") shown before these paragraphs
         if ch["end_images"]:
             entry["end_images"] = ch["end_images"]
         out.append(entry)

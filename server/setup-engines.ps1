@@ -18,7 +18,18 @@ foreach ($name in $Names) {
     $py = Join-Path $venv "Scripts\python.exe"
     Write-Host "`n=== $name -> $venv" -ForegroundColor Cyan
 
-    if ($e.Git) {
+    if ($name -eq "breeze") {
+        # Breeze TTS 2: BreezeBlue's inference code (cloned) with its pinned packages; torch 2.9.1 for CUDA 12.8.
+        $src = Join-Path $models "src\$($e.Dir)"
+        if (-not (Test-Path $src)) { git clone $e.Git $src }
+        git -C $src fetch --quiet origin $e.Commit 2>$null
+        git -C $src checkout --quiet $e.Commit
+        if (-not (Test-Path $py)) { & $uv venv --python $e.Python $venv }
+        & $uv pip install --python $py torch==2.9.1+cu128 torchaudio==2.9.1+cu128 `
+            --extra-index-url $TorchIndex --index-strategy unsafe-best-match
+        & $uv pip install --python $py qwen-tts==0.1.1 transformers==4.57.3 "huggingface-hub>=0.34" "numpy>=2.0" `
+            "soundfile>=0.13" "triton-windows>=3.5,<3.6" --extra-index-url $TorchIndex --index-strategy unsafe-best-match
+    } elseif ($e.Git) {
         $src = Join-Path $models "src\$($e.Dir)"
         if (-not (Test-Path $src)) { git clone $e.Git $src }
         git -C $src fetch --quiet origin $e.Commit 2>$null
@@ -36,9 +47,11 @@ foreach ($name in $Names) {
         if (-not (Test-Path $py)) { & $uv venv --python $e.Python $venv }
         & $uv pip install --python $py torch==2.8.0+cu128 torchaudio==2.8.0+cu128 `
             --extra-index-url $TorchIndex --index-strategy unsafe-best-match
-        $pkg = @{ omnivoice = "omnivoice"; qwen3tts = "qwen-tts" }[$name]
+        $pkg = @{ omnivoice = "omnivoice"; qwen3tts = "qwen-tts"; voxcpm = "voxcpm" }[$name]
         & $uv pip install --python $py $pkg soundfile numpy huggingface_hub `
             --extra-index-url $TorchIndex --index-strategy unsafe-best-match
+        # VoxCPM2 runs about 4.5x faster with torch.compile, which needs Triton on Windows.
+        if ($name -eq "voxcpm") { & $uv pip install --python $py "triton-windows<3.5" }
     }
     & $py -c "import torch; print('torch', torch.__version__, 'CUDA', torch.cuda.is_available())"
 }

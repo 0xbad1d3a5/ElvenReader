@@ -10,6 +10,8 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .voxcpm_styles import INLINE, RENDER_VERSION
+
 
 @dataclass(frozen=True)
 class EngineSpec:
@@ -28,6 +30,32 @@ class EngineSpec:
     voice_design: bool = False  # can create a voice from a text description
     languages: str = "en"
     defaults: dict = field(default_factory=dict)
+    # Longer text is synthesized piece by piece (text.split_for_synthesis); each piece starts its delivery afresh,
+    # so the tone can change at the seams. 0 = text.MAX_CHUNK_CHARS.
+    max_chunk_chars: int = 0
+    # The adapter reads brackets as asides (VoxCPM2 takes them as style instructions); lines with brackets made
+    # before that are made again.
+    brackets_as_asides: bool = False
+    # Per-line settings the engine takes (app.TUNING: "guidance", "temperature"): the line dialog shows a slider
+    # for each, the engine's own value being the default.
+    tuning: tuple = ()
+    # Text ending on a comma or semicolon is given a colon (a period for a quotation): text.close_clause.
+    close_clauses: bool = False
+    # Stutters written as consonants and a hyphen ("R-right") are spelled as they sound ("Ruh-right"):
+    # text.spell_stutters.
+    spell_stutters: bool = False
+    # The adapter maps approved delivery tags (delivery.py) to its own words; bumped when that mapping changes,
+    # which gives lines with a delivery a new cache key (lines without one keep theirs).
+    styles_version: int = 0
+    # VRAM a worker still holds with its model parked in system RAM (BaseEngine.park: its CUDA context and CUDA
+    # graphs); the LLM leaves this much room. VoxCPM2: 1.75 GB measured (scripts/voxcpm_park_probe.py).
+    parked_vram_gb: float = 0.0
+    # Texts the adapter now reads differently from before (name -> regex): lines matching one get a new cache key,
+    # so clips made the old way are made again; other lines keep theirs.
+    reread: dict = field(default_factory=dict)
+    # Sound marks in the text ("{laugh|Ahaha}", sounds.py): kind -> the engine's own tag for it; other kinds (and
+    # every kind, for engines without any) are read as written.
+    sound_tags: dict = field(default_factory=dict)
     # Run with the server's own interpreter (tests) instead of a venv.
     in_process_python: bool = False
 
@@ -109,6 +137,50 @@ ENGINES: dict[str, EngineSpec] = {
             vram_gb=6.0,
             voice_design=True,
             languages="10",
+        ),
+        EngineSpec(
+            id="voxcpm",
+            label="VoxCPM2",
+            module="elvenreader_server.engines.voxcpm_engine",
+            description="OpenBMB's 2B tokenizer-free diffusion-AR model: cloning that follows a free-text "
+            "delivery (\"(shouting, urgent)\"), 30 languages, 48 kHz.",
+            licence="Apache-2.0",
+            repos=("openbmb/VoxCPM2",),
+            vram_gb=7.0,  # 5.9 GB measured, and SenseVoice (hears short lines back) ~1 GB
+            delivery="instruct",
+            voice_design=True,
+            languages="30",
+            # cfg_value: guidance. normalize: VoxCPM2's own text normalisation ("70%" -> "seventy percent", "Vol." ->
+            # "Volume"; see the adapter's _for_normalizer). temperature: the noise each patch of speech starts
+            # from (hidden in its diffusion decoder; lower is steadier).
+            defaults={"mode": "auto", "cfg_value": 2.0, "inference_timesteps": 10, "optimize": True,
+                      "denoise_refs": True, "normalize": True, "temperature": 1.0},
+            max_chunk_chars=2000,  # 1,342 characters in one go: steady pitch, every word said (no seams in tone)
+            brackets_as_asides=True,
+            tuning=("guidance", "temperature"),
+            close_clauses=True,
+            spell_stutters=True,
+            styles_version=RENDER_VERSION,
+            parked_vram_gb=2.0,
+            # "No." the word was read "number" by VoxCPM2's normaliser (voxcpm_engine._for_normalizer).
+            reread={"no-word": r"\bN[Oo]\.(?!\s*\d)"},
+            sound_tags=INLINE,
+        ),
+        EngineSpec(
+            id="breeze",
+            label="Breeze TTS 2",
+            module="elvenreader_server.engines.breeze_engine",
+            description="BreezeBlue's model, #1 open-weight on the Artificial Analysis TTS leaderboard: cloning "
+            "steered by a free-text instruction (the line's delivery), and voice design. English and Chinese, 24 kHz.",
+            licence="BreezeBlue Research and Non-Commercial License",
+            repos=("BreezeBlue/Breeze-TTS-2",),
+            vram_gb=9.0,  # 8.7 GB measured (nvidia-smi) with the per-token stages compiled, the mode it runs in
+            delivery="instruct",
+            voice_design=True,
+            languages="en, zh",
+            defaults={"fast": "decode"},
+            max_chunk_chars=700,  # its prompt (reference + text) has to fit 2,048 tokens
+            styles_version=RENDER_VERSION,
         ),
     ]
 }

@@ -93,7 +93,9 @@ def merge(c: dict, upd: dict) -> bool:
     """Folds one update into the model's profile. Fixed fields are only set when empty (or "unknown"), or
     replaced by a more specific version of the same thing; notes and speech style accumulate. Returns
     whether anything changed."""
-    p = c.setdefault("profile", {})
+    if not isinstance(c.get("profile"), dict):
+        c["profile"] = {}  # older records can hold "profile": null
+    p = c["profile"]
     before = dict(p)
     for key in ("gender", "apparent_age"):
         v = (upd.get(key) or "").strip().lower()
@@ -212,7 +214,9 @@ def migrate(script: dict) -> int:
 
 def set_user_fields(c: dict, fields: dict) -> None:
     """The reader's profile: a field equal to the model's (or empty) goes back to the model's."""
-    model, mine = c.get("profile") or {}, c.setdefault("profile_user", {})
+    if not isinstance(c.get("profile_user"), dict):
+        c["profile_user"] = {}
+    model, mine = c.get("profile") or {}, c["profile_user"]
     for key, value in fields.items():
         if key not in FIELDS:
             continue

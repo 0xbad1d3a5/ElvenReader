@@ -90,21 +90,40 @@ def book_series(app: web.Application, book_id: str) -> str:
     return summary.get("series") or series_name(summary.get("title", ""))
 
 
-def seed(app: web.Application, book_id: str, script: dict, replace_generated: bool = False) -> int:
+def seed(app: web.Application, book_id: str, script: dict, replace_generated: bool = False,
+         earlier_only: bool = True) -> int:
     """Start a book's cast from its series (names, aliases, dossier, voices); returns how many.
+
+    Only characters met in earlier volumes come in: the labeller is told who may return, never who appears
+    later in the series (a later volume's characters are unknown here, and spoil it). A volume whose number
+    can't be read (no "Vol. 3" in its title) counts as earlier. Extras come in when they appeared in two or more
+    earlier volumes; a walk-on of one (the Scarecrow of an Oz quest) is not expected again. Without
+    `earlier_only` (a labelled book taking the series' voices: those without lines here are dropped after),
+    every volume counts.
 
     With `replace_generated` (applying a series to a book that was already cast), a voice this book made
     for itself (designed or pooled) gives way to the series' voice; voices the reader chose stay."""
-    from .dramatize import ensure_character
+    from .dramatize import DRAMA_STORE_KEY, ensure_character
 
     name = book_series(app, book_id)
     if not name:
         return 0
     data = app[SERIES_KEY].get(name)
+    here = volume_key((app[DRAMA_STORE_KEY].summary(book_id) or {}).get("title", "") or data["books"].get(book_id, ""))
+
+    def earlier(b: str) -> bool:
+        if not earlier_only:
+            return True
+        k = volume_key(data["books"].get(b, "") or (app[DRAMA_STORE_KEY].summary(b) or {}).get("title", ""))
+        return not here or not k or k < here
+
     n = 0
     for entry in data["characters"].values():
-        if book_id in entry.get("books", []) and len(entry.get("books", [])) == 1:
-            continue  # learned from this very book: let it be read afresh
+        before = [b for b in entry.get("books", []) if b != book_id and earlier(b)]
+        if not before:
+            continue  # learned from this very book, or only from later volumes
+        if entry.get("role") == "extra" and not entry.get("role_user") and len(before) < 2:
+            continue  # a walk-on of one earlier volume
         cid = ensure_character(script, entry["name"], entry.get("gender", "unknown"), entry.get("age", "unknown"),
                                entry.get("aliases", []))
         if cid is None:
@@ -160,9 +179,11 @@ def same_character_elsewhere(app: web.Application, book_id: str, cid: str) -> li
     return out
 
 
-async def propagate_voice(app: web.Application, book_id: str, cid: str, old: str | None, new: str | None) -> list[str]:
+async def propagate_voice(app: web.Application, book_id: str, cid: str, old: str | None, new: str | None,
+                          may=None) -> list[str]:
     """A character's new voice also goes to the same character in the series' other books, where they still
-    had the old voice (a voice chosen differently for one volume is left alone). Returns the books changed."""
+    had the old voice (a voice chosen differently for one volume is left alone). `may(book_id)`: whether the user
+    may change that book (permissions.can_book; others' libraries are left alone). Returns the books changed."""
     from .app import VOICES_KEY
     from .dramatize import DRAMA_STORE_KEY, follow_voice
 
@@ -171,6 +192,8 @@ async def propagate_voice(app: web.Application, book_id: str, cid: str, old: str
     store = app[DRAMA_STORE_KEY]
     changed = []
     for other, ocid in same_character_elsewhere(app, book_id, cid):
+        if may is not None and not may(other):
+            continue
         async with store.lock(other):
             s = store.script(other)
             c = s["characters"].get(ocid)
@@ -246,6 +269,26 @@ def remember(app: web.Application, book_id: str, only: str | None = None) -> str
             series["characters"][key].pop("role_user")
     app[SERIES_KEY].save(series)
     return name
+
+
+def forget_aliases(app: web.Application, book_id: str, removed: dict[str, list[str]]) -> int:
+    """Aliases the reader took away from characters (dramatize.detach_alias) also leave the series' memory, so
+    later volumes don't file that name under the wrong character again. Returns how many were removed."""
+    from .dramatize import norm_name
+
+    name = book_series(app, book_id)
+    if not name or not app[SERIES_KEY].path(name).exists():
+        return 0
+    gone = {norm_name(a) for aliases in removed.values() for a in aliases}
+    series = app[SERIES_KEY].get(name)
+    n = 0
+    for entry in series["characters"].values():
+        keep = [a for a in entry.get("aliases", []) if norm_name(a) not in gone]
+        n += len(entry.get("aliases", [])) - len(keep)
+        entry["aliases"] = keep
+    if n:
+        app[SERIES_KEY].save(series)
+    return n
 
 
 async def list_series(request: web.Request) -> web.Response:
@@ -336,7 +379,7 @@ async def apply_series(app: web.Application, book_id: str) -> int:
     store = app[DRAMA_STORE_KEY]
     async with store.lock(book_id):
         s = store.script(book_id)
-        n = seed(app, book_id, s, replace_generated=True)
+        n = seed(app, book_id, s, replace_generated=True, earlier_only=s.get("status") != "done")
         s["series_seeded"] = max(n, 1)
         if s.get("status") == "done":
             prune_characters(s)

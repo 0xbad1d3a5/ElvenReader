@@ -15,7 +15,7 @@ function Get-Uv {
 }
 
 function Get-ModelsDir {
-    # Same rule as the server: ELVENREADER_MODELS, else "models_dir" in data\config.json, else data\models.
+    # Same rule as the server: ELVENREADER_MODELS, else "models_dir" in data\config.json, else <repo>\models.
     if ($env:ELVENREADER_MODELS) { return $env:ELVENREADER_MODELS }
     $data = if ($env:ELVENREADER_DATA) { $env:ELVENREADER_DATA } else { Join-Path (Split-Path $PSScriptRoot) "data" }
     $config = Join-Path $data "config.json"
@@ -23,7 +23,7 @@ function Get-ModelsDir {
         $cfg = Get-Content $config -Raw | ConvertFrom-Json
         if ($cfg.models_dir) { return $cfg.models_dir }
     }
-    return Join-Path $data "models"
+    return Join-Path (Split-Path (Split-Path $PSScriptRoot)) "models"
 }
 
 # Engines, their Python version and the upstream source they need (pinned commits).
@@ -34,6 +34,9 @@ $Engines = [ordered]@{
     indextts  = @{ Python = "3.11"; Repos = @();  # downloaded into checkpoints\IndexTTS-2.5 (see download-models.ps1)
                    Git = "https://github.com/index-tts/index-tts.git"; Commit = "d9e41aac89fd00b3d71497fddb287b7f24613712"; Dir = "index-tts" }
     qwen3tts  = @{ Python = "3.12"; Repos = @("Qwen/Qwen3-TTS-12Hz-1.7B-Base", "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", "Qwen/Qwen3-TTS-Tokenizer-12Hz") }
+    voxcpm    = @{ Python = "3.12"; Repos = @("openbmb/VoxCPM2") }
+    breeze    = @{ Python = "3.12"; Repos = @("BreezeBlue/Breeze-TTS-2");
+                   Git = "https://github.com/breezeblue-ai/breeze-tts.git"; Commit = "daa6cb2efe5471f09369229f322d20bb956cb3c3"; Dir = "breeze-tts" }
 }
 
 $TorchIndex = "https://download.pytorch.org/whl/cu128"  # CUDA 12.8 builds support RTX 50-series (sm_120)

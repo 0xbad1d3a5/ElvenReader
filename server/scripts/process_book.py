@@ -1,10 +1,12 @@
 """Add a book from the command line: the same as "+ Add book" in the library page.
 
     .venv\\Scripts\\python.exe scripts\\process_book.py "E:\\Books\\book.epub" [--no-cast] [--reanalyze] [--engine qwen3tts]
+    .venv\\Scripts\\python.exe scripts\\process_book.py "E:\\Backup\\book.elvenbook" [--replace]
 
 The running server (run-server.ps1) parses the EPUB, stores it in the library, analyses it (who says what,
 the cast's tiers and voice profiles) and then creates the cast's voices. This script starts that and prints
-progress until it is done.
+progress until it is done. A book file (.elvenbook, from another ElvenReader) comes in as it is: text, analysis,
+voices and the speech made so far.
 """
 from __future__ import annotations
 
@@ -65,10 +67,11 @@ def wait(server: Server, book_id: str, label: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("epub", type=Path)
+    parser.add_argument("epub", type=Path, help="an EPUB, or a book file (.elvenbook)")
     parser.add_argument("--no-cast", action="store_true", help="don't create character voices")
     parser.add_argument("--engine", help="voice-design engine for the cast (default from config)")
     parser.add_argument("--reanalyze", action="store_true", help="analyse again even if already done")
+    parser.add_argument("--replace", action="store_true", help="a book file replaces the book if it is in the library")
     args = parser.parse_args()
     if not args.epub.is_file():
         sys.exit(f"no such file: {args.epub}")
@@ -83,7 +86,8 @@ def main() -> None:
         sys.exit("The server is not running; start it with run-server.ps1")
 
     t_start = time.time()
-    body = {"path": str(args.epub.resolve()), "cast": not args.no_cast, "reanalyze": args.reanalyze}
+    body = {"path": str(args.epub.resolve()), "cast": not args.no_cast, "reanalyze": args.reanalyze,
+            "replace": args.replace}
     if args.engine:
         body["engine"] = args.engine
     status, book = server.call("POST", "/api/library/import", body)

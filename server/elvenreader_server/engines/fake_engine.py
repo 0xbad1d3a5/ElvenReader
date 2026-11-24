@@ -23,6 +23,8 @@ class Engine(BaseEngine):
         )
 
     def synthesize(self, req: dict, cancelled):
+        if getattr(self, "parked", False):
+            raise RuntimeError("synthesize while parked")
         text = req["text"]
         if "explode" in text:
             raise RuntimeError("engine exploded")
@@ -40,3 +42,15 @@ class Engine(BaseEngine):
 
     def design_voice(self, description: str, text: str, seed):
         yield self._tone(self.sample_rate, 330.0)
+
+    @property
+    def can_park(self) -> bool:
+        return bool(self.options.get("can_park"))
+
+    def park(self) -> None:
+        self.parked = True
+
+    def unpark(self) -> None:
+        if self.options.get("fail_unpark"):
+            raise RuntimeError("fake unpark failure")
+        self.parked = False

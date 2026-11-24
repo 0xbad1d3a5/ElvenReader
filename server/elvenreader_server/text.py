@@ -4,6 +4,9 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from .sounds import protect
+from .sounds import render as render_sounds
+
 MAX_TEXT_CHARS = 4000
 # Quality models degrade (or run out of memory) on very long inputs, so longer
 # requests are synthesized piece by piece and streamed back in order.
@@ -15,16 +18,71 @@ _WHITESPACE = re.compile(r"\s+")
 # "I…I", "Um...yes", "H‥huh": an ellipsis run straight into the next word makes the models slur or skip the
 # pause, so a space goes after it ("I… I").
 _TIGHT_ELLIPSIS = re.compile(r"(\.{2,}|[\u2026\u2025]+)(?=[\u2018\u2019\u201c\"'(\[]?\w)")
+# "““Wh…what?!”” (two people at once): a doubled quotation mark is typography; with it, one of Ronie's lines came
+# out as "een..." where "“Wh… what?!”" is said right.
+_DOUBLED_QUOTES = re.compile(r"([\u201c\u201d\u2018\u2019\"\u00ab\u00bb])\1+")
 
 
 def clean_text(text: str) -> str:
-    """Remove invisible/control characters, collapse whitespace and put a space after ellipses."""
+    """Remove invisible/control characters, collapse whitespace and doubled quotation marks, put a space
+    after ellipses and turn braces that are not sound marks (sounds.py) into parentheses."""
     text = unicodedata.normalize("NFC", text).translate(_INVISIBLE)
     text = "".join(
         ch if not unicodedata.category(ch).startswith("C") else " " for ch in text
     )
+    text = _DOUBLED_QUOTES.sub(r"\1", text)
     text = _TIGHT_ELLIPSIS.sub(r"\1 ", text)
-    return _WHITESPACE.sub(" ", text).strip()
+    return _WHITESPACE.sub(" ", protect(text)).strip()
+
+
+_OPENERS = "\"'\u201c\u2018\u00ab([\u300c\u300e"
+# "R-right", "Wh-what", "S-s-sorry": a stutter written as the word's opening consonants and a hyphen.
+_STUTTER = re.compile(r"(?<![\w\-])((?:([b-df-hj-np-tv-z]{1,3})-)+)(?=\w)", re.IGNORECASE)
+_VOWELS = set("aeiouAEIOU")  # (a fragment's "y" opens the word: "Y-yeah" -> "Yuh-yeah")
+
+
+def spell_stutters(text: str) -> str:
+    """A stutter written as consonants and a hyphen ("R-right", "Wh-what", "S-s-sorry") as it sounds:
+    "Ruh-right", "Whuh-what", "Suh-suh-sorry". VoxCPM2 read the letters: "R-right" came out "Alright" (3 of
+    3 seeds), "W-wait" as "Will wait"; spelled with "uh", 14 of 18 lines over 6 words came out stuttered
+    (8 as written). Only fragments that start the word that follows count (not "T-shirt"); ones with a
+    vowel ("I-I", "Wha-what") read as they are."""
+
+    def one(m: re.Match) -> str:
+        frags = m.group(1).split("-")[:-1]
+        word = text[m.end():m.end() + 8].lower()
+        if not all(word.startswith(f.lower()) and not (set(f) & _VOWELS) for f in frags):
+            return m.group(0)
+        return "".join(f + "uh-" for f in frags)
+
+    return _STUTTER.sub(one, text)
+
+
+def engine_text(spec, text: str) -> str:
+    """The text a speech engine gets, from the cleaned text (before pronunciations): sound marks as the engine's
+    own tags or as written (EngineSpec.sound_tags), and the spellings that engine's model reads wrong put right
+    (EngineSpec.close_clauses, spell_stutters)."""
+    text = render_sounds(text, getattr(spec, "sound_tags", None))
+    if getattr(spec, "spell_stutters", False):
+        text = spell_stutters(text)
+    if getattr(spec, "close_clauses", False):
+        text = close_clause(text)
+    return text
+
+
+def close_clause(text: str) -> str:
+    """Text ending on a comma or semicolon ("When she was his page, Ronie always said," before the quotation,
+    which is a clip of its own) ends on a colon instead (a period for a quotation). VoxCPM2's stop head
+    learnt that a comma means more is coming: it ran on after the last word into made-up speech in another
+    language ("Apustinye, Urshokova, Shefen") for 2 of 5 seeds; with a colon or period, 0 of 5."""
+    body = text.rstrip()
+    closers = ""
+    while body and body[-1] in _CLOSERS:
+        closers = body[-1] + closers
+        body = body[:-1].rstrip()
+    if not body or body[-1] not in ",;\u3001\uff0c\uff1b":
+        return text
+    return body[:-1] + ("." if text.lstrip()[:1] in _OPENERS else ":") + closers
 
 
 def is_speakable(text: str) -> bool:

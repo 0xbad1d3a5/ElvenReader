@@ -123,6 +123,15 @@ class Worker:
                 self.send({"type": "pong"})
             elif op == "load":
                 self.load()
+            elif op == "park":
+                # Step aside for something else on the GPU without being rebuilt (BaseEngine.park).
+                ok = self.engine is not None and getattr(self.engine, "can_park", False)
+                if ok:
+                    self.engine.park()
+                self.send({"type": "parked", "ok": bool(ok)})
+            elif op == "unpark":
+                self.engine.unpark()
+                self.send({"type": "unparked"})
             elif op == "synth":
                 self.load()
                 if rid in self.cancelled:

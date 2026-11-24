@@ -54,6 +54,20 @@ class AudioCache:
         (rate,) = struct.unpack("<I", data[4:8])
         return rate, data[8:]
 
+    def has(self, key: str) -> bool:
+        return self._path(key).exists()
+
+    def peek(self, key: str) -> tuple[int, bytes] | None:
+        """Like get, without counting a hit or refreshing the clip's place in the LRU (book file syncs)."""
+        try:
+            data = self._path(key).read_bytes()
+        except OSError:
+            return None
+        if len(data) < 8 or data[:4] != _MAGIC:
+            return None
+        (rate,) = struct.unpack("<I", data[4:8])
+        return rate, data[8:]
+
     def put(self, key: str, sample_rate: int, pcm: bytes) -> None:
         if not pcm or self.max_bytes <= 0:
             return
@@ -69,6 +83,18 @@ class AudioCache:
                 self._size += len(pcm) + 8
             if self._size > self.max_bytes:
                 self._prune(keep=path)
+
+    def discard(self, key: str) -> None:
+        """Forget one clip (a take that a later, stricter check would have made again)."""
+        path = self._path(key)
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError:
+            return
+        with self._lock:
+            if self._size is not None:
+                self._size -= size
 
     def _scan(self) -> int:
         return sum(p.stat().st_size for p in self.root.glob("*/*.pcm"))

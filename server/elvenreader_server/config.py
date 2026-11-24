@@ -19,8 +19,7 @@ def generate_token() -> str:
 
 
 def _env(name: str) -> str | None:
-    """ELVENREADER_<name>, or the ANDROIDREADER_<name> of the project's old name."""
-    return os.environ.get(f"ELVENREADER_{name}") or os.environ.get(f"ANDROIDREADER_{name}")
+    return os.environ.get(f"ELVENREADER_{name}")
 
 
 def default_data_dir() -> Path:
@@ -30,16 +29,26 @@ def default_data_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "data"
 
 
+def default_models_dir() -> Path:
+    """``models`` at the repository root (git-ignored)."""
+    return Path(__file__).resolve().parent.parent.parent / "models"
+
+
 @dataclass
 class ServerConfig:
     token: str
     host: str = "0.0.0.0"
     port: int = DEFAULT_PORT
     # Where engine virtual environments (venvs/<engine>) and model weights
-    # (hf/, the Hugging Face cache) live. Kept out of git; several GB per engine.
+    # (hf/, the Hugging Face cache) live. Empty = <repo>/models (git-ignored); several GB per engine.
     models_dir: str = ""
     # Engine used when a request does not name one.
     default_engine: str = DEFAULT_ENGINE
+    # A second speech model, loaded next to it, for the narration (the narrator's, or a character's in the first
+    # person; never a quotation): it reads the narration at the same time as the speech model reads the dialogue,
+    # so two readers aren't served one line at a time. "" = the speech model reads everything. OmniVoice: fast,
+    # and the narrator voices came from it (VoiceStudio).
+    narration_engine: str = ""
     # Voice used when a request has not picked one. Empty = first voice in the store.
     default_voice: str = ""
     # Extra URLs to put in pairing codes, e.g. this PC's address on your own VPN
@@ -50,11 +59,20 @@ class ServerConfig:
     # Cut the models' start/end padding: readers wait for each sentence to
     # finish before requesting the next, so padding lengthens every gap.
     trim_silence: bool = True
+    # Bring every clip's speech to one loudness (audio.level; whispers and shouts keep their offset): each take
+    # comes out of a model at its own level, and short lines were quieter.
+    level_speech: bool = True
+    # When background work takes the whole GPU, move the speech model to system RAM (back in about a second)
+    # rather than stopping it (loaded again in about a minute), for engines that can (VoxCPM2).
+    park_speech_model: bool = True
     # Silence added after an utterance ending a sentence (a third of it after a
     # clause). A request can override it.
     sentence_pause_ms: int = 300
     # On-disk cache of synthesized sentences.
     cache_max_mb: int = 4096
+    # How often (seconds) each book's file (data/books/<id>/book.elvenbook) takes in what changed: speech made
+    # since, edits to the analysis, voices or pronunciations. 0 = only when asked (POST /api/books/<id>/file/sync).
+    book_file_sync_s: float = 300.0
     # Loading a quality model can take a few minutes the first time.
     load_timeout_s: float = 900.0
     # One sentence of synthesis; quality models can be slower than real time.
@@ -107,6 +125,13 @@ class ServerConfig:
     llm_label_profiles: bool = True
     # Cap on reasoning tokens per request (llama.cpp --reasoning-budget); -1 = unlimited.
     llm_reasoning_budget: int = -1
+    # Which computer analyses books (Settings): "local" (llm_model on this PC's GPU, as llm_mode says) or "remote"
+    # (llm_remote_model on an OpenAI-compatible server at llm_remote_url, e.g. llama-swap on the inference PC). The
+    # remote one never waits for the GPU here: books are analysed while people read.
+    llm_backend: str = "local"
+    llm_remote_url: str = ""
+    llm_remote_model: str = ""
+    llm_remote_label: str = ""  # its name in Settings, e.g. "2× CMP 170HX"
     # Engine used to create character voices from a description. When it isn't the speech model it runs
     # as a voice designer next to it, loaded while voices are designed and unloaded after designer_idle_s.
     voice_design_engine: str = "qwen3tts"
@@ -134,7 +159,7 @@ class ServerConfig:
 
     @property
     def models_path(self) -> Path:
-        return Path(self.models_dir) if self.models_dir else self.data_path / "models"
+        return Path(self.models_dir) if self.models_dir else default_models_dir()
 
 
 def load_config(data_dir: Path | None = None) -> ServerConfig:

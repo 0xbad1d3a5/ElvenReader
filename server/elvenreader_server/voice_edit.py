@@ -23,7 +23,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .app import (CONFIG_KEY, DESIGN_TEXT, ENGINES_KEY, VOICES_KEY, _json_body, _json_error, _str,
-                  collect_audio)
+                  collect_audio, design_clip)
 from .audio import SilenceTrimmer, wav_bytes
 from .engines.manager import EngineError
 from .voices import Voice, VoiceStore
@@ -56,9 +56,17 @@ def to_wav(data: bytes, start: float | None = None, end: float | None = None) ->
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise AudioError("Only mono 16-bit WAV can be read here (ffmpeg is not installed)")
-        proc = subprocess.run([ffmpeg, "-v", "error", "-i", "pipe:0", "-ac", "1", "-ar", "24000", "-f", "s16le",
-                               "pipe:1"], input=data, capture_output=True, timeout=120)
+        # From a file, not a pipe: phones' recordings (.m4a, .mp4) keep their index at the end of the file, which
+        # ffmpeg can only reach by seeking ("partial file" from a pipe once the clip is longer than a few seconds).
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "upload"
+            src.write_bytes(data)
+            proc = subprocess.run([ffmpeg, "-v", "error", "-i", str(src), "-ac", "1", "-ar", "24000", "-f", "s16le",
+                                   "pipe:1"], capture_output=True, timeout=120,
+                                  creationflags=0x08000000 if os.name == "nt" else 0)
         if proc.returncode != 0 or not proc.stdout:
+            logger.warning("could not read an uploaded clip (%d bytes): %s", len(data),
+                           proc.stderr.decode("utf-8", "replace")[-300:])
             raise AudioError("Could not read that audio file")
         pcm, rate = proc.stdout, 24000
     n = len(pcm) // 2
@@ -171,11 +179,13 @@ async def voice_get(request: web.Request) -> web.Response:
 async def voice_patch(request: web.Request) -> web.Response:
     voice = _voice_or_404(request)
     body = await _json_body(request)
+    before = voice
     try:
         voice = request.app[VOICES_KEY].update(voice.id, **body)
     except ValueError as exc:
         return _json_error(400, str(exc))
     await _characters_follow(request.app, voice.id)
+    _report_voice_edit(request.app, "details", before, voice)
     return web.json_response(details(request.app, voice))
 
 
@@ -183,6 +193,31 @@ async def _characters_follow(app: web.Application, voice_id: str) -> None:
     from .dramatize import sync_voice_descriptions
 
     await sync_voice_descriptions(app, voice_id)
+
+
+def _voice_view(voice: Voice | None) -> dict | None:
+    if voice is None:
+        return None
+    return {k: v for k, v in (("id", voice.id), ("name", voice.name), ("description", voice.description or voice.instruct),
+                              ("seed", voice.seed), ("audio", (voice.audio_sha or "")[:12])) if v not in (None, "")}
+
+
+def _report_voice_edit(app: web.Application, edit: str, before: Voice | None, after: Voice | None,
+                       only: tuple[str, str] | None = None) -> None:
+    """A voice-editor change is a fix to the casting: kept as a "voice" report in every book whose characters use
+    the voice (or for one character, `only` = (book, character))."""
+    from . import reports
+
+    if after is not None and before is not None and _voice_view(before) == _voice_view(after):
+        return  # nothing changed
+    users = [(only[0], only[1])] if only else [
+        (u["book"], u["character"]) for u in voice_usage(app).get((after or before).id, []) if u.get("book")]
+    for book, character in users:
+        try:
+            reports.record(app, book, "voice", character=character, edit=edit,
+                           before=_voice_view(before), after=_voice_view(after))
+        except (OSError, ValueError):
+            continue
 
 
 async def _read_audio_form(request: web.Request) -> tuple[bytes | None, dict[str, str]]:
@@ -240,7 +275,9 @@ async def voice_put_audio(request: web.Request) -> web.Response:
     except TranscribeError as exc:
         return _json_error(503, str(exc))
     meta = {"language": fields["language"]} if fields.get("language") else {}
-    voice = request.app[VOICES_KEY].replace_audio(voice.id, wav, ref_text, **meta)
+    before = voice
+    voice = request.app[VOICES_KEY].replace_audio(voice.id, wav, ref_text, recorded=True, **meta)
+    _report_voice_edit(request.app, "new reference audio", before, voice)
     return web.json_response(details(request.app, voice))
 
 
@@ -251,6 +288,10 @@ async def voice_duplicate(request: web.Request) -> web.Response:
     voice = _voice_or_404(request)
     body = await _json_body(request) if request.can_read_body else {}
     book, character = _str(body, "book"), _str(body, "character")
+    from .permissions import can_book, can_voice
+
+    if not (can_book(request, book) if book and character else can_voice(request, voice.id)):
+        return _json_error(403, "That book isn't in your library")
     store = request.app.get(DRAMA_STORE_KEY)
     if book and character:
         if store is None or character not in store.script(book).get("characters", {}):
@@ -268,18 +309,76 @@ async def voice_duplicate(request: web.Request) -> web.Response:
             s["characters"][character]["voice_user"] = True
             store.save_script(book, s)
         # The same character in the series' other volumes gets the copy too: they are one character.
-        await propagate_voice(request.app, book, character, voice.id, copy.id)
+        await propagate_voice(request.app, book, character, voice.id, copy.id, may=lambda b: can_book(request, b))
         remember(request.app, book, only=character)
         await _characters_follow(request.app, copy.id)
+        _report_voice_edit(request.app, "own copy of a shared voice", voice, copy, only=(book, character))
     return web.json_response(details(request.app, copy), status=201)
 
 
-async def voice_revert(request: web.Request) -> web.Response:
+async def voice_history_audio(request: web.Request) -> web.StreamResponse:
+    """GET /api/voices/{voice}/history/{stamp}/audio: an earlier version's reference clip."""
+    wav = request.app[VOICES_KEY].history_wav(request.match_info["voice"], request.match_info["stamp"])
+    if wav is None:
+        return _json_error(404, "No such version")
+    return web.FileResponse(wav, headers={"Content-Type": "audio/wav", "Cache-Control": "no-store"})
+
+
+async def voice_restore(request: web.Request) -> web.Response:
+    """POST /api/voices/{voice}/history/{stamp}/restore: bring back an earlier version (undoable)."""
     voice = _voice_or_404(request)
-    reverted = request.app[VOICES_KEY].revert(voice.id)
-    if reverted is None:
-        return _json_error(409, "No earlier version to go back to")
-    return web.json_response(details(request.app, reverted))
+    restored = request.app[VOICES_KEY].restore(voice.id, request.match_info["stamp"])
+    if restored is None:
+        return _json_error(404, "No such version")
+    await _characters_follow(request.app, voice.id)
+    _report_voice_edit(request.app, "an earlier version brought back", voice, restored)
+    return web.json_response(details(request.app, restored))
+
+
+PAST_VOICES = 3  # shown in the voice editor
+
+
+async def character_past_voices(request: web.Request) -> web.Response:
+    """GET /api/books/{book}/characters/{character}/past-voices: the voices a character had before, newest first (at
+    most PAST_VOICES): earlier versions of their current voice (kept for undo), and other voices they were given
+    (from the book's reports of voice changes) that still exist. Copies of the current audio are left out."""
+    from . import reports
+    from .dramatize import DRAMA_STORE_KEY, is_pool
+
+    store = request.app[DRAMA_STORE_KEY]
+    book, cid = request.match_info["book"], request.match_info["character"]
+    try:
+        c = store.script(book).get("characters", {}).get(cid)
+    except ValueError as exc:
+        return _json_error(400, str(exc))
+    if c is None:
+        return _json_error(404, "No such character")
+    voices = request.app[VOICES_KEY]
+    current = voices.get(c.get("voice"))
+    seen = {(current.id, current.audio_sha[:12])} if current else set()
+    items = []
+    if current and not is_pool(current.id):  # a generic voice's versions aren't this character's
+        for v in voices.history(current.id):
+            items.append({"kind": "version", "voice": current.id, "stamp": v["stamp"], "t": v["saved"],
+                          "name": v["name"], "description": v["description"], "key": (current.id, v["audio"])})
+    for r in reports.read(request.app, book):
+        if r.get("type") != "voice" or r.get("character") != cid:
+            continue
+        before = r.get("before") or {}
+        vid = before.get("voice") or before.get("id")
+        if not vid or vid == (current.id if current else None) or not (v := voices.get(vid)):
+            continue
+        items.append({"kind": "voice", "voice": vid, "t": r.get("t", 0), "name": v.name,
+                      "description": v.description or v.instruct, "key": (vid, v.audio_sha[:12])})
+    out = []
+    for it in sorted(items, key=lambda x: -x["t"]):
+        if it["key"] in seen:  # the same audio again (or the voice as it is now)
+            continue
+        seen.add(it.pop("key"))
+        out.append(it)
+        if len(out) == PAST_VOICES:
+            break
+    return web.json_response({"past": out})
 
 
 def _candidates_dir(app: web.Application) -> Path:
@@ -297,6 +396,12 @@ async def voice_design_candidates(request: web.Request) -> web.Response:
 
     voice = _voice_or_404(request)
     body = await _json_body(request)
+    from .permissions import can_book, can_voice
+
+    # Options change nothing yet: designing them is for those who may change the voice, or give their character
+    # (in `book`) a voice of its own from it.
+    if not (can_voice(request, voice.id) or (_str(body, "book") and can_book(request, _str(body, "book")))):
+        return _json_error(403, "That voice is also used in books that aren't yours")
     from .activity import touch
 
     touch(request.app, design=True)  # designing voices: analysis pauses while you do
@@ -315,7 +420,7 @@ async def voice_design_candidates(request: web.Request) -> web.Response:
             return _json_error(400, str(exc))
         description = aged["description"]
     engine = _str(body, "engine") or request.app[CONFIG_KEY].voice_design_engine
-    text = _str(body, "text") or voice.ref_text or DESIGN_TEXT
+    text = _str(body, "text") or DESIGN_TEXT  # every design says the same passage, so they compare by voice alone
     count = max(1, min(4, int(body.get("count") or 3)))
     seeds = [int(s) for s in body.get("seeds") or [] if isinstance(s, (int, float))][:count]
     if step and not seeds and voice.seed is not None:
@@ -329,13 +434,11 @@ async def voice_design_candidates(request: web.Request) -> web.Response:
     out = []
     for seed in seeds:
         try:
-            rate, pcm = await collect_audio(request.app[ENGINES_KEY].design(engine, description, text, seed))
+            rate, pcm, seed = await design_clip(request.app, engine, description, text, seed)
         except EngineError as exc:
             return _json_error(exc.status, exc.detail)
-        if not pcm:
-            return _json_error(502, "Voice design produced no audio")
         cid = secrets.token_hex(6)
-        (folder / f"{cid}.wav").write_bytes(wav_bytes(SilenceTrimmer(rate).feed(pcm), rate))
+        (folder / f"{cid}.wav").write_bytes(wav_bytes(pcm, rate))
         meta = {"id": cid, "voice": voice.id, "seed": seed, "description": description, "text": text,
                 "engine": engine}
         (folder / f"{cid}.json").write_text(json.dumps(meta), encoding="utf-8")
@@ -367,10 +470,12 @@ async def voice_select_candidate(request: web.Request) -> web.Response:
         return _json_error(404, "No such option (they are kept for a day)")
     path, meta = found
     made_for = {voice.id, meta.get("voice")}
+    before = voice
     voice = request.app[VOICES_KEY].replace_audio(
         voice.id, path.with_suffix(".wav").read_bytes(), meta["text"], instruct=meta["description"],
         description=meta["description"], seed=meta["seed"])
     await _characters_follow(request.app, voice.id)
+    _report_voice_edit(request.app, "redesigned", before, voice)
     for p in _candidates_dir(request.app).glob("*.json"):
         try:
             if json.loads(p.read_text(encoding="utf-8")).get("voice") in made_for:
@@ -397,7 +502,9 @@ def setup(app: web.Application) -> None:
     r.add_patch("/api/voices/{voice}", voice_patch)
     r.add_put("/api/voices/{voice}/audio", voice_put_audio)
     r.add_post("/api/voices/{voice}/duplicate", voice_duplicate)
-    r.add_post("/api/voices/{voice}/revert", voice_revert)
+    r.add_get("/api/voices/{voice}/history/{stamp:\\d+}/audio", voice_history_audio)
+    r.add_post("/api/voices/{voice}/history/{stamp:\\d+}/restore", voice_restore)
+    r.add_get("/api/books/{book}/characters/{character}/past-voices", character_past_voices)
     r.add_post("/api/voices/{voice}/design", voice_design_candidates)
     r.add_post("/api/voices/{voice}/design/{candidate:" + _CANDIDATE_RE + "}", voice_select_candidate)
     r.add_get("/api/voice-candidates/{candidate:" + _CANDIDATE_RE + "}/audio", candidate_audio)

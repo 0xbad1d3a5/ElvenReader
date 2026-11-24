@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import zlib
@@ -26,6 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aiohttp import ClientConnectionError, web
+
+from . import delivery as delivery_tags
+from . import sounds as sound_marks
 
 logger = logging.getLogger("elvenreader.drama")
 
@@ -120,8 +124,11 @@ def mark_mentions(book: dict, script: dict) -> int:
                 if line.get("speaker") is not None or not line.get("mention"):
                     n += 1
                 script["lines"][qid] = {"speaker": None, "delivery": None, "mention": True}
-    script["mentions_v"] = 1
+    script["mentions_v"] = MENTIONS_V
     return n
+
+
+MENTIONS_V = 1  # script["mentions_v"]: quoted terms told apart from dialogue
 
 
 def make_chunks(book: dict, max_words: int = 600, runs: list[tuple[int, int, str]] | None = None) -> list[Chunk]:
@@ -176,6 +183,29 @@ def pov_change(book: dict, chunk: Chunk, use_title: bool = True) -> str | None:
 
 
 _CONTINUES = re.compile(r"[,;:\u2014\u2013-]\s*$")
+# A sentence ends in the narration between two quotations ("…now?” Asuna whispered. Right behind her ear, Kirito
+# said, “Sounds good.”): they are two turns, even when the narration ends on a comma. Not after a title ("Mr.").
+_SENTENCE_BREAK = re.compile(r"(?<!\bMr)(?<!\bMrs)(?<!\bMs)(?<!\bDr)(?<!\bSt)(?<!\bMt)(?<!\bJr)(?<!\bSr)(?<!\bLt)"
+                             r"(?<!\bProf)(?<!\bCapt)(?<!\bSgt)(?<!\bGen)(?<!\bCol)"
+                             r"[.!?\u2026][\"'\u201d\u2019)]*\s+[\"'\u201c\u2018(]*[A-Z]")
+# Narration that brings in someone else by name ("…went "Sh! sh!" and the Dormouse sulkily remarked, "If you
+# can't be civil…"", "and Leafa commented,", "then the Rabbit's voice along—"): a new turn although it ends on a
+# comma. A pronoun ("then she asked,") or a named subordinate clause ("Before Miyuki's unease could rear its head
+# again, he added,") is still the same speaker.
+_NEW_SPEAKER = re.compile(r"^\W*(?:and|but|then)\s+(?:the\s+|a\s+|an\s+)?(?!I\b|Then\b)[A-Z]", re.IGNORECASE)
+
+
+def interrupts(between: str | None) -> bool:
+    """Whether the narration between two quotations of a paragraph only interrupts one quotation ("Yes," he said,
+    "I will."): short, ending on a comma or dash, without a sentence ending inside it or another speaker
+    brought in by name."""
+    return (between is not None and len(between) <= 80 and bool(_CONTINUES.search(between))
+            and not _SENTENCE_BREAK.search(between) and not _new_speaker(between))
+
+
+def _new_speaker(between: str) -> bool:
+    m = _NEW_SPEAKER.match(between)
+    return bool(m) and between[m.end() - 1].isupper()
 
 
 def render_chunk(book: dict, chunk: Chunk) -> tuple[str, dict[str, list[str]]]:
@@ -196,7 +226,7 @@ def render_chunk(book: dict, chunk: Chunk) -> tuple[str, dict[str, list[str]]]:
         pieces, last, prev_end = [], 0, None
         for qid, _, s, e in sorted(by_para.get(pi, []), key=lambda q: q[2]):
             between = text[prev_end:s] if prev_end is not None else None
-            if between is None or len(between) > 80 or not _CONTINUES.search(between):
+            if not interrupts(between):
                 n += 1
                 local[str(n)] = []
             local[str(n)].append(qid)
@@ -204,8 +234,39 @@ def render_chunk(book: dict, chunk: Chunk) -> tuple[str, dict[str, list[str]]]:
             pieces.append(f"[{n}]{text[s:e]}")
             last = prev_end = e
         pieces.append(text[last:])
+        if pi in scene_breaks(book, chunk.chapter):
+            out.append(SCENE_BREAK)
+        out.extend(silent_lines(book, chunk.chapter, pi))
         out.append("".join(pieces))
     return "\n\n".join(out), local
+
+
+# The EPUB's scene breaks (an ornament, or a blank line the publisher marks), shown to the LLM on a line of their own.
+SCENE_BREAK = "~~~ SCENE BREAK: a new scene starts here ~~~"
+
+
+def scene_breaks(book: dict, ci: int) -> set[int]:
+    """The paragraphs of chapter `ci` that start a new scene (book.json "breaks", from the EPUB)."""
+    return set(book["chapters"][ci].get("breaks") or [])
+
+
+def with_breaks(book: dict, ci: int, paragraphs) -> str:
+    """Paragraphs of chapter `ci` as text for the LLM, with SCENE_BREAK before each that starts a new scene and the
+    wordless lines ("…?") the book has before them."""
+    breaks, paras = scene_breaks(book, ci), book["chapters"][ci]["paragraphs"]
+    out = []
+    for p in paragraphs:
+        if p in breaks:
+            out.append(SCENE_BREAK)
+        out.extend(silent_lines(book, ci, p))
+        out.append(paras[p])
+    return "\n\n".join(out)
+
+
+def silent_lines(book: dict, ci: int, pi: int) -> list[str]:
+    """Wordless lines ("“…?”", "“……”") the book has just before paragraph `pi` (book.json "silent"): nothing is said,
+    but someone reacts. Not numbered: they have no speaker to label or speech to make."""
+    return list((book["chapters"][ci].get("silent") or {}).get(str(pi), []))
 
 
 # ----------------------------------------------------------------- names
@@ -223,13 +284,31 @@ def slug(name: str) -> str:
 
 # ----------------------------------------------------------------- prompts
 
+# How the LLM chooses a line's delivery tags: part of SYSTEM_PROMPT, and of DELIVERY_PROMPT (re-scoring deliveries).
+DELIVERY_RULE = """- delivery: how an actor should perform the line, as tags from the approved list below (nothing else). Give tags only when the situation and context call for the voice to carry emotion or a special manner (a quarrel, fear, grief, a shout across a room, a whisper, an inner thought), and then only the one or two that matter most, the most important first; never more than two. Ordinary conversation, explanations, questions and plain remarks get [], even in a tense scene: the words carry the feeling, and every tag changes how the whole line is voiced. A question is already voiced as a question: "confused" only for real bewilderment ("Wha...? Where am I?"). Concern or worry for someone is "tender", not "afraid". "firm" only for orders and stern warnings. When in doubt, give []. Clear signs: a speech verb or adverb near the quote ("she shrieked" -> ["afraid", "shout"]; "he said softly" -> ["soft"]; "she laughed" -> ["amused", "laugh"]; "he sighed" -> ["sigh"]; quoted thoughts -> ["thought"]). A sound tag only when the narration says the speaker makes that sound. At most one feeling (it may start with "slightly" or "very"), one volume, one pace/manner, one sound, one situation. Approved tags (each covers the words in brackets):
+{delivery_tags}""".replace("{delivery_tags}", delivery_tags.prompt_list())
+
 SYSTEM_PROMPT = """You label dialogue in novels for a multi-voice audiobook.
 For every numbered quotation [n] in the passage, decide:
-- speaker: who says it, as one name without parentheses. Use the exact roster name for known characters, even when the passage calls them by a nickname or title the roster lists under "also called". If a new character speaks, use the name the text uses for them (e.g. "the Dormouse", "Mrs. Long"); if they are known by a real name and a nickname, give the real name and put the nickname in their aliases. If an unnamed person speaks, describe them briefly ("a footman"). A character's quoted thoughts ("..." thought Alice) belong to that character. Use "NARRATOR" only for quotations nobody speaks or thinks aloud at that moment: titles, signs, written notes, and words or phrases set in quotation marks inside a sentence (a term, a nickname, scare quotes: the so-called "experts"; what she calls "fun"; French for "dog."; his "plan" failed). Such quoted terms are part of the narration and are NARRATOR even in first-person passages and even when the text says who coined the word.
-- delivery: how an actor should perform the line, 1-4 lowercase words such as "shouting, urgent", "whispering", "sarcastic", "tearful", "excited", "nervous", "cold, angry", "teasing", "calm". Use "neutral" when nothing special is called for. Base it on speech verbs and adverbs near the quote ("she shrieked", "he said softly"), punctuation and context.
+- speaker: who says it, as one name without parentheses. Use the exact roster name for known characters, even when the passage calls them by a nickname or title the roster lists under "also called". But a title or role can belong to several people (two commanders, many knights, several priests): when the passage names or clearly identifies a different person, use that person's name, even if the roster lists the title for someone else. If a new character speaks, use the name the text uses for them (e.g. "the Dormouse", "Mrs. Long"); if they are known by a real name and a nickname, give the real name and put the nickname in their aliases. If an unnamed person speaks, describe them briefly ("a footman"). A character's quoted thoughts ("..." thought Alice) belong to that character. Use "NARRATOR" only for quotations nobody speaks or thinks aloud at that moment: titles, signs, written notes, and words or phrases set in quotation marks inside a sentence (a term, a nickname, scare quotes: the so-called "experts"; what she calls "fun"; French for "dog."; his "plan" failed). Such quoted terms are part of the narration and are NARRATOR even in first-person passages and even when the text says who coined the word.
+{delivery_rule}
+- respell: [] for almost every quotation. Only when a word is spelled the way it sounds, so a speech engine reading its letters would garble it (drawn-out letters: "whaaaaaaat", "Nooooo", "pleeease", "so-o-o"), list that one word (just the word, no punctuation) as written and as the plain word ({"written": "whaaaaaaat", "said": "what"}), and put the drawing-out in the delivery (["shout", "slow"]). Stutters ("Y-yeah", "Wh… what"), ellipses, and sounds that are words of their own (Hmm, Shh, Zzz, Grr, Kyaa, growls, animal noises) stay as they are.
+- sounds: [] for most quotations. When the quotation itself writes out a non-verbal sound (laughter, a sigh, a scream, a hesitation, a groan: "Ahaha, that's fine.", "Haaah... Really.", "Kyaaah!"), list each such word (just the word, as written, no punctuation) with its kind ({"written": "Ahaha", "sound": "laugh"}). Ordinary words are not sounds ("Wow", "Yes", "Oh no", names); "Uh-huh" and "Mm-hmm" meaning yes are words. A sound only the narration mentions ("she laughed") goes in the delivery instead, never here. Kinds:
+{sound_kinds}
 Rules: in a back-and-forth conversation without speech tags, speakers usually alternate. A number appearing twice marks one quotation interrupted by narration ("Yes," [3] he said, [3] "I will."): label it once. Never change the text; label each number once, in order, giving the first two or three words of its quotation in "starts" so you keep your place. If several characters speak together, give the main one.
-First-person narration: when the story is told by "I", every line the narrator speaks ("...," I said / I asked / I replied, or "I" answering in a conversation) belongs to the narrating character, so give that character's name (never "I", and never another character). Work out who "I" is from the text and the narrator given for the previous passage; chapter titles such as "(Mary's POV)" mean that character narrates. Report the narrator in "narrator" (their name, or "third person" if the passage is not told by "I").
-Also list every character who speaks in this passage with their gender, age group and any other names, titles or nicknames the passage uses for them (aliases)."""
+First-person narration: when the story is told by "I", every line the narrator speaks ("...," I said / I asked / I replied, or "I" answering in a conversation) belongs to the narrating character, so give that character's name (never "I", and never another character). Work out who "I" is from the text and the narrator given for the previous passage; chapter titles such as "(Mary's POV)" mean that character narrates. A line "~~~ SCENE BREAK ~~~" marks where the book moves to a new scene. Work out from the new scene itself who narrates it (who "I" is, if anyone) and who is present. Report the narrator in "narrator" (their name, or "third person" if the passage is not told by "I"; for a passage with a scene break, the narrator of its last scene).
+Also list every character who speaks in this passage with their gender, age group and any other names, titles or nicknames the passage uses for them (aliases). Only give an alias when the passage shows it is the same person; never another character's name.""".replace(
+    "{delivery_rule}", DELIVERY_RULE).replace("{sound_kinds}", sound_marks.prompt_list())
+
+
+RESPELL_SCHEMA = {"type": "array", "maxItems": 4, "items": {
+    "type": "object", "properties": {"written": {"type": "string", "maxLength": 40},
+                                     "said": {"type": "string", "maxLength": 40}},
+    "required": ["written", "said"]}}
+SOUNDS_SCHEMA = {"type": "array", "maxItems": 4, "items": {
+    "type": "object", "properties": {"written": {"type": "string", "maxLength": 40},
+                                     "sound": {"type": "string", "enum": list(sound_marks.KINDS)}},
+    "required": ["written", "sound"]}}
 
 
 def chunk_schema(local_ids: list[str], revisable: list[str] | None = None, profiles: bool = False) -> dict:
@@ -273,9 +352,15 @@ def _chunk_schema(local_ids: list[str]) -> dict:
                         # Echoing the opening words keeps long lists aligned with their ids.
                         "starts": {"type": "string", "maxLength": 40},
                         "speaker": {"type": "string"},
-                        "delivery": {"type": "string"},
+                        # Approved tags only (delivery.py); [] = plainly spoken.
+                        "delivery": {"type": "array", "maxItems": delivery_tags.MAX_TAGS,
+                                     "items": {"type": "string", "enum": delivery_tags.all_tags()}},
+                        # Words spelled the way they sound ("whaaaaaaat" -> "what"): [] for the others.
+                        "respell": RESPELL_SCHEMA,
+                        # Non-verbal sounds written in the quotation ("Ahaha" -> laugh): [] for the others.
+                        "sounds": SOUNDS_SCHEMA,
                     },
-                    "required": ["id", "starts", "speaker", "delivery"],
+                    "required": ["id", "starts", "speaker", "delivery", "respell", "sounds"],
                 },
             },
             "speakers": {
@@ -411,7 +496,9 @@ class ScriptStore:
             raise ValueError("bad book id")
         return self.root / book_id
 
-    def save_book(self, book_id: str, payload: dict) -> None:
+    def save_book(self, book_id: str, payload: dict, added_by: str | None = None) -> None:
+        """Saves an uploaded book. `added_by`: the user adding it, whose library it joins (the book's `users`;
+        permissions.py); the same book added by someone else is in both libraries."""
         d = self.dir(book_id)
         d.mkdir(parents=True, exist_ok=True)
         cover = payload.get("cover")
@@ -427,14 +514,25 @@ class ScriptStore:
         if meta_path.exists():
             try:
                 old = json.loads(meta_path.read_text(encoding="utf-8"))
-                keep = {k: v for k, v in old.items() if k == "series" or (old.get("title_user") and k in ("title", "title_user"))}
+                keep = {k: v for k, v in old.items() if k in ("series", "users")
+                        or (old.get("title_user") and k in ("title", "title_user"))}
             except ValueError:
                 pass
+        if added_by and added_by not in keep.get("users", []):
+            keep["users"] = [*keep.get("users", []), added_by]
         if keep.get("title_user"):  # the reader renamed it: uploading the file again keeps their title
             payload["title"] = keep["title"]
             (d / "book.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         meta_path.write_text(json.dumps(book_summary(payload) | {"uploaded": time.time()} | keep,
                                         ensure_ascii=False), encoding="utf-8")
+
+    def add_user(self, book_id: str, user_id: str) -> None:
+        """The book joins a user's library (meta.json `users`)."""
+        meta_path = self.dir(book_id) / "meta.json"
+        meta = self.summary(book_id) or {}
+        if user_id and user_id not in meta.get("users", []):
+            meta["users"] = [*meta.get("users", []), user_id]
+            meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
     def summary(self, book_id: str) -> dict | None:
         d = self.dir(book_id)
@@ -482,17 +580,36 @@ class ScriptStore:
         lines = {}
         for qid, line in script.get("lines", {}).items():
             lines[qid] = {"speaker": line.get("speaker"), "delivery": line.get("delivery"), "corrected": False}
+            if line.get("conf") is not None:
+                lines[qid]["conf"] = line["conf"]  # how sure the model was
+                lines[qid]["alts"] = line.get("alts") or []  # [[character id or None (narrator), probability]]
+            if line.get("dodds"):
+                lines[qid]["dodds"] = line["dodds"]  # [[delivery tag, probability]]: the unsure ones left out
             if line.get("mention") and line.get("speaker") is None:
                 lines[qid]["mention"] = True  # a quoted term inside narration, not dialogue
             if line.get("revised"):
                 lines[qid]["revised"] = True  # changed by a later passage's evidence
+            if line.get("say"):
+                lines[qid]["say"] = line["say"]  # spoken as (the quotation spells a sound out)
         for qid, fix in script.get("corrections", {}).items():
             base = lines.get(qid, {"speaker": None, "delivery": None})
+            mention = fix.get("mention", base.get("mention") and "speaker" not in fix)
             lines[qid] = {
-                "speaker": fix.get("speaker", base["speaker"]),
-                "delivery": fix.get("delivery", base["delivery"]),
+                "speaker": None if mention else fix.get("speaker", base["speaker"]),
+                "delivery": None if mention else fix.get("delivery", base["delivery"]),
                 "corrected": True,
             }
+            if mention:
+                lines[qid]["mention"] = True  # read in the flow of its sentence, by the narration
+            if base.get("say"):
+                lines[qid]["say"] = base["say"]
+            if qid in script.get("lines", {}):  # what the analysis said, for the line's dialog
+                lines[qid]["analysis"] = {k: base[k] for k in ("speaker", "delivery", "conf", "alts", "dodds", "mention")
+                                          if k in base}
+        for name in ("guidance", "temperature"):  # the reader's own speech settings (the line dialog's sliders)
+            for qid, v in (script.get(name) or {}).items():
+                if qid in lines:
+                    lines[qid][name] = v
         counts: dict[str, int] = {}
         for line in lines.values():
             if line["speaker"]:
@@ -511,6 +628,8 @@ class ScriptStore:
             "lines": lines,
             # [chapter, first paragraph, character id or None]: who narrates from there on.
             "narration": script.get("narration", []),
+            # The reader's corrections of it: {"chapter:paragraph": character id or None} (fix_narration).
+            "narration_fixed": script.get("narration_fixed") or {},
             # Sorting the cast into tiers: {"running": true} / {"done": true, ...} / {"error": "..."}.
             "roles_state": script.get("roles_state"),
         }
@@ -525,12 +644,67 @@ _I_SAID_BEFORE = re.compile(rf"\bI\s+(?:\w+ly\s+)?{_SAY}(?:\s+\w+)?[,:]?\s*$")
 
 
 def compute_narration(book: dict, script: dict) -> list[list]:
+    """Who narrates each section: as the analysis finds it (analysed_narration), with the reader's corrections
+    (script["narration_fixed"]) over it."""
+    return fix_narration(book, analysed_narration(book, script), script.get("narration_fixed") or {})
+
+
+def section_end(book: dict, ci: int, pi: int) -> tuple[int, int] | None:
+    """Where a narration section starting at (ci, pi) ends: the next point-of-view heading or scene break in its
+    chapter, or the next chapter; None at the end of the book."""
+    ch = book["chapters"][ci]
+    paras = ch.get("paragraphs", [])
+    breaks = set(ch.get("breaks") or [])
+    for p in range(pi + 1, len(paras)):
+        if p in breaks or is_pov_marker(paras[p]):
+            return ci, p
+    return (ci + 1, 0) if ci + 1 < len(book["chapters"]) else None
+
+
+def fix_narration(book: dict, runs: list[list], fixed: dict) -> list[list]:
+    """`runs` with the reader's corrections: {"chapter:paragraph": character id, or None for the book's narrator
+    voice}, each holding from that paragraph to the end of its section (section_end), where the narration goes back
+    to what it was."""
+    if not fixed:
+        return runs
+
+    def who_at(pos):
+        who = None
+        for c, p, w in runs:
+            if (c, p) > pos:
+                break
+            who = w
+        return who
+
+    events = {(c, p): w for c, p, w in runs}
+    chapters = book.get("chapters", [])
+    for key, who in sorted(fixed.items(), key=lambda kv: tuple(map(int, kv[0].split(":")))):
+        ci, pi = map(int, key.split(":"))
+        if ci >= len(chapters) or pi >= len(chapters[ci].get("paragraphs", [])):
+            continue  # the book's text changed
+        end = section_end(book, ci, pi)
+        if end is not None and end not in events:
+            events[end] = who_at(end)
+        for pos in [pos for pos in events if (ci, pi) < pos < (end or (len(chapters), 0))]:
+            del events[pos]
+        events[(ci, pi)] = who
+    out: list[list] = []
+    for (c, p), w in sorted(events.items()):
+        if (out[-1][2] if out else None) != w:
+            out.append([c, p, w])
+    return out
+
+
+def analysed_narration(book: dict, script: dict) -> list[list]:
     """Who narrates each section, for first-person books.
 
     Evidence is deterministic: the character that quotations tagged "…," I said
-    are attributed to. Sections are split at chapters and point-of-view headings;
-    a section without evidence keeps the book's main narrator, unless it starts
-    with a point-of-view change (then it is left to the book's narrator voice).
+    are attributed to. Sections are split at chapters, point-of-view headings and
+    scene breaks (the EPUB's "breaks"). A section without evidence is left to the
+    book's narrator voice when its narration is in the third person (hardly an "I"
+    outside the quotations) or it starts with a point-of-view change; a scene after
+    a break goes on with the narrator of the scene before (a flashback, a time skip);
+    otherwise it keeps the book's main narrator.
     Third-person books (little or no evidence) get an empty list. Books with two
     first-person narrators in different tenses are split by narration tense.
     """
@@ -538,36 +712,71 @@ def compute_narration(book: dict, script: dict) -> list[list]:
     narrator = narrators_by_tense(book, lines)
     if narrator is not None:
         return tense_narration(book, narrator)
-    sections: list[tuple[int, int, dict[str, int], bool]] = []
+    # (chapter, first paragraph, votes, how it starts: "chapter" / "pov" / "break", narration words, first-person words
+    # (with "we"), first-person singular words)
+    sections: list[list] = []
     for ci, ch in enumerate(book.get("chapters", [])):
         paras = ch.get("paragraphs", [])
+        breaks = set(ch.get("breaks") or [])
         by_para: dict[int, list] = {}
         for qid, p, s, e in ch.get("quotes", []):
             by_para.setdefault(int(p), []).append((qid, int(s), int(e)))
-        start, votes = 0, {}
-        pov = is_pov_marker(ch.get("title", ""))
+        cur = [ci, 0, {}, "pov" if is_pov_marker(ch.get("title", "")) else "chapter", 0, 0, 0]
         for pi, text in enumerate(paras):
-            if pi > 0 and is_pov_marker(text):
-                sections.append((ci, start, votes, pov))
-                start, votes, pov = pi, {}, True
+            if pi > 0 and (is_pov_marker(text) or pi in breaks):
+                sections.append(cur)
+                cur = [ci, pi, {}, "pov" if is_pov_marker(text) else "break", 0, 0, 0]
+            votes, last = cur[2], 0
+            narration = []
             for qid, s, e in by_para.get(pi, []):
+                narration.append(text[last:s])
+                last = e
                 speaker = (lines.get(qid) or {}).get("speaker")
                 if speaker and (_I_SAID_AFTER.match(text[e:e + 60]) or _I_SAID_BEFORE.search(text[max(0, s - 60):s])):
                     votes[speaker] = votes.get(speaker, 0) + 1
-        sections.append((ci, start, votes, pov))
+            narration.append(text[last:])
+            said = " ".join(narration)
+            cur[4] += len(said.split())
+            cur[5] += len(_FIRST_PERSON_WORDS.findall(said))
+            cur[6] += len(_FIRST_PERSON_SINGULAR.findall(said))
+        sections.append(cur)
     totals: dict[str, int] = {}
-    for _, _, votes, _ in sections:
-        for k, v in votes.items():
+    for sec in sections:
+        for k, v in sec[2].items():
             totals[k] = totals.get(k, 0) + v
     if sum(totals.values()) < 3:
         return []
     main = max(totals, key=totals.get)
     out: list[list] = []
-    for ci, start, votes, pov in sections:
-        who = max(votes, key=votes.get) if votes else (None if pov else main)
+    previous = main
+    for ci, start, votes, kind, words, first, singular in sections:
+        if votes:
+            who = max(votes, key=votes.get)
+        elif words >= THIRD_PERSON_MIN_WORDS and (not singular or first * 100 < THIRD_PERSON_MAX_PER_100 * words):
+            who = None  # told in the third person: the book's narrator voice
+        elif kind == "pov":
+            who = None
+        elif kind == "break" and (words < THIRD_PERSON_MIN_WORDS or previous is not None):
+            who = previous  # a new scene told by the same "I" (or too short to tell): the narrator goes on
+        else:
+            who = main
+        previous = who
         if not out or out[-1][2] != who:
             out.append([ci, start, who])
     return out
+
+
+# A section's narration is in the third person when "I", "me", "we", "our"... make up less than this many of every 100
+# of its words outside the quotations (first-person narration has several, though "we" and "us" can carry a scene: 0.89
+# in Unital Ring I's ch. 8 opening; a third-person scene only a stray thought: at most 0.74 across the library),
+# judged from this many words.
+_FIRST_PERSON_WORDS = re.compile(r"\b(?:I|me|my|mine|myself|we|us|our|ours|ourselves|I'm|I've|I'd|I'll|we're|we've|"
+                                 r"we'd|we'll|I\u2019m|I\u2019ve|I\u2019d|I\u2019ll|we\u2019re|we\u2019ve|we\u2019d|"
+                                 r"we\u2019ll)\b")
+# ...and with no "I" at all it is third person whatever its "we" ("…our city, the elder said": reported speech).
+_FIRST_PERSON_SINGULAR = re.compile(r"\b(?:I|me|my|mine|myself|I'm|I've|I'd|I'll|I\u2019m|I\u2019ve|I\u2019d|I\u2019ll)\b")
+THIRD_PERSON_MAX_PER_100 = 0.8
+THIRD_PERSON_MIN_WORDS = 120
 
 
 _PRESENT_SAY = {"say", "ask", "reply", "answer", "add", "mutter", "whisper", "shout", "call", "respond", "continue",
@@ -773,6 +982,23 @@ def find_character(script: dict, name: str) -> str | None:
     return None
 
 
+def detach_alias(script: dict, name: str) -> dict[str, list[str]]:
+    """The reader names someone new with a name that is only another character's alias (the analysis filed
+    "Fanatio" under Asuna): that alias and longer forms of it ("Fanatio Synthesis Two") leave the other
+    character, so the name can become a character of its own. Nothing changes when it is a character's own
+    name. Returns {character id: aliases removed}."""
+    key = norm_name(name)
+    if not key or any(norm_name(c["name"]) == key for c in script["characters"].values()):
+        return {}
+    removed: dict[str, list[str]] = {}
+    for cid, c in script["characters"].items():
+        gone = [a for a in c.get("aliases", []) if norm_name(a) == key or norm_name(a).startswith(key + " ")]
+        if gone:
+            c["aliases"] = [a for a in c["aliases"] if a not in gone]
+            removed[cid] = gone
+    return removed
+
+
 _ARTICLE = re.compile(r"^(?:a|an|the)\s+", re.IGNORECASE)
 _SMALL_WORDS = {"of", "in", "on", "at", "to", "and", "or", "the", "a", "an", "for", "with", "from", "by"}
 _NAME_PARTICLES = {"van", "von", "de", "da", "di", "du", "del", "della", "der", "den", "la", "le", "bin", "ibn",
@@ -810,7 +1036,7 @@ def canonical_names(book: dict, script: dict, ratio: int = 3) -> list[tuple[str,
             continue
         name = c["name"]
         options = [a for a in c["aliases"] if a != name and a[:1].isupper() and not _is_descriptor(a)
-                   and find_character(script, a) == cid and count(a) >= 3]
+                   and a.lower() not in PRONOUNS and find_character(script, a) == cid and count(a) >= 3]
         if not options:
             continue
         best = max(options, key=count)
@@ -866,17 +1092,36 @@ def normalize_names(script: dict) -> int:
 
 
 def ensure_character(script: dict, name: str, gender: str = "unknown", age: str = "unknown",
-                     aliases: list[str] | tuple = (), exact: bool = False) -> str | None:
+                     aliases: list[str] | tuple = (), exact: bool = False, vote: str | None = None) -> str | None:
     """The one place characters are created. Names from the model go through normalize_character_name
-    ("a prisoner" -> "Prisoner"); `exact` keeps a name the reader typed as it is."""
+    ("a prisoner" -> "Prisoner"); `exact` keeps a name the reader typed as it is.
+
+    A new name only joins an existing character when one of its aliases is that character's own name
+    ("Kazuto Kirigaya", also called "Kirito"), never through another alias: a title two people share
+    ("Commander") once folded Fanatio into Asuna. `vote` (the passage reporting it) makes an alias unrelated to
+    the character's name ("Commander", "Urano") wait until a second passage reports it too; None (the series
+    memory, the reader) takes aliases at once."""
     if not name or name.strip().upper() == NARRATOR:
         return None
     cid = find_character(script, name)
     if cid is None:
         for alias in aliases:
-            cid = find_character(script, alias) if is_proper_alias(alias) else None
+            cid = _named(script, alias) if is_proper_alias(alias) else None
             if cid:
                 break
+    joined = None  # the pending alias this name joined through
+    if cid is None and not exact:
+        # A name one passage already gave as someone's alias, now speaking on its own ("Sasaki", also called
+        # "Kenta Nakano"; later just "Kenta Nakano"): it is them, and a new passage counts as the second report.
+        pending = _pending_owner(script, name)
+        if pending:
+            cid, joined = pending
+            seen = script["characters"][cid]["alias_votes"][joined]
+            if vote is None or vote not in seen:
+                seen.append(vote or f"label-{time.time_ns()}")
+            if len(seen) >= ALIAS_VOTES:
+                script["characters"][cid].setdefault("aliases", []).append(joined)
+                del script["characters"][cid]["alias_votes"][joined]
     if cid is None:
         cid = slug(name)
         base, n = cid, 2
@@ -891,13 +1136,23 @@ def ensure_character(script: dict, name: str, gender: str = "unknown", age: str 
     c = script["characters"][cid]
     for alias in [name, *aliases]:
         alias = alias.strip()
-        if not is_proper_alias(alias) or norm_name(alias) == norm_name(c["name"]):
+        if not is_proper_alias(alias) or norm_name(alias) == norm_name(c["name"]) or alias == joined:
             continue
         if norm_name(alias) in (norm_name(a) for a in c.setdefault("aliases", [])):
             continue
         owner = find_character(script, alias)
-        if owner is None:  # never steal another character's name
+        if owner is not None:  # never steal another character's name
+            continue
+        if vote is None or alias == name or related_names(alias, c["name"]):
             c["aliases"].append(alias)
+            c.get("alias_votes", {}).pop(alias, None)
+            continue
+        seen = c.setdefault("alias_votes", {}).setdefault(alias, [])
+        if vote not in seen:
+            seen.append(vote)
+        if len(seen) >= ALIAS_VOTES:
+            c["aliases"].append(alias)
+            del c["alias_votes"][alias]
     if c.get("gender", "unknown") == "unknown" and gender in GENDERS:
         c["gender"] = gender
     if c.get("age", "unknown") == "unknown" and age in AGES:
@@ -905,10 +1160,42 @@ def ensure_character(script: dict, name: str, gender: str = "unknown", age: str 
     return cid
 
 
+ALIAS_VOTES = 2  # passages that must report an alias unrelated to a character's name before it is taken
+PRONOUNS = {"i", "me", "my", "mine", "myself", "you", "your", "yours", "he", "him", "his", "she", "her", "hers",
+            "we", "us", "our", "they", "them", "their", "it", "its"}
+
+
+def _named(script: dict, name: str) -> str | None:
+    """The character whose own name (not an alias) this is."""
+    key = norm_name(name)
+    return next((cid for cid, c in script["characters"].items() if norm_name(c["name"]) == key), None)
+
+
+def _pending_owner(script: dict, name: str) -> tuple[str, str] | None:
+    """(character id, alias) when exactly one character has `name` as an alias still waiting for its second
+    report."""
+    key = norm_name(name)
+    hits = [(cid, a) for cid, c in script["characters"].items() for a in (c.get("alias_votes") or {})
+            if norm_name(a) == key]
+    return hits[0] if len({cid for cid, _ in hits}) == 1 else None
+
+
+def _name_words(name: str) -> set[str]:
+    words = re.findall(r"[^\W\d_][\w'\u2019-]*", name.lower())
+    return {w for w in words if w not in _DESCRIPTOR_WORDS and w not in _SMALL_WORDS and len(w) > 1}
+
+
+def related_names(a: str, b: str) -> bool:
+    """Whether two names share a word that isn't a title ("Lady Asuna" and "Asuna Yuuki"; not "Lady Fizel"
+    and "Lady Sheyta")."""
+    return bool(_name_words(a) & _name_words(b))
+
+
 def is_proper_alias(alias: str) -> bool:
     """Nicknames and names ("Makeup", "Robot Girl", "Zhang Lee"), not descriptions ("the man")."""
     alias = alias.strip()
-    return 0 < len(alias) <= 40 and any(ch.isupper() for ch in alias) and alias.upper() != NARRATOR
+    return (0 < len(alias) <= 40 and any(ch.isupper() for ch in alias) and alias.upper() != NARRATOR
+            and alias.lower() not in PRONOUNS)
 
 
 _FIRST_PERSON = {"i", "me", "myself", "narrator (i)", "the narrator", "narrator", "i (narrator)"}
@@ -946,9 +1233,11 @@ def roster_text(script: dict, limit: int = 40) -> str:
     if not ranked:
         return "(none yet)"
     parts = []
-    for _, c in ranked:
+    for cid, c in ranked:
         extra = ", ".join(x for x in (c.get("gender"), c.get("age")) if x and x != "unknown")
-        alias = f"; also called {', '.join(c['aliases'])}" if c.get("aliases") else ""
+        # An alias another character also answers to would steer that character's lines here.
+        aliases = [a for a in c.get("aliases", []) if find_character(script, a) == cid and a.lower() not in PRONOUNS]
+        alias = f"; also called {', '.join(aliases)}" if aliases else ""
         parts.append(f"- {c['name']}" + (f" ({extra})" if extra else "") + alias)
     return "\n".join(parts)
 
@@ -966,7 +1255,10 @@ def recent_text(script: dict, book: dict, chunk: Chunk, n: int = 6) -> str:
     return "\n".join(out) or "(start of chapter)"
 
 
-def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) -> int:
+def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]], vote: str | None = None) -> int:
+    """Folds one passage's labels into the script. `vote` names the passage (its chunk key): a new alias
+    unrelated to a character's name needs reports from two passages (ensure_character)."""
+    vote = vote or f"call-{time.time_ns()}"
     narrator = (result.get("narrator") or "").strip()
     if narrator.lower() in _FIRST_PERSON:
         narrator = script.get("narrator", "")
@@ -985,24 +1277,21 @@ def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) 
                 resolve_speaker(script, part, narrator)
                 continue
             ensure_character(script, part, sp.get("gender", "unknown"), sp.get("age", "unknown"),
-                             [a for a in sp.get("aliases") or [] if isinstance(a, str)])
-    n = 0
-    for q in result.get("quotes", []):
-        qids = local.get(str(q.get("id")))
-        if not qids:
-            continue
-        if isinstance(qids, str):
-            qids = [qids]
-        delivery = (q.get("delivery") or "").strip().lower()
-        if delivery in ("neutral", "none", "normal", ""):
-            delivery = None
-        # "the Hatter and the March Hare" in chorus: voiced by the first.
-        speaker = resolve_speaker(script, q.get("speaker", ""), narrator)
-        for qid in qids:
-            script["lines"][qid] = {"speaker": speaker, "delivery": delivery}
-            if q.get("mention"):
-                script["lines"][qid]["mention"] = True
-            n += 1
+                             [a for a in sp.get("aliases") or [] if isinstance(a, str)], vote=vote)
+    # Aliases this passage reported but not yet confirmed by a second one still resolve its own labels ("Nick",
+    # also called "Zhang Lee", then "man (Zhang Lee)" says a line); they are taken back afterwards.
+    passage_only = []
+    for cid, c in script["characters"].items():
+        for alias, seen in (c.get("alias_votes") or {}).items():
+            if vote in seen and find_character(script, alias) is None:
+                c.setdefault("aliases", []).append(alias)
+                passage_only.append((c, alias))
+    try:
+        n = _apply_quotes(script, result, local, narrator)
+    finally:
+        for c, alias in passage_only:
+            if alias in (c.get("alias_votes") or {}) and alias in c.get("aliases", []):
+                c["aliases"].remove(alias)
     if result.get("revisions"):
         apply_revisions(script, result)
     if result.get("profile_updates"):
@@ -1012,9 +1301,138 @@ def apply_chunk_result(script: dict, result: dict, local: dict[str, list[str]]) 
     return n
 
 
+_QUOTE_MARKS = "\"'\u201c\u201d\u2018\u2019\u00ab\u00bb\u300c\u300d\u300e\u300f "
+# What the model names must be one word ("whaaaaaaat", "so-o-o"): given "Wh…whaaaaaaat?!" it said "What?",
+# losing the stutter and the "!".
+_ONE_WORD = re.compile(r"[^\W\d_]+(?:[-'\u2019][^\W\d_]+)*")
+
+
+def _destutters(written: str, said: str) -> bool:
+    """"Y-yeah" -> "Yeah": a stutter the model flattened although told to keep it (they read fine)."""
+    parts = written.lower().split("-")
+    return len(parts) > 1 and said.lower() == parts[-1] and all(parts[-1].startswith(p) for p in parts[:-1])
+
+
+def respelled(text: str | None, pairs) -> str:
+    """How a quotation is read aloud ("say") when the model found words in it spelled the way they sound
+    ([{"written": "whaaaaaaat", "said": "what"}]): the quotation with just those words swapped, or "" when there
+    are none. The model names words rather than rewriting the quotation: asked for the whole quotation, it
+    "tidied" ordinary lines (stutters, ellipses) and dropped the end of a long one. A word not in the
+    quotation is ignored."""
+    if not text or not isinstance(pairs, list):
+        return ""
+    out = text
+    for p in pairs:
+        if not isinstance(p, dict):
+            continue
+        written = str(p.get("written") or "").strip(_QUOTE_MARKS)
+        said = " ".join(str(p.get("said") or "").split()).strip(_QUOTE_MARKS)
+        if not _ONE_WORD.fullmatch(written) or not any(ch.isalpha() for ch in said) or \
+                said.lower() == written.lower() or _destutters(written, said) or len(said) > len(written):
+            # (Plain words are never longer than drawn-out ones: "plea—" cut off mid-word became "please".)
+            continue
+        m = re.search(r"(?<!\w)" + re.escape(written) + r"(?!\w)", out, re.IGNORECASE)
+        if not m:
+            continue
+        if m.group(0)[0].isupper() and said[0].islower():
+            said = said[0].upper() + said[1:]
+        out = out[:m.start()] + said + out[m.end():]
+    return out if out != text else ""
+
+
+def spoken_form(text: str | None, respell=None, sounds=None, said: str | None = None) -> str:
+    """A quotation's spoken form ("say"): its respelled words swapped (respelled) and the sounds written in it
+    marked ({laugh|Ahaha}, sounds.py), from `said` (an earlier spoken form) or the text; "" when that changes
+    nothing."""
+    if not text:
+        return ""
+    base = respelled(text, respell) or said or text
+    out = sound_marks.mark(base, sounds)
+    return out if out != text else ""
+
+
+def sure_delivery(tags: list, odds=None) -> tuple[str | None, list | None]:
+    """(delivery, odds) from the model's tags and how likely it was to give each (delivery_odds): only tags it was
+    at least delivery.MIN_CONF sure of are kept; `odds` ([[tag, probability], ...], every approved tag it gave;
+    [] for none) shows what was left out. Without probabilities (a reasoning model) every tag is kept, and odds
+    is None."""
+    if odds is None:
+        return delivery_tags.normalize(tags), None
+    probs = {" ".join(str(t).lower().split()): p for t, p in odds}
+    keep = [t for t in tags if probs.get(" ".join(str(t).lower().split()), 1.0) >= delivery_tags.MIN_CONF]
+    listed = [[" ".join(str(t).lower().split()), round(p, 3)] for t, p in odds if delivery_tags.is_approved(str(t))]
+    return delivery_tags.normalize(keep), listed
+
+
+def _apply_quotes(script: dict, result: dict, local: dict, narrator: str) -> int:
+    n = 0
+    for q in result.get("quotes", []):
+        qids = local.get(str(q.get("id")))
+        if not qids:
+            continue
+        if isinstance(qids, str):
+            qids = [qids]
+        raw = q.get("delivery")
+        dodds = None
+        if isinstance(raw, list):  # approved tags (the labelling schema)
+            delivery, dodds = sure_delivery(raw, q.get("_dodds"))
+        else:  # a free-text delivery (a cached answer from before the approved list)
+            delivery = delivery_tags.from_text(raw)
+        # "the Hatter and the March Hare" in chorus: voiced by the first.
+        speaker = resolve_speaker(script, q.get("speaker", ""), narrator)
+        odds = line_odds(script, q, speaker, narrator)
+        # A quotation split by narration ("Yes," [3] he said, [3] "I will.") has one label for two pieces: a
+        # spoken form can't be shared out between them.
+        say = spoken_form(q.get("_text"), q.get("respell"), q.get("sounds")) if len(qids) == 1 else ""
+        for qid in qids:
+            script["lines"][qid] = {"speaker": speaker, "delivery": delivery, **odds,
+                                    **({"dodds": dodds} if dodds is not None else {})}
+            if say:
+                script["lines"][qid]["say"] = say
+            if q.get("mention"):
+                script["lines"][qid]["mention"] = True
+            n += 1
+    return n
+
+
 def split_group(name: str) -> list[str]:
     parts = [p.strip() for p in re.split(r"\s*(?:,|&|\band\b)\s*", name or "") if p.strip()]
     return parts or [name or ""]
+
+
+MIN_ALTERNATIVE = 0.03  # alternatives less likely than this are not kept
+
+
+def guess_speaker(script: dict, start: str, narrator: str = ""):
+    """The speaker a name starting with `start` (an alternative first token) would be: a character id, None for
+    narration, or False when no known character or several start that way."""
+    s = start.strip()
+    if not s:
+        return False
+    found: set = set()
+    if NARRATOR.startswith(s) and s.isupper():
+        found.add(None)
+    if s == "I" and narrator and narrator.lower() not in ("third person", "unknown", "none"):
+        found.add(find_character(script, narrator))
+    for cid, c in script["characters"].items():
+        if any(n.startswith(s) for n in [c["name"], *c.get("aliases", [])]):
+            found.add(cid)
+    return found.pop() if len(found) == 1 else False
+
+
+def line_odds(script: dict, q: dict, speaker: str | None, narrator: str = "") -> dict:
+    """{"conf": how sure the model was of its speaker, "alts": [[other speaker, probability], ...]} from the
+    probabilities label_chunk read off its tokens; {} without them."""
+    if q.get("_p") is None:
+        return {}
+    others: dict = {}
+    for start, p in q.get("_alts") or []:
+        who = guess_speaker(script, start, narrator)
+        if who is not False:
+            others[who] = others.get(who, 0.0) + p
+    conf = min(1.0, q["_p"] + others.pop(speaker, 0.0))  # another spelling of the same speaker counts for it
+    alts = [[who, round(p, 3)] for who, p in sorted(others.items(), key=lambda kv: -kv[1]) if p >= MIN_ALTERNATIVE]
+    return {"conf": round(conf, 3), "alts": alts[:3]}
 
 
 # ----------------------------------------------------------------- LLM
@@ -1026,6 +1444,64 @@ class LlmError(Exception):
 
 class LlmPreempted(Exception):
     """The LLM was stopped because someone started using the site (llm_mode "adaptive"); the step is retried later."""
+
+
+SHARED_BASE_VRAM_GB = 4.0  # the speech model llm_cpu_moe_shared was tuned next to (OmniVoice)
+MOE_LAYER_GB = 0.5  # one layer's experts of the default LLM (Qwen3.5-35B-A3B Q4_K_M: 20.5 GB, 40 layers)
+
+
+def speech_model_extra_layers(cfg) -> int:
+    """More layers' experts kept in RAM in shared mode when the speech models need more VRAM than OmniVoice alone
+    (VoxCPM2 ~7 GB: 6 more; with OmniVoice reading the narration next to it, 11 GB: 14 more), so they all still
+    fit on the GPU together."""
+    from .engines.registry import ENGINES
+
+    spec = ENGINES.get(cfg.default_engine)
+    speech_gb = spec.vram_gb if spec else SHARED_BASE_VRAM_GB
+    narration = ENGINES.get(cfg.narration_engine) if cfg.narration_engine != cfg.default_engine else None
+    extra = speech_gb + (narration.vram_gb if narration else 0.0) - SHARED_BASE_VRAM_GB
+    return max(0, math.ceil(extra / MOE_LAYER_GB - 1e-9))
+
+
+LLM_SHARED_MIN_GB = 3.0  # the LLM next to the speech models with every expert in RAM: attention, cache, buffers
+DESKTOP_VRAM_GB = 1.0  # Windows and the desktop
+_GPU_TOTAL_GB: list = []
+
+
+def gpu_total_gb() -> float | None:
+    """The GPU's memory (nvidia-smi), once; None without an NVIDIA GPU."""
+    if not _GPU_TOTAL_GB:
+        import shutil
+        import subprocess
+
+        total = None
+        smi = shutil.which("nvidia-smi")
+        if smi:
+            try:
+                out = subprocess.run([smi, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                                     capture_output=True, text=True, timeout=10).stdout.split()
+                total = float(out[0]) / 1024 if out else None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                total = None
+        _GPU_TOTAL_GB.append(total)
+    return _GPU_TOTAL_GB[0]
+
+
+def speech_models_gb(cfg) -> float:
+    from .engines.registry import ENGINES
+
+    spec = ENGINES.get(cfg.default_engine)
+    narration = ENGINES.get(cfg.narration_engine) if cfg.narration_engine != cfg.default_engine else None
+    return (spec.vram_gb if spec else SHARED_BASE_VRAM_GB) + (narration.vram_gb if narration else 0.0)
+
+
+def shared_fits(cfg) -> bool:
+    """Whether the analysis LLM fits on the GPU next to the speech models. Breeze TTS 2 (9 GB) with OmniVoice
+    narrating (4 GB) took 14 GB with Windows, measured: the LLM's 3 GB more would spill into system memory, which
+    Windows does without an error and which slows the speech and the LLM alike. Then analysis waits while someone
+    reads, as with two readers. VoxCPM2 (7 GB) with OmniVoice: 14.1 GB with the LLM, it fits."""
+    total = gpu_total_gb()
+    return total is None or speech_models_gb(cfg) + LLM_SHARED_MIN_GB + DESKTOP_VRAM_GB <= total
 
 
 class LocalLlm:
@@ -1043,6 +1519,10 @@ class LocalLlm:
         self.starting_since: float | None = None
         self.running_gpu: bool | None = None
         self.running: tuple | None = None  # (model file, context) of the running server
+        # VRAM to leave free on "the whole GPU" (a speech model parked in system RAM still holds some).
+        self.reserve_gb = 0.0
+        # The inference server, when Settings choose it for analysis (llm_backend "remote").
+        self.remote = RemoteLlm(cfg)
 
     async def preempt(self) -> None:
         """Stop the LLM now to give the GPU back; a request in flight ends with LlmPreempted."""
@@ -1066,7 +1546,10 @@ class LocalLlm:
         budget = getattr(self.cfg, "llm_reasoning_budget", -1)
         # On the GPU next to the speech model ("shared"), or with the whole GPU to itself.
         shared = self.gpu and self.shared
-        cpu_moe = self.cfg.llm_cpu_moe_shared if shared else self.cfg.llm_cpu_moe
+        cpu_moe = self.cfg.llm_cpu_moe_shared + speech_model_extra_layers(self.cfg) if shared else self.cfg.llm_cpu_moe
+        if self.gpu and not shared and self.reserve_gb:
+            # The whole GPU but for what the parked speech model still holds: that many more layers in RAM.
+            cpu_moe += math.ceil(self.reserve_gb / MOE_LAYER_GB - 1e-9)
         if self.proc is not None and self.proc.returncode is None and (
                 self.running_gpu != self.gpu or self.running != (model_file, context, budget, cpu_moe)):
             await self.stop()
@@ -1112,6 +1595,9 @@ class LocalLlm:
 
     def info(self) -> dict:
         """For the website's banner: whether the LLM is starting, running or stopped, and where."""
+        if self.cfg.llm_backend == "remote":
+            busy = self.remote.busy_since is not None
+            return {"state": "running" if busy else "stopped", "where": "remote" if busy else None}
         alive = self.proc is not None and self.proc.returncode is None
         state = "starting" if alive and self.starting_since else "running" if alive else "stopped"
         where = None if not alive else "cpu" if not self.running_gpu else "shared" if self.shared else "whole_gpu"
@@ -1129,9 +1615,14 @@ class LocalLlm:
         self.running = None
 
     async def complete(self, session, system: str, user: str, schema: dict, max_tokens: int = 2048,
-                       model: str | None = None, thinking: bool = False, effort: str = "high") -> dict:
+                       model: str | None = None, thinking: bool = False, effort: str = "high",
+                       logprobs: int = 0) -> dict:
         """One chat completion constrained to `schema`. With `thinking`, reasoning models reason
-        first (llama.cpp returns the reasoning separately and applies the schema to the answer)."""
+        first (llama.cpp returns the reasoning separately and applies the schema to the answer). `logprobs`
+        (the top alternatives per token) adds the answer's tokens with their probabilities as "_tokens"."""
+        if self.cfg.llm_backend == "remote":  # Settings: analysis runs on the inference server
+            return await self.remote.complete(session, system, user, schema, max_tokens=max_tokens, thinking=thinking,
+                                              effort=effort, logprobs=logprobs)
         context = self.cfg.llm_dossier_context if thinking else None
         if self.preempted:
             raise LlmPreempted()
@@ -1145,6 +1636,9 @@ class LocalLlm:
             "chat_template_kwargs": ({"enable_thinking": True, "reasoning_effort": effort} if thinking
                                      else {"enable_thinking": False, "reasoning_effort": "low"}),
         }
+        if logprobs:
+            # The model's own distribution (before sampling), so a 60/30 split between two speakers shows.
+            body.update(logprobs=True, top_logprobs=logprobs)
         for attempt in range(3):
             try:
                 async with session.post(f"{self.url}/chat/completions", json=body, timeout=1800) as r:
@@ -1173,30 +1667,126 @@ class LocalLlm:
             raise LlmError(f"LLM returned invalid JSON: {content[:200]}") from exc
         parsed["_usage"] = usage
         parsed["_timings"] = data.get("timings", {})
+        if logprobs:
+            parsed["_tokens"] = ((data["choices"][0].get("logprobs") or {}).get("content")) or []
         return parsed
+
+
+REMOTE_BUSY_WAITS = 120  # tries while the analysis server is at its request limit (about an hour in all)
+REMOTE_BUSY_DELAY_S = 2.0  # the first wait; each one longer, up to 30 s
+
+
+class RemoteLlm:
+    """Analysis on an OpenAI-compatible server elsewhere (llm_remote_url, model llm_remote_model): llama-swap on the
+    inference PC, which loads the model with the first request (a few minutes) and serves several at once.
+
+    The same requests as the local llama-server (json_schema, logprobs, thinking on or off), except: vLLM's grammar
+    and its speculative decoding don't go together (every schema-constrained request came back HTTP 500), so after
+    one such answer the schema is written into the prompt instead, and the JSON taken from the answer. When the
+    server is at its request limit (HTTP 429, shared with everyone using it) the request waits and tries again."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.schema_in_prompt = False
+        self.busy_since: float | None = None  # a request in flight (the banner)
+        self.inflight = 0
+
+    @property
+    def url(self) -> str:
+        return self.cfg.llm_remote_url.rstrip("/")
+
+    async def complete(self, session, system: str, user: str, schema: dict, max_tokens: int = 2048,
+                       thinking: bool = False, effort: str = "high", logprobs: int = 0) -> dict:
+        if not self.url or not self.cfg.llm_remote_model:
+            raise LlmError("No analysis server is set up (llm_remote_url and llm_remote_model)")
+        self.inflight += 1
+        self.busy_since = self.busy_since or time.monotonic()
+        try:
+            busy_waits = 0
+            while True:
+                in_prompt = self.schema_in_prompt
+                body = {
+                    "model": self.cfg.llm_remote_model,
+                    "messages": [{"role": "system", "content": system + (
+                        "\n\nReply with only one JSON object that follows this JSON Schema exactly (no prose, no code "
+                        "fence; copy every enum value exactly):\n" + json.dumps(schema, ensure_ascii=False)
+                        if in_prompt else "")},
+                                 {"role": "user", "content": user}],
+                    "temperature": 0.6 if thinking else 0.1,
+                    "max_tokens": max_tokens,
+                    "chat_template_kwargs": ({"enable_thinking": True, "reasoning_effort": effort} if thinking
+                                             else {"enable_thinking": False}),
+                }
+                if not in_prompt:
+                    body["response_format"] = {"type": "json_schema", "json_schema": {"name": "labels", "schema": schema}}
+                if logprobs:
+                    body.update(logprobs=True, top_logprobs=logprobs)
+                try:
+                    # Long: the first request waits while the server loads the model.
+                    async with session.post(f"{self.url}/chat/completions", json=body, timeout=1800) as r:
+                        data = await r.json(content_type=None)
+                        status = r.status
+                except asyncio.TimeoutError as exc:
+                    raise LlmError("The analysis server timed out") from exc
+                except (OSError, ClientConnectionError) as exc:
+                    raise LlmError(f"The analysis server can't be reached ({self.url}): {exc}") from exc
+                if status == 429 and busy_waits < REMOTE_BUSY_WAITS:
+                    # Its request limit is shared with everyone else using the server: wait for a free slot.
+                    busy_waits += 1
+                    await asyncio.sleep(min(30.0, REMOTE_BUSY_DELAY_S * busy_waits))
+                    continue
+                if status >= 500 and not in_prompt:
+                    logger.warning("the analysis server refused a JSON-schema request (HTTP %s); the schema goes in "
+                                   "the prompt from now on", status)
+                    self.schema_in_prompt = True
+                    continue
+                if status >= 400 or not isinstance(data, dict) or "choices" not in data:
+                    raise LlmError(f"Analysis server HTTP {status}: {str(data)[:300]}")
+                break
+            choice = data["choices"][0]
+            content = re.sub(r"^\s*```(?:json)?|```\s*$", "", choice["message"].get("content") or "").strip()
+            try:
+                parsed, _ = json.JSONDecoder().raw_decode(content[content.find("{"):])
+            except ValueError as exc:
+                raise LlmError(f"LLM returned invalid JSON: {content[:200]}") from exc
+            if not isinstance(parsed, dict):
+                raise LlmError(f"LLM returned invalid JSON: {content[:200]}")
+            parsed["_usage"] = data.get("usage", {})
+            parsed["_timings"] = data.get("timings", {})
+            parsed["_model"] = self.cfg.llm_remote_model
+            if logprobs:
+                parsed["_tokens"] = (choice.get("logprobs") or {}).get("content") or []
+            return parsed
+        finally:
+            self.inflight -= 1
+            if not self.inflight:
+                self.busy_since = None
 
 
 def preceding_text(book: dict, chunk: Chunk, words: int) -> str:
     """Up to `words` words of the chapter just before this chunk (unnumbered, for context)."""
     paras = book["chapters"][chunk.chapter]["paragraphs"]
-    out, n, k = [], 0, chunk.paragraphs[0] - 1
+    picked, n, k = [], 0, chunk.paragraphs[0] - 1
     while k >= 0 and n < words:
-        out.insert(0, paras[k])
+        picked.insert(0, k)
         n += len(paras[k].split())
         k -= 1
-    return "\n\n".join(out)
+    text = with_breaks(book, chunk.chapter, picked)
+    if chunk.paragraphs[0] in scene_breaks(book, chunk.chapter):
+        text += "\n\n" + SCENE_BREAK  # (the passage itself starts with it too)
+    return text
 
 
 def following_text(book: dict, chunk: Chunk, words: int) -> str:
     """Up to `words` words of the chapter just after this chunk (unnumbered, for context): a speech tag or a
     reply in the next paragraph often shows who said the passage's last lines."""
     paras = book["chapters"][chunk.chapter]["paragraphs"]
-    out, n, k = [], 0, chunk.paragraphs[-1] + 1
+    picked, n, k = [], 0, chunk.paragraphs[-1] + 1
     while k < len(paras) and n < words:
-        out.append(paras[k])
+        picked.append(k)
         n += len(paras[k].split())
         k += 1
-    return "\n\n".join(out)
+    return with_breaks(book, chunk.chapter, picked)
 
 
 REVIEW_NOTE = ("A first reading proposed the labels below. Check every one against the speech tags, who is "
@@ -1279,7 +1869,8 @@ def apply_revisions(script: dict, result: dict) -> list[dict]:
             continue
         accepted[str(r.get("id")).upper()] = new
         event = {"id": qid, "from": line.get("speaker"), "to": new, "reason": r["reason"].strip()[:160]}
-        script["lines"][qid] = {**line, "speaker": new, "revised": True}
+        script["lines"][qid] = {**{k: v for k, v in line.items() if k not in ("conf", "alts")},
+                                "speaker": new, "revised": True}
         script.setdefault("revisions", []).append(event)
         done.append(event)
     return done
@@ -1311,6 +1902,8 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     if pov:
         narrator = (f"{narrator}. But this passage starts with a point-of-view change, \"{pov}\": from here "
                     f"\"I\" is that character, not the previous narrator. Lines \"I\" says belong to them.")
+    elif chunk.paragraphs[0] in scene_breaks(book, chunk.chapter):
+        narrator = f"{narrator}. This passage starts a new scene (after a scene break): work out who narrates it."
     if script.get("dossier_state"):
         from .dossier import render_dossier, scene_cast
 
@@ -1353,8 +1946,8 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     )
     # Generous budget: reasoning models (gpt-oss) spend tokens before the JSON, and the
     # schema grammar ends the output as soon as the JSON is complete anyway.
-    budget = 1024 + 60 * len(local)
-    extra = {"thinking": True, "effort": effort} if thinking else {}
+    budget = 1024 + 70 * len(local)
+    extra = {"thinking": True, "effort": effort} if thinking else {"logprobs": TOP_ALTERNATIVES}
     if model:
         extra["model"] = model
     if thinking:
@@ -1378,14 +1971,90 @@ async def label_chunk(llm: LocalLlm, session, book: dict, script: dict, chunk: C
     if editable:
         result["_texts"] = texts
         result["_passage"] = text
+    tokens = result.pop("_tokens", None) or []
+    for q, odds in zip(result.get("quotes", []), speaker_odds(tokens)):
+        q["_p"], q["_alts"] = odds
+    for q, odds in zip(result.get("quotes", []), delivery_odds(tokens)):
+        q["_dodds"] = odds
     # Backstop for the prompt rule: a quoted term inside a sentence is narration.
     paras = book["chapters"][chunk.chapter]["paragraphs"]
     spans = {q[0]: q for q in chunk.quotes}
     for q in result.get("quotes", []):
         ids = local.get(str(q.get("id"))) or []
+        if len(ids) == 1 and ids[0] in spans:  # the words to respell are swapped in this (respelled)
+            s = spans[ids[0]]
+            q["_text"] = paras[s[1]][s[2]:s[3]]
         if ids and all(is_mention(paras[spans[i][1]], spans[i][2], spans[i][3]) for i in ids):
-            q.update(speaker=NARRATOR, delivery="neutral", mention=True)
+            q.update(speaker=NARRATOR, delivery=[], mention=True)
+            q.pop("_p", None)
+            q.pop("_alts", None)
+            q.pop("_dodds", None)
     return result, local
+
+
+TOP_ALTERNATIVES = 8  # tokens per position the LLM reports with their probabilities
+_SPEAKER_FIELD = re.compile(r'"speaker"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_DELIVERY_FIELD = re.compile(r'"delivery"\s*:\s*(\[)([^\]]*)\]')
+_DELIVERY_TAG = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def delivery_odds(tokens: list[dict]) -> list[list[tuple[str, float]]]:
+    """From the answer's tokens with their probabilities, for each "delivery" field in order: each tag the model
+    gave with how likely it was to give it, from the choice to add a tag at all (another tag rather than closing
+    the list) through the tag's last token."""
+    if not tokens:
+        return []
+    text, starts = "", []
+    for t in tokens:
+        starts.append(len(text))
+        text += t.get("token", "")
+    out = []
+    for m in _DELIVERY_FIELD.finditer(text):
+        tags, decided = [], m.start(1)  # where the choice to add this tag is made: "[" or the previous tag's end
+        for t in _DELIVERY_TAG.finditer(m.group(2)):
+            a, b = m.start(2) + t.start(1), m.start(2) + t.end(1)
+            inside = [i for i, s in enumerate(starts) if s < b and s + len(tokens[i].get("token", "")) > decided]
+            logp = sum(tokens[i].get("logprob", 0.0) for i in inside)
+            tags.append((t.group(1), math.exp(logp) if inside else 0.0))
+            decided = b
+        out.append(tags)
+    return out
+
+
+def speaker_odds(tokens: list[dict]) -> list[tuple[float, list[tuple[str, float]]]]:
+    """From the answer's tokens with their probabilities, for each "speaker" field in order: how likely the
+    model's speaker was (the product over its tokens) and the other ways the name could have started, with
+    their probabilities ("Fan" 0.28 when it wrote "Asuna")."""
+    if not tokens:
+        return []
+    text, starts = "", []
+    for t in tokens:
+        starts.append(len(text))
+        text += t.get("token", "")
+    out = []
+    for m in _SPEAKER_FIELD.finditer(text):
+        a, b = m.span(1)
+        if a == b:
+            out.append((0.0, []))
+            continue
+        inside = [i for i, s in enumerate(starts) if s < b and s + len(tokens[i].get("token", "")) > a]
+        if not inside:
+            out.append((0.0, []))
+            continue
+        logp = sum(tokens[i].get("logprob", 0.0) for i in inside)
+        first = tokens[inside[0]]
+        cut = a - starts[inside[0]]  # the first token may carry the opening quote
+        prefix = first.get("token", "")[:cut]
+        alts = []
+        for alt in first.get("top_logprobs") or []:
+            tok = alt.get("token", "")
+            if tok == first.get("token") or not tok.startswith(prefix):
+                continue
+            rest = tok[cut:].lstrip()
+            if rest and not rest.startswith('"'):
+                alts.append((rest, math.exp(alt.get("logprob", -99.0))))
+        out.append((math.exp(logp), alts))
+    return out
 
 
 def _roster_batches(blocks: list[str], fixed_chars: int, context: int) -> list[list[str]]:
@@ -1403,6 +2072,120 @@ def _roster_batches(blocks: list[str], fixed_chars: int, context: int) -> list[l
             batches.append([block])
             used = cost
     return batches
+
+
+SPOKEN_FORMS = 2  # script["spoken_forms"]: every line of the book has been checked for words to respell and
+# written sounds to mark ("say"); 2 added the sounds
+SPOKEN_PROMPT = """You prepare a novel's dialogue for a speech engine, which reads each word's letters exactly as written. Below are numbered quotations. Find two things; most quotations have neither, so empty lists are the usual answer.
+1. "spoken": words spelled the way they sound, so the engine would garble them: drawn-out letters ("whaaaaaaat", "Nooooo", "pleeease", "so-o-o"). For each, give the quotation's number, that one word exactly as written (just the word: no punctuation, nothing around it) and the plain word ({"id": "3", "written": "whaaaaaaat", "said": "what"}). Stutters ("Y-yeah", "Wh… what"), ellipses, and sounds that are words of their own (Hmm, Shh, Zzz, Grr, Kyaa, growls, animal noises) stay as they are.
+2. "sounds": non-verbal sounds the quotation writes out (laughter, a sigh, a scream, a hesitation, a groan: "Ahaha, that's fine.", "Haaah... Really.", "Kyaaah!"). For each, give the quotation's number, the word as written (no punctuation) and its kind ({"id": "5", "written": "Ahaha", "sound": "laugh"}). Ordinary words are not sounds ("Wow", "Yes", "Oh no", names); "Uh-huh" and "Mm-hmm" meaning yes are words. Kinds:
+""" + sound_marks.prompt_list()
+SPOKEN_BATCH_CHARS = 8000
+
+
+def spoken_batches(book: dict, script: dict) -> list[list[tuple[str, str]]]:
+    """The book's quotations (id, text) in batches for find_spoken_forms; quoted terms inside narration are
+    left out."""
+    lines = script.get("lines", {})
+    batches, cur, size = [], [], 0
+    for ch in book.get("chapters", []):
+        paras = ch.get("paragraphs", [])
+        for qid, pi, s, e in ch.get("quotes", []):
+            line = lines.get(qid)
+            if line is None or line.get("mention"):
+                continue
+            text = paras[pi][s:e]
+            if cur and size + len(text) > SPOKEN_BATCH_CHARS:
+                batches.append(cur)
+                cur, size = [], 0
+            cur.append((qid, text))
+            size += len(text) + 8
+    if cur:
+        batches.append(cur)
+    return batches
+
+
+async def find_spoken_forms(llm: LocalLlm, session, batch: list[tuple[str, str]],
+                            said: dict[str, str] | None = None) -> dict[str, str]:
+    """For a batch of quotations: how those with words spelled the way they sound or sounds written out are read
+    ({id: say}), building on their earlier spoken forms (`said`)."""
+    ids = [str(i) for i in range(1, len(batch) + 1)]
+    item = lambda props: {"type": "array", "maxItems": 2 * len(batch), "items": {  # noqa: E731
+        "type": "object", "properties": {"id": {"type": "string", "enum": ids}, **props},
+        "required": ["id", *props]}}
+    schema = {"type": "object", "properties": {"spoken": item(RESPELL_SCHEMA["items"]["properties"]),
+                                               "sounds": item(SOUNDS_SCHEMA["items"]["properties"])},
+              "required": ["spoken", "sounds"]}
+    user = "\n".join(f"[{n}] {text}" for n, (_, text) in zip(ids, batch))
+    result = await llm.complete(session, SPOKEN_PROMPT, user, schema, max_tokens=2500)
+    found: dict[int, dict[str, list]] = {}
+    for key in ("spoken", "sounds"):
+        for it in result.get(key) or []:
+            try:
+                n = int(it.get("id")) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= n < len(batch):
+                found.setdefault(n, {"spoken": [], "sounds": []})[key].append(it)
+    out = {}
+    for n, items in found.items():
+        qid, text = batch[n]
+        if say := spoken_form(text, items["spoken"], items["sounds"], (said or {}).get(qid)):
+            out[qid] = say
+    return out
+
+
+DELIVERY_SCORED = 1  # script["delivery_scored"]: every line's delivery came with the model's confidence ("dodds")
+DELIVERY_PROMPT = """You direct the voice actors of a multi-voice audiobook. Below is a passage of a novel; each quotation is numbered, and you are told who says it. For every number, decide:
+""" + DELIVERY_RULE + """
+A quotation nobody says aloud (a quoted term, a sign, a written note) gets []."""
+
+
+def needs_scoring(script: dict, chunk: Chunk) -> bool:
+    """Whether some line of the passage has a delivery without the model's confidence."""
+    lines = script.get("lines", {})
+    return any(qid in lines and not lines[qid].get("mention") and "dodds" not in lines[qid]
+               for qid, *_ in chunk.quotes)
+
+
+async def score_deliveries(llm: LocalLlm, session, book: dict, script: dict, chunk: Chunk,
+                           context_words: int = 0) -> dict[str, tuple[str | None, list]]:
+    """The deliveries of a passage's lines again, with how sure the model is of each tag ({qid: (delivery,
+    dodds)}, sure_delivery): for lines labelled before the confidence was read. The speakers are given, not
+    asked for."""
+    text, local = render_chunk(book, chunk)
+    lines, chars = script.get("lines", {}), script.get("characters", {})
+
+    def who(qids: list[str]) -> str:
+        line = lines.get(qids[0]) or {}
+        if line.get("mention"):
+            return "nobody (a quoted term)"
+        sp = line.get("speaker")
+        return (chars.get(sp) or {}).get("name", sp) if sp else "the narrator, or nobody (written text)"
+
+    ids = list(local)
+    chapter = book["chapters"][chunk.chapter]
+    before = preceding_text(book, chunk, context_words) if context_words else ""
+    user = (f"Book: {book.get('title', '')} by {book.get('author', '')}\nChapter: {chapter.get('title', '')}\n\n"
+            + (f"Story just before this passage (for context only):\n{before}\n\n" if before else "")
+            + f"Passage:\n{text}\n\nWho says each quotation:\n"
+            + "\n".join(f"[{n}] {who(local[n])}" for n in ids)
+            + f"\n\nGive the delivery of every number from 1 to {len(ids)} once.")
+    schema = {"type": "object", "properties": {"quotes": {
+        "type": "array", "minItems": len(ids), "maxItems": len(ids),
+        "items": {"type": "object", "properties": {
+            "id": {"type": "string", "enum": ids},
+            "delivery": {"type": "array", "maxItems": delivery_tags.MAX_TAGS,
+                         "items": {"type": "string", "enum": delivery_tags.all_tags()}}},
+                  "required": ["id", "delivery"]}}}, "required": ["quotes"]}
+    result = await llm.complete(session, DELIVERY_PROMPT, user, schema, max_tokens=512 + 40 * len(ids),
+                                logprobs=TOP_ALTERNATIVES)
+    out = {}
+    for q, odds in zip(result.get("quotes", []), delivery_odds(result.pop("_tokens", None) or [])):
+        delivery, dodds = sure_delivery(q.get("delivery") or [], odds)
+        for qid in local.get(str(q.get("id"))) or []:
+            out[qid] = (delivery, dodds)
+    return out
 
 
 async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_chars: int = 12) -> None:
@@ -1457,7 +2240,7 @@ async def describe_cast(llm: LocalLlm, session, book: dict, script: dict, max_ch
         from . import profile
 
         # What the roster step saw fills what the reading left empty (the fallback when nothing was noted).
-        prof = c.setdefault("profile", {})
+        prof = c["profile"] = c.get("profile") or {}  # (stored as null for some characters: setdefault keeps the None)
         if d.get("appearance") and not prof.get("appearance"):
             prof["appearance"] = " ".join(d["appearance"].split())[:profile.TEXT_MAX]
         for key, src in (("gender", "gender"), ("apparent_age", "age")):
@@ -1574,6 +2357,7 @@ class Analyzer:
         if ACTIVITY_KEY in self.app:
             self.app[ACTIVITY_KEY].on_use.append(self.on_use)
             self.app[ACTIVITY_KEY].on_design.append(self.on_design)
+            self.app[ACTIVITY_KEY].on_crowd.append(self.on_crowd)
         self.task = asyncio.ensure_future(self._run())
 
     async def stop(self) -> None:
@@ -1589,26 +2373,53 @@ class Analyzer:
             s.update(status="queued", detail="waiting for the analyser")
             self.store.save_script(book_id, s)
         await self.queue.put(book_id, before=None if keep_order else self._later_volume(book_id))
+        # Volumes are analysed in order: a later volume of its series being analysed now steps aside (keeping
+        # what it has done; it continues right after).
+        if not keep_order and self.current and self._is_earlier(book_id, self.current):
+            self.analyse_now(book_id)
+
+    def _volume(self, book_id: str) -> tuple[str, list[float]]:
+        """(series, volume number) of a book; ("", []) when it has no series or no number."""
+        from .series import book_series, series_slug, volume_key
+
+        series = book_series(self.app, book_id) or ""
+        vol = volume_key((self.store.summary(book_id) or {}).get("title", "")) if series else []
+        return (series_slug(series) if series else ""), vol
+
+    def _is_earlier(self, a: str, b: str) -> bool:
+        """Whether book `a` is an earlier volume of book `b`'s series."""
+        (sa, va), (sb, vb) = self._volume(a), self._volume(b)
+        return bool(sa and va and vb and sa == sb and va < vb)
 
     def _later_volume(self, book_id: str) -> str | None:
         """The first waiting book that is a later volume of the same series: a volume is analysed before the
         ones after it, so they inherit its cast and voices."""
-        from .series import book_series, volume_key
+        return next((b for b in self.queue.items if self._is_earlier(book_id, b)), None)
 
-        def key(b: str):
-            return book_series(self.app, b).lower(), volume_key((self.store.summary(b) or {}).get("title", ""))
-
-        series, vol = key(book_id)
-        if not vol:
-            return None
-        return next((b for b in self.queue.items if (k := key(b))[0] == series and k[1] and k[1] > vol), None)
+    def _first_volume_waiting(self, book_id: str) -> str:
+        """The earliest waiting volume of `book_id`'s series that comes before it, or `book_id` itself: however the
+        queue was ordered (by hand, "analyse now", a restart), a series' volumes are analysed in order, so each
+        one is labelled knowing the characters of the volumes before it."""
+        earlier = [b for b in self.queue.items if self._is_earlier(b, book_id)]
+        return min(earlier, key=lambda b: self._volume(b)[1]) if earlier else book_id
 
     async def _run(self) -> None:
         import aiohttp
 
         async with aiohttp.ClientSession() as session:
+            # Characters still on the old voice pool move to the new one first (minutes), before a resumed analysis.
+            await self._backfill_pool(session, finish=True)
             while True:
+                if self.queue.empty():
+                    await self._backfill_pool(session)
+                    await self._backfill_spoken_forms(session)
+                    await self._backfill_deliveries(session)
                 book_id = await self.queue.get()
+                first = self._first_volume_waiting(book_id)
+                if first != book_id:  # an earlier volume of its series is waiting: that one first
+                    self.queue.remove(first)
+                    await self.queue.put(book_id, at=0)
+                    book_id = first
                 self.current = book_id
                 self.queue.set_current(book_id)
                 self._interrupt = None
@@ -1639,8 +2450,249 @@ class Analyzer:
                         self.store.save_script(book_id, s)
                 self.current = None  # finished or failed
                 self.queue.set_current(None)
+                # Between analyses (nothing to do once every book has them; the book that was interrupted
+                # by a restart finishes first).
+                await self._backfill_pool(session)
+                await self._backfill_spoken_forms(session)
+                await self._backfill_deliveries(session)
                 if self.queue.empty():
                     await self.llm.stop()  # free RAM/VRAM when idle
+
+    async def _backfill_spoken_forms(self, session) -> None:
+        """Finished books labelled before spoken forms existed get them between analyses (a few minutes each).
+        Books waiting for (or in) an analysis get them when it ends. The books listened to last go first."""
+
+        def last_heard(book_id: str) -> float:
+            try:
+                return (self.store.dir(book_id) / "book.elvenbook").stat().st_mtime
+            except (OSError, ValueError):
+                return 0.0
+
+        for book_id in sorted(self.store.ids(), key=last_heard, reverse=True):
+            s = self.store.script(book_id)
+            if s.get("status") == "done" and s.get("lines") and s.get("spoken_forms") != SPOKEN_FORMS:
+                try:
+                    await self._spoken_forms(session, book_id)
+                except Exception as exc:  # noqa: BLE001 - tried again before the next book
+                    logger.warning("%s: no spoken forms (%s)", book_id, exc)
+                    return
+
+    async def _backfill_deliveries(self, session) -> None:
+        """Finished books labelled before the delivery confidence existed get their deliveries scored again
+        (score_deliveries: only tags the model is sure of are kept; speakers and corrections stay), between
+        analyses, about 9 s a passage. The books listened to last go first. A new book's queued analysis waits
+        for the book being scored (at most ~25 minutes)."""
+
+        def last_heard(book_id: str) -> float:
+            try:
+                return (self.store.dir(book_id) / "book.elvenbook").stat().st_mtime
+            except (OSError, ValueError):
+                return 0.0
+
+        for book_id in sorted(self.store.ids(), key=last_heard, reverse=True):
+            s = self.store.script(book_id)
+            if s.get("status") == "done" and s.get("lines") and s.get("delivery_scored") != DELIVERY_SCORED:
+                try:
+                    await self._score_deliveries(session, book_id)
+                except Exception as exc:  # noqa: BLE001 - tried again before the next book
+                    logger.warning("%s: deliveries not scored (%s)", book_id, exc)
+                    return
+                if not self.queue.empty():
+                    return  # a book is waiting for its analysis
+
+    async def _score_deliveries(self, session, book_id: str) -> None:
+        """Scores the deliveries of every passage that has lines without the model's confidence, then marks the
+        book done. Each passage is saved as it is scored, so a restart continues where it stopped."""
+        book = self.store.book(book_id)
+        if not book:
+            return
+        cfg, changed, done = self.llm.cfg, 0, 0
+        for chunk in make_chunks(book, runs=mixed_tense_runs(book)):
+            if not needs_scoring(self.store.script(book_id), chunk):
+                continue
+            s = self.store.script(book_id)
+            scored = await self._gpu(lambda c=chunk, sc=s: score_deliveries(
+                self.llm, session, book, sc, c, context_words=cfg.llm_label_context_words))
+            async with self.store.lock(book_id):
+                s = self.store.script(book_id)
+                for qid, (delivery, dodds) in scored.items():
+                    line = s["lines"].get(qid)
+                    if line is None or line.get("mention"):
+                        continue
+                    changed += line.get("delivery") != delivery
+                    line["delivery"] = delivery
+                    line["dodds"] = dodds if dodds is not None else []
+                self.store.save_script(book_id, s)
+            done += 1
+            if done % 25 == 0:
+                logger.info("%s: deliveries scored in %d passages so far", book_id, done)
+        async with self.store.lock(book_id):
+            s = self.store.script(book_id)
+            s["delivery_scored"] = DELIVERY_SCORED
+            self.store.save_script(book_id, s)
+        logger.info("%s: deliveries scored (%d passages, %d lines changed)", book_id, done, changed)
+
+    async def _pool_picks(self, session, book_id: str, book: dict, s: dict, cids: list[str]) -> int:
+        """Sets `pool_pick` on the characters `cids` of script `s` (in memory): the same character's pick in the
+        series' other volumes when there is one (by name or alias), so they sound the same throughout; the LLM's
+        otherwise."""
+        from .series import book_series, series_slug
+
+        series = series_slug(book_series(self.app, book_id) or "")
+        known: dict[str, str] = {}
+        if book_series(self.app, book_id):
+            for other in self.store.ids():
+                if other == book_id or series_slug(book_series(self.app, other) or "") != series:
+                    continue
+                for oc in self.store.script(other).get("characters", {}).values():
+                    if oc.get("pool_pick"):
+                        for n in (oc.get("name", ""), *oc.get("aliases", [])):
+                            known.setdefault(norm_name(n), oc["pool_pick"])
+        ask = []
+        for cid in cids:
+            c = s["characters"][cid]
+            earlier = next((known[k] for k in map(norm_name, (c.get("name", ""), *c.get("aliases", [])))
+                            if k in known and known[k] in pool_options(c)), None)
+            if earlier:
+                c["pool_pick"] = earlier
+            else:
+                ask.append(cid)
+        picks = await self._gpu(lambda: pick_pool_voices(self.llm, session, book, s, ask)) if ask else {}
+        for cid, vid in picks.items():
+            s["characters"][cid]["pool_pick"] = vid
+        return len(picks)
+
+    async def _ensure_pool(self) -> bool:
+        """Designs the pool's voices that don't exist yet, and again those whose description in POOL changed
+        since (in place, same id: characters keep them; one the reader edited is left alone, known by its
+        description no longer being the one it was designed from, kept in data/voice-pool.json). Up to
+        POOL_DESIGN_TRIES seeds each, about 6 s a seed. False when the designer failed."""
+        from .app import DESIGN_TEXT, VOICES_KEY, design_clip, design_voice, wav_bytes
+
+        voices = self.app[VOICES_KEY]
+        engine = self.llm.cfg.voice_design_engine
+        # What each pool voice was designed from: one whose description no longer matches was edited by the reader
+        made_path = Path(self.store.root).parent / "voice-pool.json"
+        try:
+            made = json.loads(made_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            made = {}
+        for vid, (name, description) in POOL.items():
+            v = voices.get(vid)
+            if v and v.instruct == description:
+                continue
+            edited = v is not None and vid in made and (v.instruct != made[vid] or v.description != made[vid])
+            if edited:
+                continue  # the reader's own edit
+            try:
+                if v is None:
+                    await design_voice(self.app, engine, description, f"Pool: {name}", source="character",
+                                       voice_id=vid, seed=7, tries=POOL_DESIGN_TRIES)
+                else:
+                    rate, pcm, seed = await design_clip(self.app, engine, description, DESIGN_TEXT, 7, POOL_DESIGN_TRIES)
+                    voices.replace_audio(vid, wav_bytes(pcm, rate), DESIGN_TEXT, instruct=description,
+                                         description=description, seed=seed)
+            except Exception as exc:  # noqa: BLE001 - tried again before the next analysis
+                logger.warning("generic voice %s not designed (%s)", name, exc)
+                return False
+            made[vid] = description
+            made_path.write_text(json.dumps(made, indent=1), encoding="utf-8")
+            logger.info("designed generic voice %s", name)
+        return True
+
+    async def _backfill_pool(self, session, finish: bool = False) -> None:
+        try:
+            await self._move_to_pool(session, finish)
+        except Exception:  # noqa: BLE001 - tried again between analyses
+            logger.exception("moving characters to the new voice pool failed")
+
+    async def _move_to_pool(self, session, finish: bool) -> None:
+        """Characters on a voice of an earlier pool get the best fit from this one (POOL), book by book in volume
+        order (later volumes reuse the picks), then the old pool voices are deleted. Each book is one or a few
+        LLM calls; a book waiting for its analysis goes first unless `finish`."""
+        from .app import VOICES_KEY
+        from .series import SERIES_KEY, book_series, remember, volume_key
+
+        def todo() -> list[str]:  # every book not being analysed or cast right now (one waiting in the queue is not)
+            return [b for b in self.store.ids() if self.store.script(b).get("pool_v") != POOL_V
+                    and self.store.script(b).get("status") not in ("running", "casting")]
+
+        voices_have = self.app[VOICES_KEY].get  # the pool is in use: keep its voices up to date
+
+        books = todo()
+        moving = any(is_pool(c.get("voice")) for b in books for c in self.store.script(b).get("characters", {}).values())
+        if (moving or any(voices_have(vid) for vid in POOL)) and not await self._ensure_pool():
+            return
+        books.sort(key=lambda b: ((book_series(self.app, b) or "").lower(),
+                                  volume_key((self.store.summary(b) or {}).get("title", "")) or []))
+        for book_id in books:
+            book = self.store.book(book_id)
+            s = self.store.script(book_id)
+            cids = [cid for cid, c in s["characters"].items() if is_pool(c.get("voice"))]
+            try:
+                if cids and book:
+                    await self._pool_picks(session, book_id, book, s, cids)
+            except Exception as exc:  # noqa: BLE001 - tried again before the next book
+                logger.warning("%s: generic voices not picked (%s)", book_id, exc)
+                return
+            async with self.store.lock(book_id):
+                fresh = self.store.script(book_id)
+                moved = 0
+                for cid in cids:
+                    f = fresh["characters"].get(cid)
+                    if f is None or not is_pool(f.get("voice")):
+                        continue
+                    if s["characters"][cid].get("pool_pick"):
+                        f["pool_pick"] = s["characters"][cid]["pool_pick"]
+                    vid = pool_voice(f)
+                    moved += vid != f["voice"]
+                    f["voice"] = vid
+                fresh["pool_v"] = POOL_V
+                self.store.save_script(book_id, fresh)
+            if cids:
+                remember(self.app, book_id)
+                logger.info("%s: %d characters on generic voices, %d moved to another", book_id, len(cids), moved)
+            if not finish and not self.queue.empty():
+                return  # a book is waiting for its analysis
+        if todo():
+            return
+        # Every book is on the new pool: the series' memories too, then the old voices go.
+        series = self.app[SERIES_KEY]
+        for data in series.all():
+            data = series.get(data["name"])
+            stale = [e for e in data["characters"].values() if is_pool(e.get("voice")) and e["voice"] not in POOL]
+            for e in stale:
+                e["voice"] = pool_voice(e)
+            if stale:
+                series.save(data)
+        used = {c.get("voice") for b in self.store.ids() for c in self.store.script(b).get("characters", {}).values()}
+        voices = self.app[VOICES_KEY]
+        for v in voices.list():
+            if is_pool(v.id) and v.id not in POOL and v.id not in used:
+                voices.delete(v.id)
+                logger.info("deleted the old generic voice %s", v.name)
+
+    async def _spoken_forms(self, session, book_id: str) -> None:
+        """Checks every line of the book for a spoken form ("say": find_spoken_forms) and marks it done."""
+        book = self.store.book(book_id)
+        found = 0
+        for batch in spoken_batches(book, self.store.script(book_id)) if book else []:
+            lines = self.store.script(book_id).get("lines", {})
+            said = {qid: lines[qid]["say"] for qid, _ in batch if (lines.get(qid) or {}).get("say")}
+            says = await self._gpu(lambda b=batch, s=said: find_spoken_forms(self.llm, session, b, s))
+            if says:
+                async with self.store.lock(book_id):
+                    s = self.store.script(book_id)
+                    for qid, say in says.items():
+                        if qid in s["lines"]:
+                            s["lines"][qid]["say"] = say
+                    self.store.save_script(book_id, s)
+                found += len(says)
+        async with self.store.lock(book_id):
+            s = self.store.script(book_id)
+            s["spoken_forms"] = SPOKEN_FORMS
+            self.store.save_script(book_id, s)
+        logger.info("%s: %d lines spelled the way they sound get a spoken form", book_id, found)
 
     async def _requeue(self, book_id: str, where: str) -> None:
         """The current book was set aside (another one is analysed now, or it went to the bottom): its finished
@@ -1659,11 +2711,13 @@ class Analyzer:
         return True
 
     def analyse_now(self, book_id: str) -> bool:
-        """Analyse a waiting book right away: the current one stops (keeping what it has done) and goes next."""
+        """Analyse a waiting book right away: the current one stops (keeping what it has done) and goes next.
+        Not when the current one is an earlier volume of its series (volumes go in order): it goes next instead."""
         if book_id not in self.queue.items:
             return False
         self.queue.reorder([book_id])
-        self._set_aside("next")
+        if not (self.current and self._is_earlier(self.current, book_id)):
+            self._set_aside("next")
         return True
 
     def send_to_bottom(self, book_id: str) -> bool:
@@ -1735,22 +2789,41 @@ class Analyzer:
         from .activity import ACTIVITY_KEY
         from .app import ENGINES_KEY
 
+        if self.llm.cfg.llm_backend == "remote":
+            # On the inference server: nothing here waits for (or takes) the GPU.
+            return await make_coro()
         manager = self.app[ENGINES_KEY]
         mode = self.llm.cfg.llm_mode
         if mode == "adaptive" and ACTIVITY_KEY in self.app:
             activity = self.app[ACTIVITY_KEY]
             while True:
+                if self.llm.cfg.llm_backend == "remote":  # switched to the inference server meanwhile
+                    return await make_coro()
                 if not interactive:
                     await activity.wait_for(lambda: not activity.designing, on_wait=self._note_designing)
+                    # Two or more people listening to new speech: the speech models get the GPU to themselves.
+                    if activity.crowded:
+                        await activity.wait_for(lambda: not activity.crowded, on_wait=lambda: self._note_paused(
+                            "paused while several people are listening; continues a few minutes after"))
+                        continue
+                    # The speech models leave no room for it next to them: it waits until nobody is using the site.
+                    if activity.in_use and not shared_fits(self.llm.cfg):
+                        await activity.wait_for(lambda: not activity.in_use or shared_fits(self.llm.cfg),
+                                                on_wait=lambda: self._note_paused(
+                                                    "paused while someone reads: the speech models fill the GPU"))
+                        continue
                 if interactive or activity.in_use:
+                    if not (self.llm.running_gpu and self.llm.shared):
+                        # Starting next to the speech model: let it come back and answer first.
+                        await manager.wait_settled()
                     async with manager.exclusive(evict=False):
-                        if activity.designing and not interactive:
+                        if (activity.designing or activity.crowded) and not interactive:
                             continue
                         self.llm.gpu, self.llm.shared, self.llm.preempted = True, True, False
                         try:
                             return await make_coro()
                         except LlmPreempted:
-                            logger.info("LLM stopped for the voice designer")
+                            logger.info("LLM stopped for the voice designer, or for several people listening")
                             continue
                 # Idle: take the background turn (a casting may hold it), unless someone comes back meanwhile.
                 got = False
@@ -1768,6 +2841,7 @@ class Analyzer:
                         if activity.in_use:
                             continue
                         self.llm.gpu, self.llm.shared, self.llm.preempted = True, False, False
+                        self.llm.reserve_gb = manager.parked_vram_gb
                         try:
                             return await make_coro()
                         except LlmPreempted:
@@ -1785,6 +2859,7 @@ class Analyzer:
         if not use_gpu:
             return await make_coro()
         async with manager.exclusive():
+            self.llm.reserve_gb = manager.parked_vram_gb
             try:
                 return await make_coro()
             finally:
@@ -1793,14 +2868,24 @@ class Analyzer:
 
     async def _note_designing(self) -> None:
         """Say on the book being analysed that it waits while voices are designed."""
+        await self._note_paused("paused while you design voices; continues 10 minutes after the last one")
+
+    async def _note_paused(self, why: str) -> None:
+        """Say on the book being analysed why it waits."""
         book_id = self.current
         if not book_id:
             return
         async with self.store.lock(book_id):
             s = self.store.script(book_id)
             if s.get("status") in ("running", "queued"):
-                s["detail"] = "paused while you design voices; continues 10 minutes after the last one"
+                s["detail"] = why
                 self.store.save_script(book_id, s)
+
+    async def on_crowd(self) -> None:
+        """A second person started listening to new speech ("adaptive"): the LLM leaves the GPU at once (its step is
+        done again later); the speech models get all of it."""
+        if self.llm.cfg.llm_mode == "adaptive" and self.llm.proc is not None:
+            await self.llm.preempt()
 
     async def on_use(self) -> None:
         """Someone started using the site ("adaptive"): an LLM on the whole GPU is stopped (its step goes on
@@ -1814,6 +2899,8 @@ class Analyzer:
         manager = self.app[ENGINES_KEY]
         try:
             await manager.preload(self.app[CONFIG_KEY].default_engine)
+            if self.app[CONFIG_KEY].narration_engine:
+                await manager.preload_narration(self.app[CONFIG_KEY].narration_engine)
         except Exception as exc:  # noqa: BLE001 - the first request will report it
             logger.warning("could not load the speech model: %s", exc)
 
@@ -1833,6 +2920,11 @@ class Analyzer:
             async with self.store.lock(book_id):
                 s = self.store.script(book_id)
                 s["series_seeded"] = series.seed(self.app, book_id, s)
+                self.store.save_script(book_id, s)
+        if not self.store.script(book_id)["chunks_done"]:
+            async with self.store.lock(book_id):
+                s = self.store.script(book_id)
+                s["spoken_forms"] = SPOKEN_FORMS  # every passage gets them from labelling
                 self.store.save_script(book_id, s)
         await self._read_for_dossier(session, book, book_id)
         has_dossier = bool(self.store.script(book_id).get("dossier_state"))
@@ -1859,7 +2951,9 @@ class Analyzer:
                 if chunk.tense and by_tense.get(chunk.tense):
                     # "I" in this passage is the narrator of its tense, whatever the model says.
                     result["narrator"] = by_tense[chunk.tense]
-                apply_chunk_result(s, result, local)
+                apply_chunk_result(s, result, local, vote=chunk.key)
+                model = result.get("_model") or self.llm.model_name
+                log_answer(self.store, book_id, chunk.key, model, result, local)
                 if chunk.tense:
                     s["last_tense"] = chunk.tense
                     other = "past" if chunk.tense == "present" else "present"
@@ -1869,10 +2963,20 @@ class Analyzer:
                             and find_character(s, s["narrator"]) != find_character(s, by_tense.get(other) or "")):
                         by_tense[chunk.tense] = s["narrator"]
                 s["chunks_done"].append(chunk.key)
-                s["model"] = self.llm.model_name
+                s["model"] = model
                 s.setdefault("stats", {}).setdefault("tokens", 0)
                 s["stats"]["tokens"] += int(result.get("_usage", {}).get("total_tokens", 0))
                 self.store.save_script(book_id, s)
+        if self.store.script(book_id).get("spoken_forms") != SPOKEN_FORMS:
+            # Some passages were labelled before spoken forms existed.
+            async with self.store.lock(book_id):
+                s = self.store.script(book_id)
+                s.update(detail="finding lines spelled the way they sound")
+                self.store.save_script(book_id, s)
+            await self._spoken_forms(session, book_id)
+        if self.store.script(book_id).get("delivery_scored") != DELIVERY_SCORED:
+            # Passages labelled before the delivery confidence existed (a resumed analysis); quick otherwise.
+            await self._score_deliveries(session, book_id)
         async with self.store.lock(book_id):
             s = self.store.script(book_id)
             renamed = canonical_names(book, s)
@@ -1880,6 +2984,8 @@ class Analyzer:
                 logger.info("%s: named by the text: %s", book_id, ", ".join(f"{a} -> {b}" for a, b in renamed))
             s.update(detail="describing the characters")
             self.store.save_script(book_id, s)
+        if renamed:
+            name_voices(self.app)
         s = self.store.script(book_id)
         await self._gpu(lambda: describe_cast(self.llm, session, book, s))
         from . import roles
@@ -1893,6 +2999,11 @@ class Analyzer:
         except LlmError as exc:
             logger.warning("sorting the cast failed (%s); using the line counts", exc)
             roles.apply_rules(book, s)
+        try:  # which generic voice fits each character without a voice of their own (main ones get their own)
+            await self._pool_picks(session, book_id, book, s,
+                                   [cid for cid, c in s["characters"].items() if c.get("role") != "main"])
+        except LlmError as exc:
+            logger.warning("picking generic voices failed (%s); the plain ones are used", exc)
         if self.llm.running_gpu:
             await self.llm.stop()  # give the GPU back to TTS
         async with self.store.lock(book_id):
@@ -1900,7 +3011,7 @@ class Analyzer:
             for cid, c in s["characters"].items():
                 if cid in fresh["characters"]:
                     for k in ("gender", "age", "accent", "temperament", "appearance", "description",
-                              "role_auto", "role_source", "role_note", "role_flag", "profile"):
+                              "role_auto", "role_source", "role_note", "role_flag", "profile", "pool_pick"):
                         fresh["characters"][cid][k] = c.get(k, fresh["characters"][cid].get(k))
                     f = fresh["characters"][cid]
                     f["role"] = f.get("role_user") if f.get("role_user") in roles.ROLES else f.get("role_auto")
@@ -1910,6 +3021,11 @@ class Analyzer:
             fresh.setdefault("stats", {})["seconds"] = round(time.perf_counter() - t0, 1)
             reconcile_narrators(book, fresh)
             fresh["narration"] = compute_narration(book, fresh)
+            # Characters the series knows from any volume (later ones too) who speak here take its voice and
+            # profile; the labeller was only told of earlier volumes' characters. The others go again (prune).
+            from . import series as series_memory
+
+            series_memory.seed(self.app, book_id, fresh, earlier_only=False)
             prune_characters(fresh)
             self.store.save_script(book_id, fresh)
         logger.info("analysed %s: %d lines", book_id, len(fresh["lines"]))
@@ -1930,6 +3046,19 @@ class Analyzer:
             logger.info("voices for new speakers in %s: %s", book_id, result["created"])
         except (EngineError, OSError) as exc:
             logger.warning("could not create voices for new speakers: %s", exc)
+
+
+def log_answer(store: "ScriptStore", book_id: str, chunk_key: str, model: str, result: dict, local: dict) -> None:
+    """Keeps what the model answered for each passage (data/books/<id>/llm-answers.jsonl), so a wrong label
+    can be traced to the answer, and the cast, it came from."""
+    entry = {"t": round(time.time()), "chunk": chunk_key, "model": model, "numbers": local,
+             "answer": {k: v for k, v in result.items() if not k.startswith("_") or k in ("_editable",)},
+             "tokens": result.get("_usage", {}).get("total_tokens")}
+    try:
+        with open(store.dir(book_id) / "llm-answers.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("%s: could not keep the LLM's answer: %s", book_id, exc)
 
 
 def prune_characters(script: dict) -> list[str]:
@@ -1954,26 +3083,106 @@ def prune_characters(script: dict) -> list[str]:
 
 # ----------------------------------------------------------------- casting
 
+# The voice pool: generic voices for characters without a voice of their own, by gender, age and how strongly
+# they speak. The LLM picks the best fit for each character (pick_pool_voices, `pool_pick`) from the voices that
+# suit their gender and age; without a pick they get the plain one. Voices of an earlier pool (any other "pool-"
+# voice) are replaced: every character on one gets a pick from this pool, then the old voices are deleted.
 POOL = {
-    ("male", "adult"): "An adult man with an ordinary, mid-pitched voice, natural and clear.",
-    ("female", "adult"): "An adult woman with an ordinary, mid-pitched voice, natural and clear.",
-    ("male", "elderly"): "An elderly man with a low, slightly rough voice, speaking unhurriedly.",
-    ("female", "elderly"): "An elderly woman with a thin, gentle voice, speaking slowly.",
-    ("male", "young"): "A young man in his twenties with a bright, energetic voice.",
-    ("female", "young"): "A young woman in her twenties with a light, lively voice.",
-    ("unknown", "child"): "A child of about ten with a high, clear voice.",
+    "pool-f-elderly": ("Female Elderly", "A grandmother in her sixties with a warm, mellow, clear voice."),
+    "pool-f-adult": ("Female Adult", "An adult woman in her thirties or forties with an ordinary, mid-pitched voice, natural and clear."),
+    "pool-f-adult-strong": ("Female Adult - Strong", "An adult woman in her thirties or forties with a strong, full, confident voice that carries, firm and resonant."),
+    "pool-f-adult-soft": ("Female Adult - Soft", "An adult woman in her thirties or forties with a soft, gentle, quiet voice, warm and light."),
+    "pool-f-adult-young": ("Female Adult - Young", "A young woman in her early twenties with a light, lively, bright voice."),
+    "pool-f-teen": ("Female Teen", "A teenage girl of about fifteen with a clear, youthful voice, natural and expressive."),
+    "pool-f-teen-strong": ("Female Teen - Strong", "A teenage girl of about fifteen with a strong, bold, energetic voice, loud and spirited."),
+    "pool-f-teen-soft": ("Female Teen - Soft", "A teenage girl of about fifteen with a soft, shy, gentle voice, quiet and light."),
+    "pool-f-child": ("Female Child", "A little girl of about eight with a high, clear, childlike voice."),
+    "pool-m-elderly": ("Male Elderly", "An elderly man in his seventies with a low, slightly rough voice, speaking unhurriedly."),
+    "pool-m-adult": ("Male Adult", "An adult man in his thirties or forties with an ordinary, mid-pitched voice, natural and clear."),
+    "pool-m-adult-strong": ("Male Adult - Strong", "An adult man in his thirties or forties with a strong, deep, commanding voice that carries, firm and resonant."),
+    "pool-m-adult-soft": ("Male Adult - Soft", "An adult man in his thirties or forties with a soft, gentle, quiet voice, mild and warm."),
+    "pool-m-adult-young": ("Male Adult - Young", "A young man in his early twenties with a bright, energetic, light voice."),
+    "pool-m-teen": ("Male Teen", "A teenage boy of about fifteen with a clear, youthful voice that has just broken."),
+    "pool-m-teen-strong": ("Male Teen - Strong", "A teenage boy of about fifteen with a strong, loud, brash voice, full of energy."),
+    "pool-m-teen-soft": ("Male Teen - Soft", "A teenage boy of about fifteen with a soft, quiet, gentle voice, a little shy."),
+    "pool-m-child": ("Male Child", "A little boy of about eight with a high, clear, childlike voice."),
 }
+POOL_V = 2  # books whose characters on generic voices were given picks from this pool
+POOL_DESIGN_TRIES = 12  # seeds tried for a clean design (no hum in the pauses): hundreds of characters share each
+_POOL_KINDS = {  # a character's age -> the kinds of pool voice that can fit them
+    "child": ("child",),
+    "teen": ("teen", "teen-strong", "teen-soft"),
+    "young adult": ("adult-young", "adult", "adult-strong", "adult-soft"),
+    "adult": ("adult", "adult-strong", "adult-soft"),
+    "middle-aged": ("adult", "adult-strong", "adult-soft"),
+    "elderly": ("elderly",),
+}
+_POOL_PLAIN = {"child": "child", "teen": "teen", "young adult": "adult-young", "elderly": "elderly"}
 
 
-def pool_key(gender: str, age: str) -> tuple[str, str]:
-    if age == "child":
-        return ("unknown", "child")
-    g = gender if gender in ("male", "female") else "male"
-    if age in ("elderly",):
-        return (g, "elderly")
-    if age in ("teen", "young adult"):
-        return (g, "young")
-    return (g, "adult")
+def is_pool(voice_id: str | None) -> bool:
+    return (voice_id or "").startswith("pool-")
+
+
+def _gender_age(c: dict) -> tuple[str, str]:
+    from .profile import effective
+
+    p = effective(c)
+    return (p.get("gender") or c.get("gender") or "unknown"), (p.get("apparent_age") or c.get("age") or "unknown")
+
+
+def pool_options(c: dict) -> list[str]:
+    """The pool voices that suit a character's gender and age (all of them when those are unknown)."""
+    gender, age = _gender_age(c)
+    genders = {"female": ("f",), "male": ("m",)}.get(gender, ("f", "m"))
+    kinds = _POOL_KINDS.get(age) or tuple(dict.fromkeys(k for ks in _POOL_KINDS.values() for k in ks))
+    return [vid for vid in (f"pool-{g}-{k}" for g in genders for k in kinds) if vid in POOL]
+
+
+def pool_voice(c: dict) -> str:
+    """A character's generic voice: the LLM's pick while it still suits their gender and age, otherwise the plain
+    voice for them."""
+    if c.get("pool_pick") in pool_options(c):
+        return c["pool_pick"]
+    gender, age = _gender_age(c)
+    return f"pool-{'f' if gender == 'female' else 'm'}-{_POOL_PLAIN.get(age, 'adult')}"
+
+
+POOL_PROMPT = """You cast generic voices for the minor characters of a novel's audiobook. For each character, pick the voice that fits best from the ones listed for them, by gender and age and by how they speak: a "Strong" voice for someone forceful (loud, commanding, bold, brash, gruff, stern, boisterous), a "Soft" one for someone gentle (quiet, timid, meek, shy, soothing, frail, mild), and the plain voice when neither stands out. "Adult - Young" is someone in their early twenties. When the gender is not given, judge it from the name and description. Return every character exactly once."""
+POOL_BATCH = 40
+
+
+async def pick_pool_voices(llm, session, book: dict, script: dict, cids: list[str]) -> dict[str, str]:
+    """The LLM's best-fitting pool voice for each of `cids` (character id -> voice id), in batches."""
+    by_name = {name: vid for vid, (name, _) in POOL.items()}
+    picks: dict[str, str] = {}
+    for i in range(0, len(cids), POOL_BATCH):
+        batch = cids[i:i + POOL_BATCH]
+        rows = []
+        for cid in batch:
+            c = script["characters"][cid]
+            from .profile import effective
+
+            p = effective(c)
+            gender, age = _gender_age(c)
+            about = "; ".join(x for x in (
+                f"speaks: {p['speech_style'][:160]}" if p.get("speech_style") else "",
+                (p.get("notes") or "")[:160], (p.get("appearance") or c.get("description") or "")[:120]) if x)
+            rows.append(f"- {cid}: {c['name']} ({gender}, {age}). {about}\n  voices: "
+                        + ", ".join(POOL[v][0] for v in pool_options(c)))
+        schema = {"type": "object", "properties": {"characters": {
+            "type": "array", "minItems": len(batch), "maxItems": len(batch),
+            "items": {"type": "object", "properties": {
+                "id": {"type": "string", "enum": batch},
+                "voice": {"type": "string", "enum": list(by_name)}},
+                "required": ["id", "voice"]}}}, "required": ["characters"]}
+        user = f"Book: {book.get('title', '')}\n\nCharacters:\n" + "\n".join(rows)
+        result = await llm.complete(session, POOL_PROMPT, user, schema, max_tokens=256 + 40 * len(batch))
+        for a in result.get("characters", []):
+            vid, cid = by_name.get(a.get("voice")), a.get("id")
+            if cid in batch and cid not in picks and vid in pool_options(script["characters"][cid]):
+                picks[cid] = vid
+    return picks
 
 
 def follow_voice(c: dict, voices) -> bool:
@@ -2003,6 +3212,71 @@ async def sync_voice_descriptions(app: web.Application, voice_id: str) -> None:
             changed = [follow_voice(c, voices) for c in s["characters"].values() if c.get("voice") == voice_id]
             if any(changed):
                 store.save_script(book_id, s)
+
+
+def name_voices(app: web.Application) -> list[tuple[str, str]]:
+    """Voices designed for a character are named after them. A character first known by a description and
+    renamed later ("Dad", until the book says he is Gunther) leaves their voice under the old name: it takes the
+    character's name once no character it voices is called by its name any more (the same character may still
+    carry it in another book: "Lord Ortwin" there, "Ortwin" here, so the voice stays put rather than flip back
+    and forth). A name the reader gave the voice is not one of the character's names, so it is kept. Returns
+    (old, new) for each voice renamed."""
+    from collections import Counter
+
+    from .app import VOICES_KEY
+
+    store = app.get(DRAMA_STORE_KEY)
+    if store is None or VOICES_KEY not in app:
+        return []
+    users: dict[str, list[dict]] = {}
+    for book_id in store.ids():
+        for c in store.script(book_id).get("characters", {}).values():
+            vid = c.get("voice") or ""
+            if vid and not vid.startswith("pool-"):
+                users.setdefault(vid, []).append(c)
+    voices, renamed = app[VOICES_KEY], []
+    for vid, cs in users.items():
+        v = voices.get(vid)
+        if v is None or v.source != "character" or any(c.get("name") == v.name for c in cs):
+            continue
+        names = Counter(c["name"] for c in cs if c.get("name") and v.name in c.get("aliases", []))
+        if names:
+            new = max(names, key=lambda n: (names[n], n))
+            voices.update(vid, name=new)
+            renamed.append((v.name, new))
+    if renamed:
+        logger.info("voices named after their characters: %s", ", ".join(f"{a} -> {b}" for a, b in renamed))
+    return renamed
+
+
+def delete_unused_voices(app: web.Application) -> list[str]:
+    """Voices made for characters that nothing reaches any more (a character renamed, merged or dropped by a new
+    analysis; an earlier design replaced without a trace) are deleted, with their earlier versions. Kept: voices any
+    book's character uses, the series' memories, the default reader voice, the generic voices, and voices a book's
+    reports name (a character's past voices). Your own and imported voices are never deleted."""
+    from . import reports
+    from .app import CONFIG_KEY, VOICES_KEY
+    from .series import SERIES_KEY
+
+    store = app.get(DRAMA_STORE_KEY)
+    if store is None or VOICES_KEY not in app:
+        return []
+    keep = {app[CONFIG_KEY].default_voice} if CONFIG_KEY in app else set()
+    for book_id in store.ids():
+        keep |= {c.get("voice") for c in store.script(book_id).get("characters", {}).values()}
+        for r in reports.read(app, book_id):
+            for side in (r.get("before") or {}, r.get("after") or {}):
+                keep |= {side.get("voice"), side.get("id")}
+    if SERIES_KEY in app:
+        for data in app[SERIES_KEY].all():
+            keep |= {e.get("voice") for e in data.get("characters", {}).values()}
+    voices, deleted = app[VOICES_KEY], []
+    for v in voices.list():
+        if v.source == "character" and not is_pool(v.id) and v.id not in keep and voices.delete(v.id):
+            deleted.append(v.id)
+    if deleted:
+        logger.info("deleted %d voices nothing uses any more: %s", len(deleted), ", ".join(deleted))
+    return deleted
 
 
 def character_description(c: dict) -> str:
@@ -2120,10 +3394,10 @@ async def _cast(app, book_id, engine, s, own, voices, upgrade_roles, design, cre
             c["voice"] = v.id
             created.append(v.id)
         else:
-            g, a = pool_key(c.get("gender", "unknown"), c.get("age", "unknown"))
-            vid = f"pool-{g}-{a}".replace(" ", "")
+            vid = pool_voice(c)
             v = voices.get(vid) or await design(
-                app, engine, POOL[(g, a)], f"Pool: {g} {a}", source="character", voice_id=vid, seed=7,
+                app, engine, POOL[vid][1], f"Pool: {POOL[vid][0]}", source="character", voice_id=vid, seed=7,
+                tries=POOL_DESIGN_TRIES,
             )
             c["voice"] = v.id
     async with store.lock(book_id):
@@ -2158,7 +3432,8 @@ async def gpu_status(request: web.Request) -> web.Response:
         "mode": analyzer.llm.cfg.llm_mode,
         "activity": app[ACTIVITY_KEY].json() if ACTIVITY_KEY in app else None,
         "engines": app[ENGINES_KEY].status(),
-        "llm": {**analyzer.llm.info(), "book": book, "title": title},
+        # "backend": "remote" analysis runs on the inference server and never waits for this GPU.
+        "llm": {**analyzer.llm.info(), "backend": analyzer.llm.cfg.llm_backend, "book": book, "title": title},
     })
 
 
@@ -2228,17 +3503,25 @@ async def queue_delete(request: web.Request) -> web.Response:
 
 
 async def list_books(request: web.Request) -> web.Response:
+    from . import bookmark
+    from .permissions import can_book
+    from .profiles import current
     from .series import series_name as _series_name, volume_key
 
     store = request.app[DRAMA_STORE_KEY]
+    pid = current(request)
     books = []
     for book_id in store.ids():
         summary = store.summary(book_id) or {}
         s = store.script(book_id)
         public = ScriptStore.public(s)
+        place = bookmark.summary(request.app, book_id, store.book(book_id), pid) \
+            if pid and bookmark.path(request.app, book_id).exists() else None
         books.append({
             **summary,
             "id": book_id,
+            # Where the requesting user (their token) is in it: {chapter, title, percent, updated}.
+            **({"bookmark": place} if place else {}),
             "series": summary.get("series") or _series_name(summary.get("title", "")),
             "series_auto": not summary.get("series"),
             "volume": volume_key(summary.get("title", "")),
@@ -2251,6 +3534,7 @@ async def list_books(request: web.Request) -> web.Response:
             "cover": store.cover(book_id) is not None,
             "cover_v": cover_version(store, book_id),
             "updated": s.get("updated") or summary.get("uploaded", 0),
+            "can_edit": can_book(request, book_id),
         })
     books.sort(key=lambda b: -(b.get("updated") or 0))
     return web.json_response({"books": books})
@@ -2447,9 +3731,11 @@ async def upload_book(request: web.Request) -> web.Response:
     if not isinstance(body.get("chapters"), list):
         return web.json_response({"error": "chapters missing"}, status=400)
     store = request.app[DRAMA_STORE_KEY]
+    from .profiles import current
+
     try:
         old_book = store.book(book_id)
-        store.save_book(book_id, body)
+        store.save_book(book_id, body, added_by=current(request))
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     if old_book is not None:
@@ -2534,7 +3820,7 @@ async def get_script(request: web.Request) -> web.Response:
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     s = store.script(book_id)
-    if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != 1
+    if s.get("status") == "done" and ("narration" not in s or s.get("mentions_v") != MENTIONS_V
                                       or (s["characters"] and not any(c.get("role") for c in s["characters"].values()))
                                       or s.get("names_v") != 2 or s.get("voice_desc_v") != 1
                                       or s.get("profile_v") != 2):
@@ -2544,7 +3830,7 @@ async def get_script(request: web.Request) -> web.Response:
             if "narration" not in s:  # analysed before narration existed
                 reconcile_narrators(book, s)
                 refresh_narration(store, book_id, s)
-            if s.get("mentions_v") != 1:  # analysed before quoted terms were told apart from dialogue
+            if s.get("mentions_v") != MENTIONS_V:  # analysed before quoted terms were told apart from dialogue
                 n = mark_mentions(book, s)
                 logger.info("%s: %d quoted terms given back to the narration", book_id, n)
             if s.get("names_v") != 2:  # "a prisoner" -> "Prisoner"; "Urano" -> "Myne" (the name the book uses)
@@ -2565,7 +3851,21 @@ async def get_script(request: web.Request) -> web.Response:
 
                 roles.apply_rules(book, s)
             store.save_script(book_id, s)
-    return web.json_response(ScriptStore.public(s))
+    from .app import CONFIG_KEY, ENGINES_KEY, TUNING, default_tuning
+
+    cfg = request.app[CONFIG_KEY]
+    pub = ScriptStore.public(s)
+    defaults = default_tuning(cfg, cfg.default_engine, request.app[ENGINES_KEY].specs.get(cfg.default_engine))
+    # The per-line settings the speech model takes: the line dialog shows a slider for each.
+    pub["tuning"] = {name: {"default": d, "min": TUNING[name]["range"][0], "max": TUNING[name]["range"][1],
+                            "step": TUNING[name]["step"]} for name, d in defaults.items()}
+    # The approved delivery tags (the line dialog suggests them): tag -> what it covers.
+    pub["delivery_tags"] = {t: delivery_tags.APPROVED[delivery_tags.split(t)[1]][1] for t in delivery_tags.all_tags()}
+    pub["delivery_min_conf"] = delivery_tags.MIN_CONF
+    from .permissions import can_book
+
+    pub["can_edit"] = can_book(request, book_id)  # whether this user may change the book (else it's read-only)
+    return web.json_response(pub)
 
 
 async def analyze(request: web.Request) -> web.Response:
@@ -2588,28 +3888,130 @@ async def analyze(request: web.Request) -> web.Response:
 
 
 async def patch_line(request: web.Request) -> web.Response:
+    """{speaker?, delivery?, mention?, guidance?, temperature?}: the reader's fix of a line (a speaker id, or a
+    name for someone new; mention: not dialogue, read as part of the narration). Each speaker, delivery or mention
+    change is kept as a report of incorrect analysis (reports.py);
+    guidance and temperature (app.TUNING; null = the speech model's default) tune the speech only and are not
+    corrections."""
+    from . import reports
+    from .app import CONFIG_KEY, ENGINES_KEY, TUNING, line_tuning
+
     store = request.app[DRAMA_STORE_KEY]
     book_id, qid = request.match_info["book"], request.match_info["line"]
     body = await request.json()
+    detached: dict[str, list[str]] = {}
+    created = False
     async with store.lock(book_id):
         s = store.script(book_id)
-        fix = s["corrections"].setdefault(qid, {})
+        before = ScriptStore.public(s)["lines"].get(qid)
+        fix = s["corrections"].get(qid, {})
+        if "speaker" in body or "delivery" in body or "mention" in body:
+            fix = s["corrections"].setdefault(qid, {})
+        cfg = request.app[CONFIG_KEY]
+        spec = request.app[ENGINES_KEY].specs.get(cfg.default_engine)
+        tuned = line_tuning(cfg, cfg.default_engine, spec, body)
+        for name in TUNING:
+            if name in body:
+                per_line = s.setdefault(name, {})
+                if name in tuned:
+                    per_line[qid] = tuned[name]
+                else:
+                    per_line.pop(qid, None)  # null, or the default: forgotten
         if "speaker" in body:
             sp = body["speaker"]
             if sp and sp not in s["characters"]:
-                sp = ensure_character(s, str(sp), exact=True)  # typed by the reader: kept as typed
-                if sp in s["characters"] and s["characters"][sp]["name"] == " ".join(str(body["speaker"]).split()):
+                typed = " ".join(str(sp).split())
+                detached = detach_alias(s, typed)  # a new character, not the one this name was filed under
+                known = set(s["characters"])
+                sp = ensure_character(s, typed, exact=True)  # typed by the reader: kept as typed
+                created = sp not in known
+                if sp in s["characters"] and s["characters"][sp]["name"] == typed:
                     s["characters"][sp]["name_user"] = True
             fix["speaker"] = sp or None
         if "delivery" in body:
             fix["delivery"] = (body.get("delivery") or "").strip() or None
+        if "mention" in body:
+            # Not dialogue: the quotation is read in the flow of its sentence, by the narration (no speaker,
+            # no delivery); false makes it a line of its own again (the speaker the body gives, if any).
+            fix["mention"] = bool(body["mention"])
+            if fix["mention"]:
+                fix.update(speaker=None, delivery=None)
         if s.get("status") == "done":
             refresh_narration(store, book_id, s)
         store.save_script(book_id, s)
+        names = {cid: c["name"] for cid, c in s["characters"].items()}
+    if detached:
+        from .series import forget_aliases
+
+        forget_aliases(request.app, book_id, detached)
+    old = (before or {}).get("analysis") or before or {}
+    text = reports.quote_text(store.book(book_id), qid)
+    common = {"line": qid, "text": text, "before": before}
+    if "speaker" in body and (fix.get("speaker") != (before or {}).get("speaker") or before is None):
+        kind = "split_alias" if detached else "new_character" if created else "speaker"
+        reports.record(request.app, book_id, kind, **common,
+                       after={"speaker": fix.get("speaker"), "name": names.get(fix.get("speaker"), "NARRATOR")},
+                       analysis_speaker=names.get(old.get("speaker"), "NARRATOR") if old else None,
+                       detached=detached or None)
+    if "delivery" in body and fix.get("delivery") != (before or {}).get("delivery"):
+        reports.record(request.app, book_id, "delivery", **common, after={"delivery": fix.get("delivery")})
+    if "mention" in body and bool(fix.get("mention")) != bool((before or {}).get("mention")):
+        reports.record(request.app, book_id, "mention", **common, after={"mention": bool(fix.get("mention"))})
+    return web.json_response(ScriptStore.public(s))
+
+
+async def patch_narration(request: web.Request) -> web.Response:
+    """Who narrates a section, from a paragraph to the next point-of-view heading or chapter: {"chapter",
+    "paragraph", "narrator": a character id, null (the book's narrator voice) or "auto" (as the analysis has it)}.
+    Kept as a correction (narration_fixed) and as a report of incorrect analysis."""
+    from . import reports
+
+    store = request.app[DRAMA_STORE_KEY]
+    book_id = request.match_info["book"]
+    body = await request.json()
+    try:
+        ci, pi = int(body["chapter"]), int(body["paragraph"])
+    except (KeyError, TypeError, ValueError):
+        return web.json_response({"error": "chapter and paragraph are required"}, status=400)
+    who = body.get("narrator")
+    async with store.lock(book_id):
+        s = store.script(book_id)
+        book = store.book(book_id)
+        chapters = (book or {}).get("chapters", [])
+        if not (0 <= ci < len(chapters)) or not (0 <= pi < len(chapters[ci].get("paragraphs", []))):
+            return web.json_response({"error": "no such paragraph"}, status=400)
+        if who not in (None, "auto") and who not in s["characters"]:
+            return web.json_response({"error": "no such character"}, status=404)
+
+        def at(runs):
+            found = None
+            for c, p, w in runs:
+                if (c, p) > (ci, pi):
+                    break
+                found = w
+            return found
+
+        before = at(s.get("narration") or [])
+        fixed = s.setdefault("narration_fixed", {})
+        if who == "auto":
+            fixed.pop(f"{ci}:{pi}", None)
+        else:
+            fixed[f"{ci}:{pi}"] = who
+        s["narration"] = compute_narration(book, s)
+        after = at(s["narration"])
+        store.save_script(book_id, s)
+        names = {cid: c["name"] for cid, c in s["characters"].items()}
+    if after != before:
+        reports.record(request.app, book_id, "narration", chapter=ci, paragraph=pi,
+                       before={"narrator": before, "name": names.get(before, "NARRATOR")},
+                       after={"narrator": after, "name": names.get(after, "NARRATOR")})
     return web.json_response(ScriptStore.public(s))
 
 
 async def patch_character(request: web.Request) -> web.Response:
+    """Rename, voice, profile, aliases, role or merge_into; each kept as a report of incorrect analysis."""
+    from . import reports
+
     store = request.app[DRAMA_STORE_KEY]
     book_id, cid = request.match_info["book"], request.match_info["character"]
     body = await request.json()
@@ -2618,10 +4020,14 @@ async def patch_character(request: web.Request) -> web.Response:
         c = s["characters"].get(cid)
         if c is None:
             return web.json_response({"error": "no such character"}, status=404)
+        before = reports.character_view(c)
+        before_profile = dict(c.get("profile_user") or {})
+        changed = []
         if body.get("name") and body["name"] != c["name"]:
             c.setdefault("aliases", []).append(c["name"])
             c["name"] = body["name"]
             c["name_user"] = True  # typed by the reader: never re-cased
+            changed.append("name")
         if "voice" in body:
             from .app import VOICES_KEY
 
@@ -2629,21 +4035,34 @@ async def patch_character(request: web.Request) -> web.Response:
             c["voice"] = body["voice"] or None
             c["voice_user"] = bool(c["voice"])  # the reader's choice: a series applied later keeps it
             follow_voice(c, request.app[VOICES_KEY])
+            if c["voice"] != old_voice:
+                changed.append("voice")
         if isinstance(body.get("profile"), dict) or isinstance(body.get("dossier"), dict):
             from . import profile
 
             fields = body.get("profile") if isinstance(body.get("profile"), dict) else profile.from_dossier(body["dossier"])
             profile.set_user_fields(c, fields)
+            if (c.get("profile_user") or {}) != before_profile:
+                changed.append("profile")
         if isinstance(body.get("aliases"), list):
-            c["aliases"] = [a.strip() for a in body["aliases"] if isinstance(a, str) and a.strip()]
+            new = [a.strip() for a in body["aliases"] if isinstance(a, str) and a.strip()]
+            if new != c.get("aliases", []):
+                changed.append("aliases")
+            c["aliases"] = new
         if "role" in body:
             from .roles import set_user_role
 
+            old_role = c.get("role")
             set_user_role(c, body["role"])
+            if c.get("role") != old_role:
+                changed.append("role")
         c["user"] = True
+        after = reports.character_view(c)
         target = body.get("merge_into")
+        merged_into = None
         if target and target in s["characters"] and target != cid:
             t = s["characters"][target]
+            merged_into = t["name"]
             t.setdefault("aliases", []).extend([c["name"], *c.get("aliases", [])])
             for table in (s["lines"], s["corrections"]):
                 for line in table.values():
@@ -2653,11 +4072,22 @@ async def patch_character(request: web.Request) -> web.Response:
             if s.get("status") == "done":
                 refresh_narration(store, book_id, s)
         store.save_script(book_id, s)
+    for kind in changed:
+        reports.record(request.app, book_id, kind, character=cid, before=before, after=after,
+                       profile=c.get("profile_user") if kind == "profile" else None)
+    if merged_into:
+        reports.record(request.app, book_id, "merge", character=cid, before=before,
+                       after={"merged_into": target, "name": merged_into})
+    if "name" in changed or merged_into:  # a voice still named what the character was called before follows
+        name_voices(request.app)
     if "merge_into" not in body:
         from .series import propagate_voice, remember
 
-        if "voice" in body:  # the same character in the series' other volumes follows
-            await propagate_voice(request.app, book_id, cid, old_voice, body["voice"] or None)
+        if "voice" in body:  # the same character in the series' other volumes follows (in books this user may change)
+            from .permissions import can_book
+
+            await propagate_voice(request.app, book_id, cid, old_voice, body["voice"] or None,
+                                  may=lambda b: can_book(request, b))
         remember(request.app, book_id, only=cid)
     return web.json_response(ScriptStore.public(s))
 
@@ -2696,10 +4126,16 @@ async def voice_from_dossier(request: web.Request) -> web.Response:
             old_voice = s["characters"][cid].get("voice")
             s["characters"][cid].update(voice=v.id, description=description, user=True, voice_user=True)
         store.save_script(book_id, s)
+    from .permissions import can_book
     from .series import propagate_voice
 
-    await propagate_voice(request.app, book_id, cid, old_voice, v.id)
+    await propagate_voice(request.app, book_id, cid, old_voice, v.id, may=lambda b: can_book(request, b))
     remember(request.app, book_id, only=cid)
+    if old_voice and old_voice != v.id:  # kept as a report, so the old voice is one of their past voices
+        from . import reports
+
+        reports.record(request.app, book_id, "voice", character=cid, edit="designed from the profile",
+                       before={"voice": old_voice}, after={"voice": v.id})
     return web.json_response(ScriptStore.public(s))
 
 
@@ -2768,6 +4204,8 @@ def setup(app: web.Application) -> None:
 
     async def _ctx(app: web.Application):
         analyzer.start()
+        name_voices(app)  # voices left under a name their character has since lost
+        delete_unused_voices(app)
         # Resume analyses interrupted by a restart, in the queue's saved order (the one being analysed first).
         waiting = {}
         for d in store.root.iterdir() if store.root.exists() else []:
@@ -2810,6 +4248,7 @@ def setup(app: web.Application) -> None:
     r.add_get("/api/books/{book}/script", get_script)
     r.add_post("/api/books/{book}/analyze", analyze)
     r.add_patch("/api/books/{book}/lines/{line}", patch_line)
+    r.add_patch("/api/books/{book}/narration", patch_narration)
     r.add_patch("/api/books/{book}/characters/{character}", patch_character)
     r.add_post("/api/books/{book}/cast", cast)
     from .roles import classify_route

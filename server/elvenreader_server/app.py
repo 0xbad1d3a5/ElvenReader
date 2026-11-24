@@ -4,21 +4,21 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import html
 import io
 import json
 import logging
-import secrets
+import re
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import aiohttp
 from aiohttp import web
 
 from . import __version__
+from . import delivery as delivery_tags
 from .audio import FORMATS as AUDIO_FORMATS
-from .audio import EncodeError, SilenceTrimmer, time_stretch, wav_bytes
+from .audio import EncodeError, SilenceTrimmer, noise_gap_db, normalize, tighten, time_stretch, wav_bytes
 from .audio import encode as encode_audio
 from .cache import AudioCache, cache_key
 from .config import ServerConfig
@@ -27,15 +27,17 @@ from .engines.registry import ENGINES, EngineSpec
 from .netinfo import lan_addresses
 from .pronunciation import PHONEME_FORMATS, Entry, PronunciationStore, apply, entries_version
 from .text import (
+    MAX_CHUNK_CHARS,
     MAX_TEXT_CHARS,
     clamp_pause_ms,
     clamp_speed,
     clean_text,
+    engine_text,
     is_speakable,
     split_for_synthesis,
     trailing_pause_ms,
 )
-from .voices import VoiceStore
+from .voices import DESIGN_TEXT, VoiceStore  # noqa: F401 - DESIGN_TEXT is imported from here too
 
 logger = logging.getLogger("elvenreader")
 
@@ -45,6 +47,7 @@ VOICES_KEY = web.AppKey("voices", VoiceStore)
 PRON_KEY = web.AppKey("pronunciations", PronunciationStore)
 CACHE_KEY = web.AppKey("cache", AudioCache)
 EXTRA_KEY = web.AppKey("extra", dict)
+READERS_KEY = web.AppKey("readers", dict)  # reading page -> (the passage it is playing, when it said so)
 
 _PUBLIC_PATHS = {"/api/ping"}
 _LOOPBACK_ONLY_PATHS = {"/"}
@@ -66,11 +69,18 @@ async def auth_middleware(request: web.Request, handler):
         if request.remote not in _LOOPBACK:
             raise web.HTTPNotFound()
         return await handler(request)
-    expected = request.app[CONFIG_KEY].token
+    from .profiles import USER_KEY, for_token
+
     header = request.headers.get("Authorization", "")
     supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    if not supplied or not secrets.compare_digest(supplied.encode(), expected.encode()):
+    user = for_token(request.app, supplied)  # each user has a token of their own (profiles.py)
+    if user is None:
         return _json_error(401, "Missing or invalid token")
+    request[USER_KEY] = user
+    from .permissions import check
+
+    if (denied := check(request)) is not None:  # each user's own library; site-wide changes are the admin's
+        return denied
     response = await handler(request)
     # Voices, scripts and casts change under the same URLs: never let a browser reuse a stale answer.
     if isinstance(response, web.StreamResponse) and "Cache-Control" not in response.headers and not response.prepared:
@@ -153,16 +163,29 @@ def settings_json(app: web.Application) -> dict:
     default = store.default(cfg.default_voice)
     return {
         "speech_engine": cfg.default_engine,
+        "narration_engine": cfg.narration_engine,
         "voice_design_engine": cfg.voice_design_engine,
         "default_voice": default.id if default else "",
         "voices": [{"id": v.id, "name": v.name} for v in store.list() if v.source != "character"],
         "llm_mode": cfg.llm_mode,
+        # Which computer analyses books: "local" (this PC) or "remote" (the inference server, when one is set up).
+        "llm_backend": cfg.llm_backend,
+        "llm_local": {"label": "This PC", "model": Path(cfg.llm_model).stem if cfg.llm_model else ""},
+        "llm_remote": ({"label": cfg.llm_remote_label or urlparse(cfg.llm_remote_url).hostname or "Inference server",
+                        "model": cfg.llm_remote_model, "host": urlparse(cfg.llm_remote_url).netloc}
+                       if cfg.llm_remote_url and cfg.llm_remote_model else None),
         "idle_after_s": cfg.idle_after_s,
         "design_pause_s": cfg.design_pause_s,
         "activity": app[ACTIVITY_KEY].json(),
-        "engines": [{"id": e["id"], "label": e["label"], "voice_design": e["voice_design"], "stats": e["stats"]}
-                    for e in installed],
+        "engines": [{"id": e["id"], "label": e["label"], "voice_design": e["voice_design"], "stats": e["stats"],
+                     "vram_gb": e.get("vram_gb")} for e in installed],
         "status": manager.status(),
+        # The speech model's defaults for the per-line settings (the line dialog's sliders): {name: {value, model,
+        # min, max, step}}; `model` is the engine's own.
+        "tuning": {name: {"value": v, "model": float(spec.defaults.get(TUNING[name]["option"], TUNING[name]["fallback"])),
+                          "min": TUNING[name]["range"][0], "max": TUNING[name]["range"][1], "step": TUNING[name]["step"]}
+                   for spec in [manager.specs.get(cfg.default_engine)]
+                   for name, v in default_tuning(cfg, cfg.default_engine, spec).items()},
     }
 
 
@@ -183,14 +206,38 @@ async def settings_get(request: web.Request) -> web.Response:
 
 
 async def settings_put(request: web.Request) -> web.Response:
-    """{speech_engine?, voice_design_engine?, llm_mode?, default_voice?, idle_after_s?, design_pause_s?}. Changing
-    the speech model loads it (about a minute) in the background; GET shows when it's ready."""
+    """{speech_engine?, narration_engine?, voice_design_engine?, llm_mode?, default_voice?, idle_after_s?,
+    design_pause_s?, tuning?}. Changing the speech model (or the narration model: "" for none) loads it (about a
+    minute) in the background; GET shows when it's ready. `tuning`
+    ({"guidance": 2, "temperature": 1}) sets the speech model's defaults (engine_options); lines are made again
+    with them as they are played."""
     from .config import save_settings
 
     app = request.app
     body = await _json_body(request)
     manager = app[ENGINES_KEY]
     changes = {}
+    tuning = body.get("tuning")
+    if tuning is not None:
+        cfg = app[CONFIG_KEY]
+        spec = manager.specs.get(cfg.default_engine)
+        if not isinstance(tuning, dict) or spec is None:
+            return _json_error(400, "tuning must be {setting: number}")
+        options = cfg.engine_options.setdefault(cfg.default_engine, {})  # the same dict the engines were given
+        for name, v in tuning.items():
+            if name not in spec.tuning or isinstance(v, bool) or not isinstance(v, (int, float)):
+                return _json_error(400, f"{spec.label} has no setting {name!r}")
+            lo, hi = TUNING[name]["range"]
+            if not lo <= v <= hi:
+                return _json_error(400, f"{name} must be between {lo} and {hi}")
+            option = TUNING[name]["option"]
+            if round(float(v), 2) == float(spec.defaults.get(option, TUNING[name]["fallback"])):
+                options.pop(option, None)  # the model's own value
+            else:
+                options[option] = round(float(v), 2)
+        if not options:
+            cfg.engine_options.pop(cfg.default_engine, None)
+        changes["engine_options"] = cfg.engine_options
     design = _str(body, "voice_design_engine")
     if design:
         spec = manager.spec(design) if design in manager.specs else None
@@ -202,6 +249,13 @@ async def settings_put(request: web.Request) -> web.Response:
         if mode not in LLM_MODES:
             return _json_error(400, f"llm_mode must be one of {', '.join(LLM_MODES)}")
         changes["llm_mode"] = mode
+    backend = _str(body, "llm_backend")
+    if backend and backend != app[CONFIG_KEY].llm_backend:
+        if backend not in ("local", "remote"):
+            return _json_error(400, "llm_backend must be local or remote")
+        if backend == "remote" and not (app[CONFIG_KEY].llm_remote_url and app[CONFIG_KEY].llm_remote_model):
+            return _json_error(400, "No analysis server is set up (llm_remote_url and llm_remote_model in config.json)")
+        changes["llm_backend"] = backend
     voice = _str(body, "default_voice")
     if voice:
         v = app[VOICES_KEY].get(voice)
@@ -226,10 +280,24 @@ async def settings_put(request: web.Request) -> web.Response:
         spec = manager.specs.get(speech)
         if spec is None or not spec.installed(manager.models_dir):
             return _json_error(400, f"{speech} is not installed on the PC")
+    narration = body.get("narration_engine")
+    if narration is not None:
+        narration = str(narration).strip()
+        spec = manager.specs.get(narration) if narration else None
+        if narration and (spec is None or not spec.installed(manager.models_dir)):
+            return _json_error(400, f"{narration} is not installed on the PC")
+        if narration != app[CONFIG_KEY].narration_engine:
+            changes["narration_engine"] = narration
     if changes:
         save_settings(app[CONFIG_KEY], **changes)
         if "voice_design_engine" in changes:
             await manager.unload_designer()
+        if changes.get("llm_backend") == "remote":
+            # The local LLM gives the GPU back now; a step it was in the middle of is done again on the server.
+            from .dramatize import ANALYZER_KEY
+
+            if ANALYZER_KEY in app and app[ANALYZER_KEY].llm.proc is not None:
+                await app[ANALYZER_KEY].llm.preempt()
     if speech and speech != app[CONFIG_KEY].default_engine:
         save_settings(app[CONFIG_KEY], default_engine=speech)
         manager.resident = speech
@@ -241,6 +309,15 @@ async def settings_put(request: web.Request) -> web.Response:
                 logger.warning("could not load %s: %s", speech, exc.detail)
 
         app[EXTRA_KEY]["loading"] = asyncio.ensure_future(load())
+        await asyncio.sleep(0)
+    if "narration_engine" in changes or speech:
+        async def load_narration():
+            try:
+                await manager.preload_narration(app[CONFIG_KEY].narration_engine)
+            except EngineError as exc:
+                logger.warning("could not load the narration model: %s", exc.detail)
+
+        app[EXTRA_KEY]["loading_narration"] = asyncio.ensure_future(load_narration())
         await asyncio.sleep(0)
     return web.json_response(settings_json(app))
 
@@ -314,21 +391,40 @@ async def collect_audio(stream) -> tuple[int, bytes]:
     return rate, b"".join(parts)
 
 
-DESIGN_TEXT = (
-    "The old house stood at the end of the lane, and every evening the lamps came on one by one, "
-    "as if someone inside were still waiting for us to come home."
-)
+DESIGN_MIN_GAP_DB = 25.0  # Qwen3-TTS's designs measured 23-37 dB; VoxCPM2's 6-67 dB, by seed
+DESIGN_TRIES = 4
+
+
+async def design_clip(app: web.Application, engine: str, description: str, text: str,
+                      seed: int | None, tries: int = DESIGN_TRIES) -> tuple[int, bytes, int | None]:
+    """A designed clip without background hum: a design whose pauses sit less than DESIGN_MIN_GAP_DB under the
+    speech (noise_gap_db) is made again with the next seed, up to `tries` times, and the cleanest is kept.
+    Returns (rate, trimmed PCM, the seed it was made with)."""
+    best = None
+    for k in range(tries):
+        s = seed if k == 0 else (int(seed or 0) + 7919 * k) % 100000
+        rate, pcm = await collect_audio(app[ENGINES_KEY].design(engine, description, text, s))
+        if not pcm:
+            continue
+        pcm = SilenceTrimmer(rate).feed(pcm)
+        gap = noise_gap_db(pcm, rate)
+        if best is None or (gap if gap is not None else 99.0) > best[3]:
+            best = (rate, pcm, s, gap if gap is not None else 99.0)
+        if gap is None or gap >= DESIGN_MIN_GAP_DB:
+            break
+        logger.info("design of %r hums (pauses %.1f dB under the speech, seed %s); trying another seed",
+                    description[:60], gap, s)
+    if best is None:
+        raise EngineError("Voice design produced no audio")
+    return best[0], best[1], best[2]
 
 
 async def design_voice(app: web.Application, engine: str, description: str, name: str, *, text: str = "",
                        seed: int | None = None, source: str = "design", voice_id: str | None = None,
-                       language: str = "English"):
+                       language: str = "English", tries: int = DESIGN_TRIES):
     """Create a voice from a description and lock it to the generated clip."""
     text = text or DESIGN_TEXT
-    rate, pcm = await collect_audio(app[ENGINES_KEY].design(engine, description, text, seed))
-    if not pcm:
-        raise EngineError("Voice design produced no audio")
-    pcm = SilenceTrimmer(rate).feed(pcm)
+    rate, pcm, seed = await design_clip(app, engine, description, text, seed, tries)
     return app[VOICES_KEY].add(
         name, wav_bytes(pcm, rate), text, language=language, instruct=description, seed=seed,
         source=source, description=description, voice_id=voice_id,
@@ -367,28 +463,100 @@ def _series_of(app: web.Application, book: str | None) -> str:
         return ""
 
 
+def book_users(app: web.Application, book: str | None) -> list[str]:
+    """Whose user-wide pronunciations a book is read with: the users whose library has it."""
+    if not book:
+        return []
+    from .permissions import book_users as users
+
+    return users(app, book)
+
+
+def pronunciations_for(app: web.Application, book: str | None) -> list[Entry]:
+    """The entries a book is read with: its users', its series' and its own."""
+    return app[PRON_KEY].for_book(book, _series_of(app, book) or None, book_users(app, book))
+
+
+def _all_pronunciations(request: web.Request) -> dict:
+    """Every entry this user deals with (the Pronunciations page): their own user-wide ones, and those of the series
+    and books in their library; the admin's, all of them. Each with `can_edit`; with the users' names and the books'
+    titles, series and users (whose user-wide entries they're read with), and `series`: the series of those books, each with whether this user may change its entries."""
+    from .dramatize import DRAMA_STORE_KEY
+    from .permissions import can_book, can_series, is_admin
+    from .profiles import all_users, current
+    from .pronunciation import series_key
+
+    app, me, admin = request.app, current(request), is_admin(request)
+    store = app[DRAMA_STORE_KEY]
+    books = [b for b in store.ids() if admin or can_book(request, b)]
+    info = {b: {"title": (store.summary(b) or {}).get("title", b), "series": _series_of(app, b),
+                "users": book_users(app, b)} for b in books}
+    names = sorted({i["series"] for i in info.values() if i["series"]}, key=str.casefold)
+    keys = {series_key(n) for n in names}
+    entries = [e for e in app[PRON_KEY].all()
+               if admin or (e.book and e.book in info) or (not e.book and e.series and series_key(e.series) in keys)
+               or (not e.book and not e.series and e.user == me)]
+    return {
+        "entries": [{**e.to_json(), "can_edit": _may_pronounce(request, e.book, e.series, e.user)} for e in entries],
+        "users": {u["id"]: u["name"] for u in all_users(app)},
+        "books": info,
+        "series": [{"name": n, "can_edit": can_series(request, n)} for n in names],
+    }
+
+
 async def pronunciations(request: web.Request) -> web.Response:
-    """?book= (that book's entries, its series' and the global ones) or ?series= (a series' and global)."""
+    """?book= (that book's entries, its series' and its users') or ?series= (a series' and the requesting user's).
+    `users`: whose user-wide entries are listed. ?all=1: everything for the Pronunciations page."""
+    from .profiles import current
+
+    if request.query.get("all"):
+        return web.json_response(_all_pronunciations(request))
     book = request.query.get("book") or None
     series = request.query.get("series") or _series_of(request.app, book)
-    return web.json_response(request.app[PRON_KEY].listing(book, series or None))
+    users = book_users(request.app, book) if book else [u for u in [current(request)] if u]
+    return web.json_response({**request.app[PRON_KEY].listing(book, series or None, users), "users": users})
+
+
+def _may_pronounce(request: web.Request, book: str | None, series: str | None, user: str | None) -> bool:
+    """Pronunciations of a book are for those who added it; of a series, for those who added all its books; a
+    user's, for that user (and the admin for all of them, permissions.py)."""
+    from .permissions import can_book, can_series, is_admin
+    from .profiles import current
+
+    if book:
+        return can_book(request, book)
+    if series:
+        return can_series(request, series)
+    return bool(user) and (user == current(request) or is_admin(request))
+
+
+def _entry(request: web.Request):
+    return next((e for e in request.app[PRON_KEY].all() if e.id == request.match_info["entry"]), None)
 
 
 async def pronunciation_add(request: web.Request) -> web.Response:
-    """{term, respelling?, phonemes?, case_sensitive?, scope: "book"|"series"|"global", book?, series?}.
-    scope "series" with a book means that book's series."""
+    """{term, respelling?, phonemes?, case_sensitive?, scope: "series"|"book"|"user", book?, series?}.
+    scope "series" with a book means that book's series (the default); "user" is every book of the requesting
+    user's library."""
+    from .profiles import current
+
     body = await _json_body(request)
-    scope = _str(body, "scope") or ("book" if _str(body, "book") else "series" if _str(body, "series") else "global")
+    scope = _str(body, "scope") or "series"
+    if scope not in ("series", "book", "user"):
+        return _json_error(400, "A pronunciation is for a series, a book or all your books")
+    user = current(request) if scope == "user" else None
     book = _str(body, "book") if scope == "book" else ""
     series = (_str(body, "series") or _series_of(request.app, _str(body, "book"))) if scope == "series" else ""
     if scope == "book" and not book:
         return _json_error(400, "Say which book")
     if scope == "series" and not series:
         return _json_error(400, "Say which series (or a book of it)")
+    if not _may_pronounce(request, book or None, series or None, user):
+        return _json_error(403, "Only for your own books (a series: when all its books are yours)")
     try:
         entry = request.app[PRON_KEY].add(
             _str(body, "term"), _str(body, "respelling"), phonemes=_str(body, "phonemes"),
-            case_sensitive=bool(body.get("case_sensitive")), book=book or None, series=series or None,
+            case_sensitive=bool(body.get("case_sensitive")), book=book or None, series=series or None, user=user,
         )
     except ValueError as exc:
         return _json_error(400, str(exc))
@@ -397,6 +565,11 @@ async def pronunciation_add(request: web.Request) -> web.Response:
 
 async def pronunciation_update(request: web.Request) -> web.Response:
     body = await _json_body(request)
+    old = _entry(request)
+    if old is None:
+        return _json_error(404, "No such entry")
+    if not _may_pronounce(request, old.book, old.series, old.user):
+        return _json_error(403, "That pronunciation isn't yours to change")
     entry = request.app[PRON_KEY].update(request.match_info["entry"], **body)
     if entry is None:
         return _json_error(404, "No such entry")
@@ -404,6 +577,9 @@ async def pronunciation_update(request: web.Request) -> web.Response:
 
 
 async def pronunciation_delete(request: web.Request) -> web.Response:
+    old = _entry(request)
+    if old is not None and not _may_pronounce(request, old.book, old.series, old.user):
+        return _json_error(403, "That pronunciation isn't yours to change")
     if not request.app[PRON_KEY].delete(request.match_info["entry"]):
         return _json_error(404, "No such entry")
     return web.json_response({"deleted": True})
@@ -434,20 +610,83 @@ def _extra_entries(body: dict) -> list[Entry]:
     return out
 
 
+def chunk_limit(spec: EngineSpec) -> int:
+    return spec.max_chunk_chars or MAX_CHUNK_CHARS
+
+
+# Per-line settings a speech engine can take (EngineSpec.tuning): the engine option each sets, its range, and the
+# value when the engine's options don't say.
+TUNING = {
+    "guidance": {"option": "cfg_value", "range": (1.0, 4.0), "step": 0.25, "fallback": 2.0},
+    # 0.6 made one of Kirito's lines silent (another seed: -35 dB); 0.75-1.25 said every word, quieter and a
+    # little clearer below 1, louder and breathier above.
+    "temperature": {"option": "temperature", "range": (0.7, 1.3), "step": 0.05, "fallback": 1.0},
+}
+
+
+def default_tuning(cfg: ServerConfig, engine_id: str, spec: EngineSpec | None) -> dict[str, float]:
+    """{setting: the engine's own value} for the per-line settings the engine takes."""
+    if spec is None:
+        return {}
+    options = {**spec.defaults, **cfg.engine_options.get(engine_id, {})}
+    return {name: float(options.get(TUNING[name]["option"], TUNING[name]["fallback"]))
+            for name in spec.tuning if name in TUNING}
+
+
+def line_tuning(cfg: ServerConfig, engine_id: str, spec: EngineSpec | None, values: dict) -> dict[str, float]:
+    """A line's own settings from `values` ({setting: number}), kept to their range; settings the engine doesn't
+    take, and ones equal to the engine's default (the same clip as without), are left out."""
+    out = {}
+    for name, default in default_tuning(cfg, engine_id, spec).items():
+        v = values.get(name)
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        lo, hi = TUNING[name]["range"]
+        v = round(min(hi, max(lo, float(v))), 2)
+        if v != default:
+            out[name] = v
+    return out
+
+
+def synthesis_key(cfg: ServerConfig, engine_id: str, spec: EngineSpec, voice, text: str, language: str | None,
+                  delivery: str | None, seed: int | None, tuning: dict | None = None) -> str:
+    """The audio cache key of an utterance (`text` is final: cleaned, pronunciations applied)."""
+    options = {**spec.defaults, **cfg.engine_options.get(engine_id, {})}
+    # Text longer than the default limit is made in pieces of the engine's own size; that is part of the sound
+    # (each piece starts its delivery afresh), so only those lines get a new key when the size changes.
+    split = {"split": chunk_limit(spec)} if len(text) > MAX_CHUNK_CHARS and chunk_limit(spec) != MAX_CHUNK_CHARS else {}
+    if spec.brackets_as_asides and ("(" in text or ")" in text):
+        split["brackets"] = "asides"
+    split.update(tuning or {})  # only lines given their own settings get another key
+    if delivery and spec.styles_version:
+        split["styles"] = spec.styles_version
+    reread = sorted(name for name, pattern in spec.reread.items() if re.search(pattern, text))
+    if reread:
+        split["reread"] = ",".join(reread)
+    return cache_key(
+        engine=engine_id, options=options, voice=voice.fingerprint, language=language,
+        # v3: clips made after a voice was edited in place could still have the old voice (engines cached
+        # its reference by path); everything is made again.
+        delivery=delivery, seed=seed, text=text, trim=cfg.trim_silence, v=3, **split,
+    )
+
+
+def engine_for(cfg: ServerConfig, specs: dict, models_dir, narration: bool) -> str:
+    """The speech model a passage is read with: the narration model (Settings) for narration, in whatever voice
+    reads it (the book's narrator, or a character narrating in the first person); the speech model for every
+    quotation, which follows its delivery (VoxCPM2: "(shouting, urgent)")."""
+    engine = cfg.narration_engine
+    if narration and engine and engine != cfg.default_engine and engine in specs and specs[engine].installed(models_dir):
+        return engine
+    return cfg.default_engine
+
+
 class SynthesisPlan:
     """Everything decided before synthesis: engine, voice, final text and cache key."""
 
     def __init__(self, app: web.Application, body: dict, text: str):
         cfg = app[CONFIG_KEY]
         manager = app[ENGINES_KEY]
-        # One speech model for the whole site (Settings); a request can't swap it for another.
-        self.engine_id = cfg.default_engine
-        asked = _str(body, "engine")
-        if asked and asked != self.engine_id:
-            raise EngineError(f"The site reads with {self.engine_id}; change the speech model in Settings", 409)
-        self.spec: EngineSpec = manager.spec(self.engine_id)
-        if not self.spec.installed(manager.models_dir):
-            raise EngineError(f"{self.spec.label} is not installed on the PC", 503)
         store = app[VOICES_KEY]
         requested = _str(body, "voice")
         self.voice = store.get(requested) if requested else None
@@ -455,13 +694,24 @@ class SynthesisPlan:
             self.voice = store.default(cfg.default_voice)
         if self.voice is None:
             raise EngineError("No voices on the PC yet. Import or upload one first.", 503)
+        # The site's speech models (Settings): the speech model, and the narration model for narration
+        # ({"kind": "narration"}: the reading page and the book file say which passages are); a request can't swap
+        # them for another.
+        self.engine_id = engine_for(cfg, manager.specs, manager.models_dir, _str(body, "kind") == "narration")
+        asked = _str(body, "engine")
+        if asked and asked not in (cfg.default_engine, cfg.narration_engine):
+            raise EngineError(f"The site reads with {cfg.default_engine}; change the speech model in Settings", 409)
+        self.spec: EngineSpec = manager.spec(self.engine_id)
+        if not self.spec.installed(manager.models_dir):
+            raise EngineError(f"{self.spec.label} is not installed on the PC", 503)
         book = _str(body, "book") or None
-        entries = app[PRON_KEY].for_book(book, _series_of(app, book) or None)
+        entries = pronunciations_for(app, book)
         extra = _extra_entries(body)
         if extra:
             keys = {e.key() for e in extra}
             entries = [e for e in entries if e.key() not in keys] + extra
         self.pron_version = entries_version(entries)
+        text = engine_text(self.spec, text)
         self.text = apply(text, entries, PHONEME_FORMATS.get(self.spec.phonemes))
         self.language = _str(body, "language") or None
         self.delivery = _str(body, "delivery") or None
@@ -469,22 +719,46 @@ class SynthesisPlan:
             self.delivery = None
         seed = body.get("seed")
         self.seed = int(seed) if isinstance(seed, (int, float)) else self.voice.seed
-        options = {**self.spec.defaults, **cfg.engine_options.get(self.engine_id, {})}
-        self.key = cache_key(
-            engine=self.engine_id, options=options, voice=self.voice.fingerprint, language=self.language,
-            # v3: clips made after a voice was edited in place could still have the old voice (engines cached
-            # its reference by path); everything is made again.
-            delivery=self.delivery, seed=self.seed, text=self.text, trim=cfg.trim_silence, v=3,
-        )
+        self.tuning = line_tuning(cfg, self.engine_id, self.spec, body)
+        self.effective_tuning = {**default_tuning(cfg, self.engine_id, self.spec), **self.tuning}
+        self.key = synthesis_key(cfg, self.engine_id, self.spec, self.voice, self.text, self.language,
+                                 self.delivery, self.seed, self.tuning)
 
-    def worker_payload(self, text: str) -> dict:
+    def worker_payload(self, text: str, whole: bool = False) -> dict:
         return {
             "text": text,
             "voice": self.voice.worker_spec(),
             "language": self.language,
             "seed": self.seed,
             "delivery": self.delivery,
+            # The settings as they apply to this line (the site's defaults, or the line's own): the engine read its
+            # options when it loaded, before a default may have changed in Settings.
+            **self.effective_tuning,
+            # The client takes the line whole (compressed): the engine may make it whole and check it first.
+            "whole": whole,
         }
+
+
+def _urgency(app: web.Application, body: dict):
+    """How soon this passage is needed, for the order the PC makes speech in (engines.manager.RankedLock). A
+    reading page sends {reader, seq, playing}: the rank is how many passages after the one it plays now this one is,
+    and it says where it plays with every request, so its waiting passages get more urgent as it moves on. Two people
+    reading then get their next passages in turn, before either one's read-ahead. Without them (a sample, a word) it
+    is wanted now: rank 0."""
+    reader = _str(body, "reader")
+    try:
+        seq, playing = int(body["seq"]), int(body["playing"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not reader:
+        return None
+    readers = app[READERS_KEY]
+    now = time.monotonic()
+    readers[reader] = (playing, now)
+    if len(readers) > 200:  # pages long gone
+        for r in [r for r, (_, t) in readers.items() if now - t > 3600]:
+            readers.pop(r, None)
+    return lambda: seq - readers.get(reader, (playing, now))[0]
 
 
 async def tts(request: web.Request) -> web.StreamResponse:
@@ -503,6 +777,7 @@ async def tts(request: web.Request) -> web.StreamResponse:
     from .activity import ACTIVITY_KEY
 
     app[ACTIVITY_KEY].touch()  # someone is reading or listening
+    rank = _urgency(app, body)  # also notes where the reader is, cached passage or not
     text = clean_text(str(body.get("text") or ""))
     if len(text) > MAX_TEXT_CHARS:
         return _json_error(413, f"Text longer than {MAX_TEXT_CHARS} characters")
@@ -536,13 +811,35 @@ async def tts(request: web.Request) -> web.StreamResponse:
                 logger.warning("sending PCM: %s", exc)
         return web.Response(body=pcm, headers=_audio_headers(rate, **headers))
 
+    book_id = _str(body, "book")
+
+    def finish(pcm: bytes, rate: int) -> bytes:
+        """A whole clip as it is kept and served: no dead air, and at the common loudness."""
+        if cfg.trim_silence:
+            pcm = tighten(pcm, rate)
+        if cfg.level_speech:
+            pcm = normalize(pcm, rate, plan.delivery)
+        return pcm
+
     cached = app[CACHE_KEY].get(plan.key) if use_cache else None
+    source = "hit"
+    if cached is None and use_cache and book_id:
+        from .bookfile import stored_clip
+
+        # The cache keeps a few GB; every clip made for a book is also kept in its book file.
+        cached = await asyncio.to_thread(stored_clip, app, book_id, plan.key)
+        if cached is not None:
+            app[CACHE_KEY].put(plan.key, *cached)
+            source = "file"
     if cached is not None:
         rate, pcm = cached
+        pcm = finish(pcm, rate)  # clips cached before trimming and levelling existed
         pcm = time_stretch(pcm, rate, speed) + bytes(int(rate * pause_ms / 1000) * 2)
-        return await encoded(pcm, rate, "hit")
+        return await encoded(pcm, rate, source)
 
     manager = app[ENGINES_KEY]
+    if _str(body, "reader"):  # someone is listening to speech that has to be made: they count as a reader
+        app[ACTIVITY_KEY].making(_str(body, "reader"))
     t0 = time.perf_counter()
     first_audio: float | None = None
     resp: web.StreamResponse | None = None  # streaming PCM; compressed audio is sent whole at the end
@@ -565,8 +862,8 @@ async def tts(request: web.Request) -> web.StreamResponse:
             out.extend(data)
 
     try:
-        for piece in split_for_synthesis(plan.text):
-            stream = manager.synthesize(plan.engine_id, plan.worker_payload(piece))
+        for piece in split_for_synthesis(plan.text, chunk_limit(plan.spec)):
+            stream = manager.synthesize(plan.engine_id, plan.worker_payload(piece, whole=bool(fmt)), rank=rank)
             piece_pcm = bytearray()
             async with contextlib.aclosing(stream):
                 async for ev in stream:
@@ -613,7 +910,12 @@ async def tts(request: web.Request) -> web.StreamResponse:
         raise
 
     if complete and full and use_cache:
+        full = bytearray(finish(bytes(full), rate))
         app[CACHE_KEY].put(plan.key, rate, bytes(full))
+        if book_id:
+            from .bookfile import mark_dirty
+
+            mark_dirty(app, book_id)
     silence = bytes(int(rate * pause_ms / 1000) * 2) if sent and pause_ms else b""
     audio_s = len(full) / 2 / rate
     total = time.perf_counter() - t0
@@ -624,7 +926,8 @@ async def tts(request: web.Request) -> web.StreamResponse:
         total / audio_s if audio_s else 0, f", sent as {fmt}" if fmt else "",
     )
     if resp is None:
-        return await encoded(bytes(out) + silence, rate, "miss")
+        body = finish(bytes(out), rate)  # whole-utterance answers: no dead air, at the common loudness
+        return await encoded(body + silence, rate, "miss")
     if silence:
         await resp.write(silence)
     await resp.write_eof()
@@ -660,29 +963,9 @@ def viewer_url(base: str, token: str) -> str:
 
 
 async def index(request: web.Request) -> web.Response:
-    """Loopback-only page with links and QR codes to open the viewer on other devices (they contain the token)."""
-    cfg = request.app[CONFIG_KEY]
-    urls = server_urls(cfg.port, cfg.extra_urls)
-    parts = [
-        "<!doctype html><html><head><title>ElvenReader server</title>"
-        "<style>body{font-family:sans-serif;margin:2em}.card{display:inline-block;margin:1em;"
-        "padding:1em;border:1px solid #ccc;border-radius:.5em;vertical-align:top}</style></head><body>",
-        "<h2>ElvenReader server</h2>",
-        "<p><a href=\"/books\">Open the library</a> on this PC.</p>",
-    ]
-    if not urls:
-        parts.append("<p><b>No network address found.</b> Is this PC connected to a network?</p>")
-    else:
-        parts.append("<h3>Open it on another device</h3><p>Scan or open one of these links on a computer, "
-                     "tablet or phone on the same network (or your VPN; add its address with <code>extra_urls</code> "
-                     "in config.json). The token travels in the link's <code>#</code> part, which the browser keeps "
-                     "to itself and remembers.</p>")
-        for base in urls:
-            link = viewer_url(base, cfg.token)
-            parts.append(f"<div class=card><h3><a href=\"{html.escape(link)}\">{html.escape(base)}/books</a></h3>"
-                         f"{_qr_svg(link)}</div>")
-    parts.append(f"<p>Token: <code>{html.escape(cfg.token)}</code></p></body></html>")
-    return web.Response(text="".join(parts), content_type="text/html")
+    """The PC's start page: the Users page, where each user's link and QR code open the library on their devices."""
+    raise web.HTTPFound("/books/users")
+
 
 def viewer_version() -> str:
     """When viewer.html last changed: open pages compare it with their own to notice the site was updated."""
@@ -720,6 +1003,7 @@ def make_app(
     data = cfg.data_path
     app = web.Application(middlewares=[auth_middleware], client_max_size=20 * 1024 * 1024)
     app[CONFIG_KEY] = cfg
+    app[READERS_KEY] = {}
     app[ENGINES_KEY] = manager or EngineManager(
         specs or ENGINES,
         cfg.models_path,
@@ -727,8 +1011,11 @@ def make_app(
         load_timeout_s=cfg.load_timeout_s,
         synth_timeout_s=cfg.synth_timeout_s,
         designer_idle_s=cfg.designer_idle_s,
+        park_speech=cfg.park_speech_model,
+        load_times_path=cfg.data_path / "load-times.json",
     )
     app[ENGINES_KEY].resident = app[ENGINES_KEY].resident or cfg.default_engine
+    app[ENGINES_KEY].narration = cfg.narration_engine or None
     from .activity import ACTIVITY_KEY, Activity
 
     app[ACTIVITY_KEY] = Activity(cfg.idle_after_s, cfg.design_pause_s)
@@ -745,6 +1032,11 @@ def make_app(
                     await app[ENGINES_KEY].preload(cfg.default_engine)
                 except EngineError as exc:
                     logger.warning("could not preload %s: %s", cfg.default_engine, exc.detail)
+                if cfg.narration_engine:
+                    try:
+                        await app[ENGINES_KEY].preload_narration(cfg.narration_engine)
+                    except EngineError as exc:
+                        logger.warning("could not preload %s: %s", cfg.narration_engine, exc.detail)
             task = asyncio.ensure_future(_preload())
         yield
         if task is not None:
@@ -756,6 +1048,8 @@ def make_app(
     r.add_get("/", index)
     r.add_get("/books", viewer_page)
     r.add_get("/books/{book}", viewer_page)
+    r.add_get("/books/{book}/settings", viewer_page)
+    r.add_get("/books/{book}/characters/{character}", viewer_page)
     r.add_get("/api/ping", ping)
     r.add_get("/api/health", health)
     r.add_get("/api/engines", engines)

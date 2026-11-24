@@ -18,6 +18,12 @@ from pathlib import Path
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# What every designed voice says: a voice whose clip says anything else is a real recording (uploaded or imported).
+DESIGN_TEXT = (
+    "The old house stood at the end of the lane, and every evening the lamps came on one by one, "
+    "as if someone inside were still waiting for us to come home."
+)
+
 
 @dataclass
 class Voice:
@@ -33,6 +39,7 @@ class Voice:
     description: str = ""
     created: float = field(default_factory=time.time)
     audio_sha: str = ""
+    recorded: bool = False  # set when a real recording is uploaded as the voice's reference
     # Set by the store, not persisted.
     wav_path: Path | None = field(default=None, compare=False)
 
@@ -40,6 +47,12 @@ class Voice:
         d = asdict(self)
         d.pop("wav_path", None)
         return d
+
+    @property
+    def is_recording(self) -> bool:
+        """A real recording, not a design: uploaded as one (`recorded`), or a clip that doesn't say DESIGN_TEXT, which
+        every design says (voices from before the flag, imported ones)."""
+        return self.recorded or " ".join(self.ref_text.split()) != DESIGN_TEXT
 
     def public(self) -> dict:
         return {
@@ -49,6 +62,7 @@ class Voice:
             "description": self.description or self.instruct or None,
             "source": self.source,
             "stable": True,
+            "recorded": self.is_recording,
         }
 
     def details(self) -> dict:
@@ -61,6 +75,7 @@ class Voice:
             "seed": self.seed,
             "created": self.created,
             "version": self.fingerprint,
+            "recorded": self.is_recording,
         }
 
     def worker_spec(self) -> dict:
@@ -164,6 +179,7 @@ class VoiceStore:
         source: str = "upload",
         description: str = "",
         voice_id: str | None = None,
+        recorded: bool | None = None,
     ) -> Voice:
         voice_id = voice_id or secrets.token_hex(4)
         if not _ID_RE.match(voice_id):
@@ -185,6 +201,7 @@ class VoiceStore:
             source=source,
             description=description,
             audio_sha=_sha_file(dest),
+            recorded=source == "upload" if recorded is None else recorded,  # a voice made from your own clip
         )
         voice.wav_path = dest
         self._save(voice)
@@ -209,31 +226,41 @@ class VoiceStore:
             old.with_suffix(".wav").unlink(missing_ok=True)
 
     def history(self, voice_id: str) -> list[dict]:
-        """Earlier versions, newest first."""
+        """Earlier versions, newest first (`stamp` names one: history_wav, restore)."""
         out = []
         for p in sorted(self._history_dir(voice_id).glob("*.json"), reverse=True):
             try:
                 raw = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            out.append({"saved": int(p.stem) / 1e9, "name": raw.get("name", ""),
-                        "description": raw.get("description") or raw.get("instruct") or ""})
+            out.append({"stamp": p.stem, "saved": int(p.stem) / 1e9, "name": raw.get("name", ""),
+                        "description": raw.get("description") or raw.get("instruct") or "",
+                        "audio": (raw.get("audio_sha") or "")[:12]})
         return out
 
-    def revert(self, voice_id: str) -> Voice | None:
-        """Go back to the previous version (the current one is dropped)."""
-        snaps = sorted(self._history_dir(voice_id).glob("*.json"))
-        if not snaps or self.get(voice_id) is None:
+    def history_wav(self, voice_id: str, stamp: str) -> Path | None:
+        """An earlier version's reference audio."""
+        if not stamp.isdigit() or not _ID_RE.match(voice_id):
             return None
-        snap = snaps[-1]
-        shutil.copyfile(snap.with_suffix(".wav"), self.root / f"{voice_id}.wav")
-        shutil.copyfile(snap, self.root / f"{voice_id}.json")
-        snap.unlink()
-        snap.with_suffix(".wav").unlink(missing_ok=True)
-        voice = self.get(voice_id)
-        voice.audio_sha = _sha_file(voice.wav_path)
-        self._save(voice)
-        return voice
+        p = self._history_dir(voice_id) / f"{stamp}.wav"
+        return p if p.exists() else None
+
+    def restore(self, voice_id: str, stamp: str) -> Voice | None:
+        """Bring back an earlier version; the current one is kept as a version too (so this can be undone)."""
+        voice, wav = self.get(voice_id), self.history_wav(voice_id, stamp)
+        if voice is None or wav is None:
+            return None
+        raw = json.loads(wav.with_suffix(".json").read_text(encoding="utf-8"))
+        audio = wav.read_bytes()  # read first: keeping the current version may prune the oldest ones
+        self._snapshot(voice)
+        known = set(Voice.__dataclass_fields__) - {"wav_path"}
+        old = Voice(**{k: val for k, val in raw.items() if k in known})
+        old.id = voice_id
+        voice.wav_path.write_bytes(audio)
+        old.wav_path = voice.wav_path
+        old.audio_sha = _sha_file(voice.wav_path)
+        self._save(old)
+        return old
 
     def update(self, voice_id: str, **changes) -> Voice | None:
         voice = self.get(voice_id)
@@ -260,8 +287,9 @@ class VoiceStore:
         self._save(new)
         return new
 
-    def replace_audio(self, voice_id: str, wav: bytes, ref_text: str, **meta) -> Voice | None:
-        """New reference audio (and its transcript); `meta` may set instruct, description, seed, language."""
+    def replace_audio(self, voice_id: str, wav: bytes, ref_text: str, recorded: bool = False, **meta) -> Voice | None:
+        """New reference audio (and its transcript); `meta` may set instruct, description, seed, language.
+        `recorded`: a real recording you uploaded (a design's audio isn't)."""
         voice = self.get(voice_id)
         if voice is None:
             return None
@@ -271,6 +299,7 @@ class VoiceStore:
         voice.wav_path.write_bytes(wav)
         voice.audio_sha = _sha_file(voice.wav_path)
         voice.ref_text = ref_text.strip()
+        voice.recorded = recorded
         for key in ("instruct", "description", "language"):
             if isinstance(meta.get(key), str):
                 setattr(voice, key, meta[key].strip())
@@ -286,6 +315,7 @@ class VoiceStore:
         return self.add(
             name or f"{voice.name} (copy)", voice.wav_path, voice.ref_text, language=voice.language,
             instruct=voice.instruct, seed=voice.seed, source=voice.source, description=voice.description,
+            recorded=voice.recorded,
         )
 
     def delete(self, voice_id: str) -> bool:
